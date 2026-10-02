@@ -64,7 +64,7 @@ def default_action(accelerator_name: str) -> float:
 def build_accelerator(
     args: argparse.Namespace,
     *,
-    optimise_quadrupoles: bool,
+    errors: dict[str, set[str]] | None = None,
 ):
     kinetic_energy = args.beam_energy
     if kinetic_energy is None:
@@ -75,12 +75,12 @@ def build_accelerator(
             beam=args.beam,
             sequence_file=args.sequence_file,
             kinetic_energy=kinetic_energy,
-            optimise_quadrupoles=optimise_quadrupoles,
+            errors=errors,
         )
     return SPS(
         sequence_file=args.sequence_file,
         kinetic_energy=kinetic_energy,
-        optimise_quadrupoles=optimise_quadrupoles,
+        errors=errors,
     )
 
 
@@ -93,7 +93,7 @@ def main() -> None:
 
     action = args.action if args.action is not None else default_action(args.accelerator)
 
-    base_accelerator = build_accelerator(args, optimise_quadrupoles=False)
+    base_accelerator = build_accelerator(args)
     base_interface = AbaMadInterface(accelerator=base_accelerator)
 
     track_path = args.output_dir / "xsuite_track.parquet"

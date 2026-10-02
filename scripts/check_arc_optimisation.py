@@ -579,11 +579,7 @@ def main():
         beam=args.beam,
         beam_energy=beam_energy,
         sequence_file=sequence_file,
-        optimise_quadrupoles=True,
-        optimise_bends=True,
-        optimise_other_quadrupoles=True,
-        optimise_correctors=True,
-        optimise_quad_dx=False,
+        errors={"quad": {"k1"}, "bend": {"k0"}, "other_quad": {"k1"}, "corrector": {"kick"}},
     )
 
     # Load data

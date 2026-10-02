@@ -300,8 +300,6 @@ def optimise_ranges(
             sequence_file=sequence_path,
             kinetic_energy=PC_GEV,
             optimise_energy=True,
-            optimise_quadrupoles=False,
-            optimise_bends=False,
         )
         sequence_config = SequenceConfig(
             magnet_range=range_config.magnet_ranges[i],

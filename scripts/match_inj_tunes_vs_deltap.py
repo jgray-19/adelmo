@@ -339,12 +339,8 @@ def main() -> None:
         beam=args.beam,
         sequence_file=sequence_file,
         kinetic_energy=pc,
-        optimise_quadrupoles=True,
-        optimise_bends=True,
-        optimise_other_quadrupoles=True,
-        optimise_correctors=False,
-        optimise_quad_dx=True,
-        optimise_quad_dy=True,
+        errors={"quad": {"k1"}, "bend": {"k0"}, "other_quad": {"k1"}},
+        misalignments={"other_quad": {"dx", "dy"}, "quad": {"dy"}},
     )
     baseline_mad = GenericMadInterface(
         accelerator,

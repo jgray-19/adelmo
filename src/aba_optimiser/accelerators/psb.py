@@ -6,10 +6,14 @@ from typing import TYPE_CHECKING
 
 from pymadng_utils.accelerators.psb import PSB as BasePSB  # noqa: N811
 
-from aba_optimiser.accelerators.base import Accelerator, KnobSpec
-from aba_optimiser.accelerators.magnet_grouping import expand_psb_grouped_quadrupole_knobs
+from aba_optimiser.accelerators.base import MISALIGNMENT_ATTRS, Accelerator, MagnetFamily
+from aba_optimiser.accelerators.magnet_grouping import (
+    collapse_psb_grouped_quadrupole_knobs,
+    expand_psb_grouped_quadrupole_knobs,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
     from pathlib import Path
 
 
@@ -30,6 +34,31 @@ class PSB(BasePSB, Accelerator):
     QUAD_PERTURBATION_PATTERN = r"(?i)^BR\.Q(?:FO\d+|DE\d+)$"
     BPM_PATTERN_TEMPLATE = "^BR{ring}%.BPM%d+L{ring}$"
 
+    FAMILIES = {
+        "quad": MagnetFamily(
+            {"quadrupole": PATTERN_QUADRUPOLE},
+            errors=frozenset({"k1", "k0s", "k1s"}),
+            misalignments=MISALIGNMENT_ATTRS,
+            nonzero_attr="k1",
+        ),
+        "bend": MagnetFamily(
+            {"sbend": PATTERN_SBENDS, "rbend": PATTERN_RBENDS},
+            errors=frozenset({"k0"}),
+            misalignments=MISALIGNMENT_ATTRS,
+            nonzero_attr="k0",
+        ),
+        "sextupole": MagnetFamily(
+            {"multipole": PATTERN_SEXTUPOLE}, errors=frozenset({"knl[3]"}), nonzero_attr="knl[3]"
+        ),
+        "skew_sextupole": MagnetFamily(
+            {"multipole": PATTERN_SKEW_SEXTUPOLE}, errors=frozenset({"ksl[3]"}), nonzero_attr="ksl[3]"
+        ),
+        "corrector": MagnetFamily(
+            {"hkicker": PATTERN_CORRECTOR_H, "vkicker": PATTERN_CORRECTOR_V},
+            errors=frozenset({"kick"}),
+        ),
+    }
+
     def __init__(
         self,
         ring: int,
@@ -37,20 +66,17 @@ class PSB(BasePSB, Accelerator):
         kinetic_energy: float = PSB_FLAT_BOTTOM_KINETIC_ENERGY_GEV,
         particle: str = "proton",
         bpm_pattern: str | None = None,
-        optimise_bends: bool = False,
-        optimise_quadrupoles: bool = False,
-        optimise_quad_dy: bool = False,
-        optimise_quad_dx: bool = False,
-        optimise_quad_tilt: bool = False,
-        optimise_sextupoles: bool = False,
-        optimise_correctors: bool = False,
+        errors: Mapping[str, Iterable[str]] | None = None,
+        misalignments: Mapping[str, Iterable[str]] | None = None,
         optimise_energy: bool = False,
-        optimise_bpm_dx: bool = False,
-        optimise_bpm_dy: bool = False,
         group_quadrupoles_by_cell: bool = False,
         custom_knobs_to_optimise: list[str] | None = None,
     ):
-        """Initialise PSB accelerator for a specific ring."""
+        """Initialise PSB accelerator for a specific ring.
+
+        ``errors`` / ``misalignments`` are keyed by ``FAMILIES``: ``quad``,
+        ``bend``, ``sextupole``, ``skew_sextupole``, ``corrector``.
+        """
         if ring not in (1, 2, 3, 4):
             raise ValueError(f"PSB ring must be 1, 2, 3, or 4, got {ring}")
 
@@ -60,49 +86,29 @@ class PSB(BasePSB, Accelerator):
             kinetic_energy=kinetic_energy,
             bpm_pattern=bpm_pattern or self.BPM_PATTERN_TEMPLATE.format(ring=ring),
             particle=particle,
-            optimise_quadrupoles=optimise_quadrupoles,
-            optimise_quad_dy=optimise_quad_dy,
-            optimise_quad_dx=optimise_quad_dx,
-            optimise_quad_tilt=optimise_quad_tilt,
-            optimise_sextupoles=optimise_sextupoles,
+            errors=errors,
+            misalignments=misalignments,
             optimise_energy=optimise_energy,
-            optimise_bpm_dx=optimise_bpm_dx,
-            optimise_bpm_dy=optimise_bpm_dy,
             custom_knobs_to_optimise=custom_knobs_to_optimise,
         )
-        # PSB-specific optimisation flags not handled by any parent
-        self.optimise_bends = optimise_bends
-        self.optimise_correctors = optimise_correctors
         self.group_quadrupoles_by_cell = bool(group_quadrupoles_by_cell)
 
     def copy_with(self, **overrides) -> PSB:
         """Return a new PSB instance with selected parameters overridden."""
-        o = overrides
-        return PSB(
-            ring=o.get("ring", self.ring),
-            sequence_file=o.get("sequence_file", self.sequence_file),
-            kinetic_energy=o.get("kinetic_energy", self.kinetic_energy),
-            particle=o.get("particle", self.particle),
-            bpm_pattern=o.get("bpm_pattern", self.bpm_pattern),
-            optimise_energy=o.get("optimise_energy", self.optimise_energy),
-            optimise_quadrupoles=o.get("optimise_quadrupoles", self.optimise_quadrupoles),
-            optimise_sextupoles=o.get("optimise_sextupoles", self.optimise_sextupoles),
-            optimise_bends=o.get("optimise_bends", self.optimise_bends),
-            optimise_correctors=o.get("optimise_correctors", self.optimise_correctors),
-            optimise_quad_dx=o.get("optimise_quad_dx", self.optimise_quad_dx),
-            optimise_quad_dy=o.get("optimise_quad_dy", self.optimise_quad_dy),
-            optimise_quad_tilt=o.get("optimise_quad_tilt", self.optimise_quad_tilt),
-            optimise_bpm_dx=o.get("optimise_bpm_dx", self.optimise_bpm_dx),
-            optimise_bpm_dy=o.get("optimise_bpm_dy", self.optimise_bpm_dy),
-            group_quadrupoles_by_cell=o.get(
-                "group_quadrupoles_by_cell", self.group_quadrupoles_by_cell
-            ),
-            custom_knobs_to_optimise=o.get("custom_knobs_to_optimise", self.custom_knobs_to_optimise),
-        )
+        kwargs = {
+            "ring": self.ring,
+            "sequence_file": self.sequence_file,
+            "kinetic_energy": self.kinetic_energy,
+            "particle": self.particle,
+            "bpm_pattern": self.bpm_pattern,
+            "group_quadrupoles_by_cell": self.group_quadrupoles_by_cell,
+            **self.selection_kwargs(),
+        }
+        return PSB(**{**kwargs, **overrides})
 
     def get_mad_attr_spec(self, kind: str, attribute: str) -> dict[str, str]:
         """Share the two QFO knobs in each cell when native grouping is enabled."""
-        suffixes = {"k1": "dk1l", "dx": "dx", "dy": "dy", "tilt": "tilt"}
+        suffixes = {"k1": "dk1l", "k0s": "dk0sl", "k1s": "dk1sl", "dx": "dx", "dy": "dy", "ds": "ds", "tilt": "tilt"}
         if not self.group_quadrupoles_by_cell or kind != "quadrupole":
             return {}
         suffix = suffixes.get(attribute)
@@ -122,47 +128,16 @@ class PSB(BasePSB, Accelerator):
             return formatted
         return expand_psb_grouped_quadrupole_knobs(formatted)
 
+    def normalise_initial_knobs(self, knobs: dict[str, float]) -> dict[str, float]:
+        """Collapse physical PSB QFO pairs when native grouping is enabled."""
+        if not self.group_quadrupoles_by_cell:
+            return super().normalise_initial_knobs(knobs)
+        return collapse_psb_grouped_quadrupole_knobs(knobs)
+
     @property
     def seq_name(self) -> str:
         """Return the sequence name for the selected PSB ring."""
         return f"psb{self.ring}"
-
-    def get_supported_knob_specs(self) -> list[KnobSpec]:
-        """Return the PSB knob specifications currently supported."""
-        bpm_pattern = self.BPM_PATTERN_TEMPLATE.format(ring=self.ring)
-        # fmt: off
-        return [
-            KnobSpec("quadrupole", "k1",      self.PATTERN_QUADRUPOLE,    "k1", self.optimise_quadrupoles, "quadrupoles"),
-            KnobSpec("sbend",      "k0",      self.PATTERN_SBENDS,        "k0", self.optimise_bends,       "bends"),
-            KnobSpec("rbend",      "k0",      self.PATTERN_RBENDS,        "k0", self.optimise_bends,       "bends"),
-            KnobSpec("multipole",  "knl[3]",  self.PATTERN_SEXTUPOLE,     "knl[3]", self.optimise_sextupoles,  "sextupoles"),
-            KnobSpec("multipole",  "ksl[3]",  self.PATTERN_SKEW_SEXTUPOLE,"ksl[3]", self.optimise_sextupoles,  "skew sextupoles"),
-            KnobSpec("hkicker",    "kick",    self.PATTERN_CORRECTOR_H,   None, self.optimise_correctors,  "correctors"),
-            KnobSpec("vkicker",    "kick",    self.PATTERN_CORRECTOR_V,   None, self.optimise_correctors,  "correctors"),
-            KnobSpec("quadrupole", "dy",      self.PATTERN_QUADRUPOLE,    "k1", self.optimise_quad_dy,     "quadrupole vertical offsets"),
-            KnobSpec("quadrupole", "dx",      self.PATTERN_QUADRUPOLE,    "k1", self.optimise_quad_dx,     "quadrupole horizontal offsets"),
-            KnobSpec("quadrupole", "tilt",    self.PATTERN_QUADRUPOLE,    "k1", self.optimise_quad_tilt,   "quadrupole tilts"),
-            KnobSpec("monitor",    "dx",      bpm_pattern,                None, self.optimise_bpm_dx,      "BPM horizontal offsets"),
-            KnobSpec("monitor",    "dy",      bpm_pattern,                None, self.optimise_bpm_dy,      "BPM vertical offsets"),
-        ]
-        # fmt: on
-
-    @property
-    def quadrupole_misalignment_patterns(self) -> dict[str, tuple[str, ...]]:
-        """Return PSB quadrupole patterns eligible for misalignment knobs."""
-        return {
-            "dx": (self.PATTERN_QUADRUPOLE,),
-            "dy": (self.PATTERN_QUADRUPOLE,),
-        }
-
-    @property
-    def bpm_misalignment_patterns(self) -> dict[str, tuple[str, ...]]:
-        """Return PSB BPM patterns eligible for misalignment knobs."""
-        bpm_pattern = self.BPM_PATTERN_TEMPLATE.format(ring=self.ring)
-        return {
-            "dx": (bpm_pattern,),
-            "dy": (bpm_pattern,),
-        }
 
     def get_perturbation_families(self) -> dict[str, dict[str, str | float | dict]]:
         """Return perturbation metadata for PSB ring bends and QFO/QDE quadrupoles."""
