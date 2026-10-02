@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import re
 
+import numpy as np
+
 LOGGER = logging.getLogger(__name__)
 
 _GROUPED_QFO_KNOB_RE = re.compile(
@@ -24,6 +26,40 @@ def expand_psb_grouped_quadrupole_knobs(values: dict[str, float]) -> dict[str, f
         expanded[f"{prefix}{cell}1{suffix}"] = float(value)
         expanded[f"{prefix}{cell}2{suffix}"] = float(value)
     return expanded
+
+
+_PHYSICAL_QFO_KNOB_RE = re.compile(
+    r"^(BR\.QFO)(\d+)([12])(\.(?:dk1l|dx|dy|tilt))$", re.IGNORECASE
+)
+
+
+def collapse_psb_grouped_quadrupole_knobs(values: dict[str, float]) -> dict[str, float]:
+    """Collapse equal physical QFO pairs into PSB cell-grouped knobs."""
+    collapsed: dict[str, float] = {}
+    grouped: dict[str, list[tuple[str, float]]] = {}
+    for name, value in values.items():
+        match = _PHYSICAL_QFO_KNOB_RE.fullmatch(name)
+        if match is None:
+            collapsed[name] = float(value)
+            continue
+        prefix, cell, _magnet, suffix = match.groups()
+        grouped_name = f"{prefix}CELL{cell}{suffix}"
+        grouped.setdefault(grouped_name, []).append((name, float(value)))
+
+    for grouped_name, members in grouped.items():
+        if len(members) != 2:
+            raise ValueError(
+                f"Grouped initial knob {grouped_name} needs both physical QFO magnets, "
+                f"got {[name for name, _ in members]}"
+            )
+        first, second = members
+        if not np.isclose(first[1], second[1], rtol=1e-12, atol=1e-15):
+            raise ValueError(
+                f"Grouped initial knob {grouped_name} has unequal physical values: "
+                f"{first[0]}={first[1]:.15g}, {second[0]}={second[1]:.15g}"
+            )
+        collapsed[grouped_name] = first[1]
+    return collapsed
 
 
 def normalise_lhcbend_magnets(

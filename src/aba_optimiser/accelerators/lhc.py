@@ -7,12 +7,13 @@ from typing import TYPE_CHECKING
 
 from pymadng_utils.accelerators.lhc import LHC as BaseLHC  # noqa: N811
 
-from aba_optimiser.accelerators.base import Accelerator, KnobSpec
+from aba_optimiser.accelerators.base import Accelerator, KnobSpec, MagnetFamily
 from aba_optimiser.accelerators.magnet_grouping import normalise_lhcbend_magnets
 
 LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
     from pathlib import Path
 
     from aba_optimiser.mad.optimising_mad_interface import GradientDescentMadInterface
@@ -31,9 +32,8 @@ class LHC(BaseLHC, Accelerator):
     PATTERN_MAIN_QUAD = "MQ%."
     PATTERN_CORRECTOR = "MCB"
     PATTERN_QUAD_NON_TUNE = "MQ[^.TSY]"  # Explicitly not MQS, MQT or MQ., but still quadrupoles
-    PATTERN_QUAD_DISPLACEMENT_Y = (
-        "MQ[^ST]"  # Triplet quadrupoles and main quads with potential vertical misalignments
-    )
+    # With the MQ. main quads (``quad`` family) this covers every "MQ[^ST]" quadrupole.
+    PATTERN_QUAD_DISPLACEMENT_Y_OTHER = "MQ[^.ST]"  # Non-main quads with potential vertical misalignments
     PATTERN_QUAD_DISPLACEMENT_X = (
         "MQ[^.TSYM]"  # Triplet quadrupoles, warm quads with potential horizontal misalignments
     )
@@ -48,6 +48,34 @@ class LHC(BaseLHC, Accelerator):
     }
     BPM_PATTERN = "^BPM.*$"
 
+    FAMILIES = {
+        "bend": MagnetFamily(
+            {"sbend": PATTERN_MAIN_BEND, "rbend": PATTERN_RBEND},
+            errors=frozenset({"k0"}),
+            nonzero_attr="k0",
+        ),
+        "quad": MagnetFamily(
+            {"quadrupole": PATTERN_MAIN_QUAD},
+            errors=frozenset({"k1"}),
+            misalignments=frozenset({"dy"}),
+            nonzero_attr="k1",
+        ),
+        "other_quad": MagnetFamily(
+            {"quadrupole": PATTERN_QUAD_NON_TUNE},
+            errors=frozenset({"k1"}),
+            misalignments=frozenset({"dx", "dy"}),
+            nonzero_attr="k1",
+            attr_patterns={"dx": PATTERN_QUAD_DISPLACEMENT_X, "dy": PATTERN_QUAD_DISPLACEMENT_Y_OTHER},
+        ),
+        "sextupole": MagnetFamily(
+            {"sextupole": PATTERN_SEXTUPOLE}, errors=frozenset({"k2"}), nonzero_attr="k2"
+        ),
+        "corrector": MagnetFamily(
+            {"hkicker": PATTERN_CORRECTOR, "vkicker": PATTERN_CORRECTOR},
+            errors=frozenset({"kick"}),
+        ),
+    }
+
     def __init__(
         self,
         beam: int,
@@ -55,16 +83,10 @@ class LHC(BaseLHC, Accelerator):
         kinetic_energy: float = 6800.0,
         particle: str = "proton",
         bpm_pattern: str = BPM_PATTERN,
-        optimise_quadrupoles: bool = False,
-        optimise_sextupoles: bool = False,
+        errors: Mapping[str, Iterable[str]] | None = None,
+        misalignments: Mapping[str, Iterable[str]] | None = None,
         optimise_energy: bool = False,
-        # LHC-specific control
-        optimise_correctors: bool = False,
-        optimise_bends: bool = False,
         normalise_bends: bool | None = None,
-        optimise_other_quadrupoles: bool = False,
-        optimise_quad_dx: bool = False,
-        optimise_quad_dy: bool = False,
         custom_knobs_to_optimise: list[str] | None = None,
     ):
         """Initialise LHC accelerator for a specific beam.
@@ -73,13 +95,12 @@ class LHC(BaseLHC, Accelerator):
             beam: Beam number (1 or 2)
             sequence_file: Path to sequence file
             kinetic_energy: Particle kinetic energy in GeV
-            optimise_quadrupoles: Whether to optimise quadrupoles
-            optimise_sextupoles: Whether to optimise sextupoles
             bpm_pattern: Pattern for identifying BPMs in the sequence
-            optimise_bends: Whether to optimise dipole bends
-            normalise_bends: Whether to normalise bend strengths
-            optimise_correctors: Whether to optimise corrector magnets
+            errors: Field errors to fit, keyed by ``FAMILIES`` (``bend``, ``quad``
+                (MQ. main quads), ``other_quad``, ``sextupole``, ``corrector``)
+            misalignments: Alignment errors to fit (``quad``: dy, ``other_quad``: dx/dy)
             optimise_energy: Whether to optimise beam energy
+            normalise_bends: Whether to normalise bend strengths (default: when fitting bend k0)
 
         Raises:
             ValueError: If an invalid beam number is provided
@@ -93,46 +114,32 @@ class LHC(BaseLHC, Accelerator):
             kinetic_energy=kinetic_energy,
             bpm_pattern=bpm_pattern,
             particle=particle,
+            errors=errors,
+            misalignments=misalignments,
             optimise_energy=optimise_energy,
-            optimise_quadrupoles=optimise_quadrupoles,
-            optimise_sextupoles=optimise_sextupoles,
-            optimise_quad_dx=optimise_quad_dx,
-            optimise_quad_dy=optimise_quad_dy,
             custom_knobs_to_optimise=custom_knobs_to_optimise,
         )
-        # LHC-specific optimisation flags not handled by any parent
-        self.optimise_bends = optimise_bends
         if normalise_bends is None:
-            normalise_bends = optimise_bends
+            normalise_bends = self.optimises("bend", "k0")
         self.normalise_bends = normalise_bends
-        self.optimise_correctors = optimise_correctors
-        self.optimise_other_quadrupoles = optimise_other_quadrupoles
         self.bend_lengths: dict[str, float] | None = None
 
     def copy_with(self, **overrides) -> LHC:
         """Return a new LHC instance with selected parameters overridden."""
-        o = overrides
-        return LHC(
-            beam=o.get("beam", self.beam),
-            sequence_file=o.get("sequence_file", self.sequence_file),
-            kinetic_energy=o.get("kinetic_energy", self.kinetic_energy),
-            particle=o.get("particle", self.particle),
-            bpm_pattern=o.get("bpm_pattern", self.bpm_pattern),
-            optimise_energy=o.get("optimise_energy", self.optimise_energy),
-            optimise_quadrupoles=o.get("optimise_quadrupoles", self.optimise_quadrupoles),
-            optimise_sextupoles=o.get("optimise_sextupoles", self.optimise_sextupoles),
-            optimise_correctors=o.get("optimise_correctors", self.optimise_correctors),
-            optimise_bends=o.get("optimise_bends", self.optimise_bends),
-            normalise_bends=o.get("normalise_bends", self.normalise_bends),
-            optimise_other_quadrupoles=o.get("optimise_other_quadrupoles", self.optimise_other_quadrupoles),
-            optimise_quad_dx=o.get("optimise_quad_dx", self.optimise_quad_dx),
-            optimise_quad_dy=o.get("optimise_quad_dy", self.optimise_quad_dy),
-            custom_knobs_to_optimise=o.get("custom_knobs_to_optimise", self.custom_knobs_to_optimise),
-        )
+        kwargs = {
+            "beam": self.beam,
+            "sequence_file": self.sequence_file,
+            "kinetic_energy": self.kinetic_energy,
+            "particle": self.particle,
+            "bpm_pattern": self.bpm_pattern,
+            "normalise_bends": self.normalise_bends,
+            **self.selection_kwargs(),
+        }
+        return LHC(**{**kwargs, **overrides})
 
     def get_bend_lengths(self) -> dict[str, float] | None:
         """Return LHC bend lengths when bend normalisation is enabled."""
-        if not (self.optimise_bends and self.normalise_bends):
+        if not (self.optimises("bend", "k0") and self.normalise_bends):
             return None
         return self.bend_lengths
 
@@ -144,45 +151,18 @@ class LHC(BaseLHC, Accelerator):
         """Normalise LHC bend strengths when applicable."""
         if bend_lengths is None:
             bend_lengths = self.bend_lengths
-        if self.optimise_bends and bend_lengths:
+        if self.optimises("bend", "k0") and bend_lengths:
             return normalise_lhcbend_magnets(true_strengths, bend_lengths)
         return true_strengths
-
-    def get_supported_knob_specs(self) -> list[KnobSpec]:
-        """Return LHC-specific knob specifications."""
-        # fmt: off
-        specs = [
-            KnobSpec("sbend",      "k0",   self.PATTERN_MAIN_BEND,      "k0", self.optimise_bends,              "bends"),
-            KnobSpec("rbend",      "k0",   self.PATTERN_RBEND,          "k0", self.optimise_bends,              "bends"),
-            KnobSpec("quadrupole", "k1",   self.PATTERN_MAIN_QUAD,      "k1", self.optimise_quadrupoles,        "main quadrupoles"),
-            KnobSpec("quadrupole", "k1",   self.PATTERN_QUAD_NON_TUNE,  "k1", self.optimise_other_quadrupoles,  "other quadrupoles"),
-            KnobSpec("sextupole",  "k2",   self.PATTERN_SEXTUPOLE,      "k2", self.optimise_sextupoles,         "sextupoles"),
-            KnobSpec("hkicker",    "kick", self.PATTERN_CORRECTOR,      None, self.optimise_correctors,         "correctors"),
-            KnobSpec("vkicker",    "kick", self.PATTERN_CORRECTOR,      None, self.optimise_correctors,         "correctors"),
-        ]
-        # fmt: on
-        label_map = {"dx": "quadrupole horizontal offsets", "dy": "quadrupole vertical offsets"}
-        for attr, patterns in self.quadrupole_misalignment_patterns.items():
-            for pattern in patterns:
-                specs.append(KnobSpec("quadrupole", attr, pattern, "k1", getattr(self, f"optimise_quad_{attr}"), label_map[attr]))
-        return specs
-
-    @property
-    def quadrupole_misalignment_patterns(self) -> dict[str, tuple[str, ...]]:
-        """Return LHC quadrupole patterns eligible for misalignment knobs."""
-        return {
-            "dx": (self.PATTERN_QUAD_DISPLACEMENT_X,),
-            "dy": (self.PATTERN_QUAD_DISPLACEMENT_Y,),
-        }
 
     def prepare_mad_for_knob_creation(
         self,
         mad_iface: GradientDescentMadInterface,
-        selected_specs: list[tuple[str, str, str, str | None]],
+        specs: list[KnobSpec],
     ) -> None:
         """Prepare LHC-specific MAD state for knob creation."""
-        super().prepare_mad_for_knob_creation(mad_iface, selected_specs)
-        if self.optimise_bends and self.normalise_bends:
+        super().prepare_mad_for_knob_creation(mad_iface, specs)
+        if self.optimises("bend", "k0") and self.normalise_bends:
             mad_iface.mad.send(f"""
             bend_dict = {{}}
             bend_lengths = {{}}
