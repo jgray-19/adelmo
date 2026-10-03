@@ -12,6 +12,7 @@ no worker-process state of its own.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -24,6 +25,18 @@ if TYPE_CHECKING:
     from aba_optimiser.workers.protocol import WorkerChannels
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ScreeningResult:
+    """The screening decisions taken for one set of workers.
+
+    Returned so the caller can replay the same decisions on other worker sets --
+    the validation workers above all.
+    """
+
+    bpm_masks: list[np.ndarray]
+    worker_disabled: list[bool]
 
 
 class OutlierScreener:
@@ -41,11 +54,11 @@ class OutlierScreener:
         initial_knobs: dict[str, float],
         bpm_sigma_threshold: float = 2.0,
         worker_sigma_threshold: float = 2.0,
-    ) -> None:
+    ) -> ScreeningResult | None:
         """Screen and mask outliers before optimisation starts."""
         if not parent_conns:
             LOGGER.warning("No workers available for pre-optimisation outlier screening")
-            return
+            return None
 
         LOGGER.info(
             "Running pre-optimisation outlier screening (BPM=%.1fσ, worker=%.1fσ)",
@@ -80,6 +93,7 @@ class OutlierScreener:
             sum(worker_disabled),
             len(parent_conns),
         )
+        return ScreeningResult(bpm_masks=bpm_masks, worker_disabled=worker_disabled)
 
     @staticmethod
     def compute_positive_z_scores(values: np.ndarray) -> np.ndarray:
@@ -147,6 +161,103 @@ class OutlierScreener:
             bpm_masks.append(keep_mask)
 
         return bpm_masks
+
+    def build_validation_screening(
+        self,
+        training_metadata: list[WorkerRuntimeMetadata],
+        bpm_masks: list[np.ndarray],
+        worker_disabled: list[bool],
+        validation_metadata: list[WorkerRuntimeMetadata],
+    ) -> tuple[list[np.ndarray], list[bool]]:
+        """Carry the training screening decisions over to the validation workers.
+
+        Screening removes BPMs and whole workers from the *fit*. Validation
+        workers are a separate partition of the same measurement files, so
+        unless the same decisions reach them the held-out loss keeps scoring
+        exactly the data the optimiser was told to ignore. Those residuals can
+        only grow as the fit moves onto the data it kept, which shows up as a
+        validation loss rising monotonically from the first epoch while the
+        training loss falls -- a screening artefact, not overfitting.
+
+        Decisions are matched on (file, range, direction, plane) when the
+        validation worker's file also carries training workers, and on
+        (range, direction, plane) otherwise: a pooled training worker reports
+        only its primary file, so a validation worker for one of the other
+        pooled files has no exact counterpart.
+        """
+        dropped_by_file: dict[tuple, set[str]] = {}
+        dropped_by_range: dict[tuple, set[str]] = {}
+        disabled_by_file: dict[tuple, bool] = {}
+        disabled_by_range: dict[tuple, bool] = {}
+
+        for meta, keep_mask, disable in zip(
+            training_metadata, bpm_masks, worker_disabled, strict=True
+        ):
+            range_key = (meta.start_bpm, meta.end_bpm, int(meta.sdir), str(meta.kick_plane))
+            file_key = (meta.file_idx, *range_key)
+            dropped_by_file.setdefault(file_key, set())
+            dropped_by_range.setdefault(range_key, set())
+            # Only a worker that stays in the fit gets to mask BPMs. A disabled
+            # worker is by construction a high-loss one, so it carries BPM
+            # outliers of its own; letting those through would blank them in the
+            # validation counterpart of a *surviving* sibling worker, which is
+            # the same "score data the fit did not use" defect, inverted.
+            if not disable:
+                dropped = {
+                    name for name, keep in zip(meta.bpm_names, keep_mask, strict=True) if not keep
+                }
+                dropped_by_file[file_key].update(dropped)
+                dropped_by_range[range_key].update(dropped)
+            # A key counts as disabled only when every training worker sharing
+            # it was disabled; one surviving worker still constrains the fit.
+            disabled_by_file[file_key] = disabled_by_file.get(file_key, True) and disable
+            disabled_by_range[range_key] = disabled_by_range.get(range_key, True) and disable
+
+        masks: list[np.ndarray] = []
+        disabled: list[bool] = []
+        fallback_keys = 0
+        for meta in validation_metadata:
+            range_key = (meta.start_bpm, meta.end_bpm, int(meta.sdir), str(meta.kick_plane))
+            file_key = (meta.file_idx, *range_key)
+            if file_key in dropped_by_file:
+                dropped = dropped_by_file[file_key]
+                is_disabled = disabled_by_file[file_key]
+            else:
+                # No training worker reported this file at this range. That is the
+                # normal case under file pooling, because ``get_primary_file_idx``
+                # reports only the lowest file index of a pooled batch, so every
+                # other pooled file falls through to here. The range key unions
+                # drops across files, which is coarser than a per-file decision:
+                # a BPM that was an outlier in one file is masked for all of them,
+                # and because the disable flag is an AND across files it will
+                # almost never survive. Counted and logged so this is visible.
+                fallback_keys += 1
+                dropped = dropped_by_range.get(range_key, set())
+                is_disabled = disabled_by_range.get(range_key, False)
+            masks.append(
+                np.array([name not in dropped for name in meta.bpm_names], dtype=bool)
+            )
+            disabled.append(bool(is_disabled))
+
+        if fallback_keys:
+            LOGGER.info(
+                "Screening propagation fell back to the range key for %d/%d validation "
+                "workers (no training worker reported their file at that range; expected "
+                "under file pooling). Their masks are the union over every file sharing "
+                "the range, and their disable flag the intersection.",
+                fallback_keys,
+                len(validation_metadata),
+            )
+        n_masked = sum(int((~mask).sum()) for mask in masks)
+        if n_masked or any(disabled):
+            LOGGER.info(
+                "Propagated screening to validation: masked %d BPM entries, "
+                "disabled %d/%d validation workers.",
+                n_masked,
+                sum(disabled),
+                len(validation_metadata),
+            )
+        return masks, disabled
 
     def classify_worker_outliers(
         self,

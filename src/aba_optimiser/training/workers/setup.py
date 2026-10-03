@@ -1,8 +1,10 @@
-"""Worker setup helpers for tracking optimisation.
+"""Worker planning: which workers exist for a set of BPM ranges and files.
 
-This module owns the logic that decides which workers should exist for a given
-set of BPM ranges and measurement files. It is intentionally separate from
-payload construction and multiprocessing lifecycle code.
+LHC and PSB BPMs measure both planes, so workers follow the data alone: a file
+kicked in one plane gives single-plane workers. On a machine with single-plane
+BPMs (SPS ``BPH``/``BPV``) each worker additionally observes only the BPMs that
+see its plane, ranges are planned per plane, and dual-plane data is split into
+separate x and y workers.
 """
 
 from __future__ import annotations
@@ -12,12 +14,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from aba_optimiser.training.config.tracking import (
-    RangeContext,
-    TrackingPlan,
-    WorkerRangeSpec,
-)
-from aba_optimiser.training.utils import bpm_supports_both_planes, bpm_supports_plane
+from aba_optimiser.training.config.tracking import RangeContext, WorkerRangeSpec
 from aba_optimiser.workers import WorkerConfig
 from aba_optimiser.workers.common import KickPlane
 
@@ -25,7 +22,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from aba_optimiser.accelerators import Accelerator
-    from aba_optimiser.config import SimulationConfig
+    from aba_optimiser.training.config.tracking import TrackingPlan
 
 
 LOGGER = logging.getLogger(__name__)
@@ -33,7 +30,7 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class WorkerObservationPlan:
-    """Per-file observation settings after kick-plane filtering."""
+    """What one worker observes, for one range and one measurement file."""
 
     range_spec: WorkerRangeSpec
     file_idx: int
@@ -44,7 +41,7 @@ class WorkerObservationPlan:
 
     @property
     def init_bpm(self) -> str:
-        """Return the BPM used to initialise tracking for this plan."""
+        """Return the marker used to initialise tracking for this plan."""
         return self.init_marker or self.range_spec.init_bpm
 
 
@@ -63,14 +60,7 @@ class WorkerRuntimeMetadata:
 
 
 class WorkerSetupHelper:
-    """Build worker ranges, observation plans, and worker configs.
-
-    Plane routing follows four rules:
-    - dual-plane data + dual-plane BPMs -> one dual-plane worker
-    - single-plane data + dual-plane BPMs -> one single-plane worker
-    - dual-plane data + single-plane BPMs -> split into plane-specific workers
-    - single-plane data + single-plane BPMs -> one single-plane worker
-    """
+    """Build worker ranges, observation plans, and worker configs."""
 
     def __init__(
         self,
@@ -101,31 +91,29 @@ class WorkerSetupHelper:
         self.mad_logfile = mad_logfile
         self.python_logfile = python_logfile
         self.tracking_plan = tracking_plan
-        self.tracking_anchor_markers = set(tracking_plan.tracking_anchor_markers)
+        self.single_plane_bpms = not all(self.measures(bpm, KickPlane.XY) for bpm in all_bpms)
 
     @staticmethod
     def merge_bad_bpms(*bad_bpm_lists: list[str] | None) -> list[str] | None:
         """Merge bad-BPM lists while preserving the first occurrence order."""
         merged: list[str] = []
         for bpm_list in bad_bpm_lists:
-            if bpm_list is None:
-                continue
-            for bpm in bpm_list:
+            for bpm in bpm_list or []:
                 if bpm not in merged:
                     merged.append(bpm)
         return merged or None
 
-    def bpm_supports_plane(self, bpm: str, kick_plane: KickPlane) -> bool:
-        """Return whether `bpm` can measure the requested kick plane."""
-        if bpm in self.tracking_anchor_markers:
+    def measures(self, bpm: str, plane: KickPlane) -> bool:
+        """Return whether ``bpm`` measures ``plane`` (``XY`` means both planes)."""
+        # Tracking markers carry reconstructed coordinates in both planes.
+        if bpm in self.tracking_plan.extra_markers:
             return True
-        return bpm_supports_plane(self.accelerator, bpm, kick_plane.value)
-
-    def bpm_supports_both_planes(self, bpm: str) -> bool:
-        """Return whether `bpm` can measure both transverse planes."""
-        if bpm in self.tracking_anchor_markers:
-            return True
-        return bpm_supports_both_planes(self.accelerator, bpm)
+        monitor = self.accelerator.infer_monitor_plane(bpm)
+        if plane == KickPlane.X:
+            return "H" in monitor
+        if plane == KickPlane.Y:
+            return "V" in monitor
+        return "H" in monitor and "V" in monitor
 
     def get_range_bpm_names(
         self,
@@ -134,17 +122,7 @@ class WorkerSetupHelper:
         sdir: int,
         bad_bpms: list[str] | None = None,
     ) -> list[str]:
-        """Return the raw BPM range after applying explicit exclusions."""
-        start_plane = self._plane_for_bpm(start_bpm)
-        end_plane = self._plane_for_bpm(end_bpm)
-        if start_plane is not None and start_plane == end_plane:
-            return self.tracking_plan.get_range_bpm_names(
-                all_bpms=self._bpms_for_plane(start_plane),
-                start_bpm=start_bpm,
-                end_bpm=end_bpm,
-                sdir=sdir,
-                bad_bpms=bad_bpms,
-            )
+        """Return the BPMs a range observes, in tracking order."""
         return self.tracking_plan.get_range_bpm_names(
             all_bpms=self.all_bpms,
             start_bpm=start_bpm,
@@ -153,284 +131,118 @@ class WorkerSetupHelper:
             bad_bpms=bad_bpms,
         )
 
-    def get_worker_bpm_names(
-        self,
-        start_bpm: str,
-        end_bpm: str,
-        sdir: int,
-        kick_plane: KickPlane,
-        bad_bpms: list[str] | None = None,
-    ) -> list[str]:
-        """Return the BPMs a worker should observe, in tracking order."""
-        bpm_names = self.get_range_bpm_names(start_bpm, end_bpm, sdir, bad_bpms)
-        if kick_plane == KickPlane.XY:
-            return bpm_names
-        return [bpm for bpm in bpm_names if self.bpm_supports_plane(bpm, kick_plane)]
-
-    def get_worker_bad_bpms(
-        self,
-        start_bpm: str,
-        end_bpm: str,
-        sdir: int,
-        kick_plane: KickPlane,
-    ) -> list[str] | None:
-        """Return per-worker BPM exclusions needed by the MAD interface."""
-        if kick_plane == KickPlane.XY:
-            return self.bad_bpms
-
-        # Unobserve every off-plane BPM in the *whole ring*, not just those inside
-        # the named range.
-        del start_bpm, end_bpm, sdir
-        plane_filtered = [
-            bpm for bpm in self.all_bpms if not self.bpm_supports_plane(bpm, kick_plane)
-        ]
-        return self.merge_bad_bpms(self.bad_bpms, plane_filtered)
-
-    def build_range_specs(
-        self,
-        start_bpms: list[str],
-        end_bpms: list[str],
-        simulation_config: SimulationConfig,
-    ) -> list[WorkerRangeSpec]:
-        """Return logical worker ranges before file-specific plane filtering."""
+    def build_range_specs(self, start_bpms: list[str], end_bpms: list[str]) -> list[WorkerRangeSpec]:
+        """Return the logical worker ranges for this tracking plan."""
         ctx = RangeContext(
             start_bpms=start_bpms,
             end_bpms=end_bpms,
             all_bpms=self.all_bpms,
-            run_arc_by_arc=simulation_config.run_arc_by_arc,
             use_fixed_bpm=self.use_fixed_bpm,
             fixed_start=self.fixed_start,
             fixed_end=self.fixed_end,
         )
-        if self.tracking_plan.init_marker is not None or all(
-            self.bpm_supports_both_planes(bpm) for bpm in self.all_bpms
-        ):
+        # Marker-anchored plans (ACD markers, kicker) start on markers that carry both
+        # planes; build_observation_plans splits their workers by plane instead.
+        if not self.single_plane_bpms or set(start_bpms) <= set(self.tracking_plan.extra_markers):
             return self.tracking_plan.build_range_specs(ctx)
 
-        return self._build_single_plane_range_specs(ctx)
-
-    def _plane_for_bpm(self, bpm: str) -> KickPlane | None:
-        """Return the single transverse plane measured by a BPM, if any."""
-        try:
-            supports_x = self.bpm_supports_plane(bpm, KickPlane.X)
-            supports_y = self.bpm_supports_plane(bpm, KickPlane.Y)
-        except ValueError:
-            return None
-        if supports_x and not supports_y:
-            return KickPlane.X
-        if supports_y and not supports_x:
-            return KickPlane.Y
-        return None
-
-    def _bpms_for_plane(self, plane: KickPlane) -> list[str]:
-        """Return model BPMs that can observe one transverse plane."""
-        return [bpm for bpm in self.all_bpms if self.bpm_supports_plane(bpm, plane)]
-
-    def _bpm_behind_in_plane(self, start_bpm: str, plane_bpms: list[str]) -> str:
-        """Return the previous BPM in the same plane as ``start_bpm``."""
-        if start_bpm not in plane_bpms:
-            raise ValueError(
-                f"Start BPM '{start_bpm}' is not in the {plane_bpms} list for its plane"
-            )
-        return plane_bpms[plane_bpms.index(start_bpm) - 1]
-
-    def _single_plane_user_bpms(
-        self,
-        bpms: list[str],
-        *,
-        label: str,
-    ) -> dict[KickPlane, list[str]]:
-        """Split user-selected BPMs by their real monitor plane."""
-        by_plane = {KickPlane.X: [], KickPlane.Y: []}
-        for bpm in bpms:
-            plane = self._plane_for_bpm(bpm)
-            if plane is None:
-                LOGGER.warning(
-                    "Single-plane range planning keeps dual-plane %s BPM %s in both planes",
-                    label,
-                    bpm,
-                )
-                by_plane[KickPlane.X].append(bpm)
-                by_plane[KickPlane.Y].append(bpm)
-            else:
-                by_plane[plane].append(bpm)
-        return by_plane
-
-    def _build_single_plane_range_specs(self, ctx: RangeContext) -> list[WorkerRangeSpec]:
-        """Build ranges from same-plane BPM boundaries for single-plane machines."""
-        starts_by_plane = self._single_plane_user_bpms(ctx.start_bpms, label="start")
-        ends_by_plane = self._single_plane_user_bpms(ctx.end_bpms, label="end")
-        range_specs: list[WorkerRangeSpec] = []
-
+        # A range must start and end on BPMs of the plane it tracks.
+        specs: list[WorkerRangeSpec] = []
         for plane in (KickPlane.X, KickPlane.Y):
-            plane_bpms = self._bpms_for_plane(plane)
-            if not plane_bpms:
+            plane_bpms = [bpm for bpm in self.all_bpms if self.measures(bpm, plane)]
+            starts = [bpm for bpm in start_bpms if bpm in plane_bpms]
+            ends = [bpm for bpm in end_bpms if bpm in plane_bpms]
+            if not starts or not ends:
+                LOGGER.warning("No %s-plane start and end BPMs; no %s-plane ranges", plane.value, plane.value)
                 continue
-
-            starts = starts_by_plane[plane]
-            ends = ends_by_plane[plane]
-            if not starts and not ends:
-                LOGGER.warning(
-                    "No %s-plane BPM boundaries were provided for single-plane range planning",
-                    plane.value,
-                )
-                continue
-            if ctx.run_arc_by_arc and bool(starts) != bool(ends):
-                raise ValueError(
-                    f"Single-plane arc-by-arc ranges need both start and end BPMs for "
-                    f"the {plane.value}-plane; got {len(starts)} starts and {len(ends)} ends"
-                )
-
-            if not ctx.run_arc_by_arc:
-                # Full-ring workers track from the fixed turn-increment start ($start),
-                # so anchor every worker at the plane's first BPM rather than cycling
-                # to each user start BPM (which would be double-observed at the wrap).
-                plane_starts = (
-                    starts if self.tracking_plan.cycle_to_init_bpm else [plane_bpms[0]]
-                )
-                for start_bpm in plane_starts:
-                    end_bpm = self._bpm_behind_in_plane(start_bpm, plane_bpms)
-                    range_specs.extend(
-                        WorkerRangeSpec(start_bpm=start_bpm, end_bpm=end_bpm, sdir=sdir)
-                        for sdir in (1, -1)
-                    )
-                continue
-
-            range_specs.extend(
-                self.tracking_plan.build_range_specs(
-                    dataclasses.replace(
-                        ctx,
-                        start_bpms=starts,
-                        end_bpms=ends,
-                        all_bpms=plane_bpms,
-                        fixed_start=starts[0] if self.use_fixed_bpm else self.fixed_start,
-                        fixed_end=ends[0] if self.use_fixed_bpm else self.fixed_end,
-                    )
-                )
+            plane_ctx = dataclasses.replace(
+                ctx,
+                start_bpms=starts,
+                end_bpms=ends,
+                all_bpms=plane_bpms,
+                fixed_start=starts[0] if self.use_fixed_bpm else self.fixed_start,
+                fixed_end=ends[0] if self.use_fixed_bpm else self.fixed_end,
             )
-        return range_specs
-
-    @staticmethod
-    def get_primary_file_idx(turn_batch: list[int], file_turn_map: dict[int, int]) -> int:
-        """Return the unique measurement file serving a worker batch."""
-        primary_file_idx = file_turn_map[turn_batch[0]]
-        if any(file_turn_map[turn] != primary_file_idx for turn in turn_batch):
-            raise ValueError("Worker batch contains turns from multiple measurement files")
-        return primary_file_idx
-
-    def get_worker_planes(
-        self, data_plane: KickPlane, range_bpms: list[str]
-    ) -> tuple[KickPlane, ...]:
-        """Return the worker plane(s) required for one file/range combination."""
-        if data_plane == KickPlane.XY and all(
-            self.bpm_supports_both_planes(bpm) for bpm in range_bpms
-        ):
-            return (KickPlane.XY,)
-        if data_plane == KickPlane.XY:
-            planes = [
-                plane
-                for plane in (KickPlane.X, KickPlane.Y)
-                if any(self.bpm_supports_plane(bpm, plane) for bpm in range_bpms)
-            ]
-            return tuple(planes)
-        return (data_plane,)
-
-    def make_observation_plan(
-        self,
-        range_spec: WorkerRangeSpec,
-        file_idx: int,
-        worker_plane: KickPlane,
-        available_bpms: set[str] | None = None,
-    ) -> WorkerObservationPlan | None:
-        """Build one worker plan, or return `None` when the range is incompatible."""
-        bad_bpms = self.get_worker_bad_bpms(
-            range_spec.start_bpm,
-            range_spec.end_bpm,
-            range_spec.sdir,
-            worker_plane,
-        )
-        bpm_names = self.get_worker_bpm_names(
-            range_spec.start_bpm,
-            range_spec.end_bpm,
-            range_spec.sdir,
-            worker_plane,
-            bad_bpms,
-        )
-        init_marker = self.tracking_plan.initial_condition_marker(range_spec)
-        if available_bpms is not None:
-            missing_bpms = [bpm for bpm in bpm_names if bpm not in available_bpms]
-            if missing_bpms:
-                LOGGER.warning(
-                    "File %d range %s/%s sdir=%d: %d BPMs missing from measurement data; adding to bad BPMs",
-                    file_idx,
-                    range_spec.start_bpm,
-                    range_spec.end_bpm,
-                    range_spec.sdir,
-                    len(missing_bpms),
-                )
-                bad_bpms = self.merge_bad_bpms(bad_bpms, missing_bpms)
-                bpm_names = [bpm for bpm in bpm_names if bpm in available_bpms]
-            if init_marker is not None and init_marker not in available_bpms:
-                LOGGER.warning(
-                    "File %d range %s/%s sdir=%d: init marker %s missing from measurement data",
-                    file_idx,
-                    range_spec.start_bpm,
-                    range_spec.end_bpm,
-                    range_spec.sdir,
-                    init_marker,
-                )
-                return None
-
-        if init_marker is None and range_spec.init_bpm not in bpm_names:
-            return None
-        if not bpm_names:
-            return None
-
-        return WorkerObservationPlan(
-            range_spec=range_spec,
-            file_idx=file_idx,
-            kick_plane=worker_plane,
-            bpm_names=bpm_names,
-            bad_bpms=bad_bpms,
-            init_marker=init_marker,
-        )
+            specs.extend(self.tracking_plan.build_range_specs(plane_ctx))
+        return specs
 
     def build_observation_plans(
         self,
         range_spec: WorkerRangeSpec,
         file_idx: int,
-        available_bpms: set[str] | None = None,
+        available_bpms: set[str],
     ) -> list[WorkerObservationPlan]:
-        """Return the per-file worker plan(s) for a range and measurement file.
+        """Return the worker plan(s) for one range and measurement file."""
+        data_plane = KickPlane(self.file_kick_planes.get(file_idx, KickPlane.XY))
+        if data_plane == KickPlane.XY and self.single_plane_bpms:
+            planes = (KickPlane.X, KickPlane.Y)
+        else:
+            planes = (data_plane,)
+        plans = (self._build_plan(range_spec, file_idx, plane, available_bpms) for plane in planes)
+        return [plan for plan in plans if plan is not None]
 
-        Dual-plane files are kept as dual-plane workers only when every BPM in
-        the range can measure both planes. Otherwise the range is split into x
-        and y workers, and each worker only keeps BPMs that can observe its
-        plane and initialise from its direction-specific start BPM.
+    def _build_plan(
+        self,
+        range_spec: WorkerRangeSpec,
+        file_idx: int,
+        plane: KickPlane,
+        available_bpms: set[str],
+    ) -> WorkerObservationPlan | None:
+        """Build one worker's plan, or ``None`` when the range is unusable.
+
+        BPMs the worker cannot use are added to its bad-BPM list so MAD stops
+        observing them; if the initial-condition marker is missing from the file
+        there is nothing to track from and the worker is dropped.
         """
-        data_plane_raw = self.file_kick_planes.get(file_idx, KickPlane.XY)
-        data_plane = KickPlane(data_plane_raw)
-        range_bpms = self.get_range_bpm_names(
-            range_spec.start_bpm,
-            range_spec.end_bpm,
-            range_spec.sdir,
-            self.bad_bpms,
+        bad_bpms = self.bad_bpms
+        if self.single_plane_bpms and plane != KickPlane.XY:
+            # Every blind BPM in the ring, not only those in the range: MAD's
+            # observation flags are set on the whole sequence.
+            blind = [bpm for bpm in self.all_bpms if not self.measures(bpm, plane)]
+            bad_bpms = self.merge_bad_bpms(bad_bpms, blind)
+
+        bpm_names = self.get_range_bpm_names(
+            range_spec.start_bpm, range_spec.end_bpm, range_spec.sdir, bad_bpms
         )
-        if not range_bpms:
-            return []
+        init_marker = self.tracking_plan.initial_condition_marker(range_spec)
 
-        plans: list[WorkerObservationPlan] = []
-        for worker_plane in self.get_worker_planes(data_plane, range_bpms):
-            plan = self.make_observation_plan(
-                range_spec,
+        missing = [bpm for bpm in bpm_names if bpm not in available_bpms]
+        if missing:
+            LOGGER.warning(
+                "File %d range %s/%s sdir=%d: %d BPMs missing from measurement data; "
+                "adding to bad BPMs",
                 file_idx,
-                worker_plane,
-                available_bpms=available_bpms,
+                range_spec.start_bpm,
+                range_spec.end_bpm,
+                range_spec.sdir,
+                len(missing),
             )
-            if plan is not None:
-                plans.append(plan)
+            bad_bpms = self.merge_bad_bpms(bad_bpms, missing)
+            bpm_names = [bpm for bpm in bpm_names if bpm in available_bpms]
+        if init_marker is not None and init_marker not in available_bpms:
+            LOGGER.warning(
+                "File %d range %s/%s sdir=%d: init marker %s missing from measurement data",
+                file_idx,
+                range_spec.start_bpm,
+                range_spec.end_bpm,
+                range_spec.sdir,
+                init_marker,
+            )
+            return None
 
-        return plans
+        if not bpm_names:
+            return None
+        if init_marker is None and range_spec.init_bpm not in bpm_names:
+            return None
+
+        return WorkerObservationPlan(
+            range_spec=range_spec,
+            file_idx=file_idx,
+            kick_plane=plane,
+            bpm_names=bpm_names,
+            bad_bpms=bad_bpms,
+            init_marker=init_marker,
+        )
 
     def make_worker_config(self, plan: WorkerObservationPlan) -> WorkerConfig:
         """Build the worker configuration object for one plan."""
@@ -441,7 +253,6 @@ class WorkerSetupHelper:
             magnet_range=self.magnet_range,
             interface_options=self.interface_options_per_file[plan.file_idx],
             initial_condition_marker=plan.init_marker,
-            cycle_sequence=self.tracking_plan.cycle_to_init_bpm,
             sdir=plan.range_spec.sdir,
             kick_plane=plan.kick_plane,
             bad_bpms=plan.bad_bpms,

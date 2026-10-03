@@ -89,7 +89,6 @@ class WorkerSpawner:
         self,
         training_payloads: list,
         simulation_config: SimulationConfig,
-        worker_mode: str,
         n_run_turns: int,
         initial_knobs: dict[str, float],
     ) -> SpawnedTrainingWorkers:
@@ -108,18 +107,17 @@ class WorkerSpawner:
                 data,
                 config,
                 simulation_config,
-                mode=worker_mode,
             )
             worker.start()
             spawned.parent_conns.append(parent)
             spawned.workers.append(worker)
             spawned.particle_counts.append(len(data.init_coords))
             parent.send((initial_knobs, -1))
-            bpm_names = self.setup_helper.get_worker_bpm_names(
+            # The config's bad BPMs already exclude every BPM blind to its plane.
+            bpm_names = self.setup_helper.get_range_bpm_names(
                 config.tracking_start_bpm,
                 config.tracking_end_bpm,
                 config.sdir,
-                config.kick_plane,
                 config.bad_bpms,
             )
             spawned.worker_metadata.append(
@@ -148,7 +146,6 @@ class WorkerSpawner:
         validation_payloads: list,
         training_worker_count: int,
         simulation_config: SimulationConfig,
-        worker_mode: str,
         n_run_turns: int,
         initial_knobs: dict[str, float],
     ) -> SpawnedValidationWorkers:
@@ -169,18 +166,16 @@ class WorkerSpawner:
                 val_worker_id,
                 [validation_payload],
                 simulation_config,
-                mode=worker_mode,
             )
             val_worker.start()
             val_parent.send((initial_knobs, -1))
             spawned.parent_conns.append(val_parent)
             spawned.workers.append(val_worker)
 
-            val_bpm_names = self.setup_helper.get_worker_bpm_names(
+            val_bpm_names = self.setup_helper.get_range_bpm_names(
                 val_config.tracking_start_bpm,
                 val_config.tracking_end_bpm,
                 val_config.sdir,
-                val_config.kick_plane,
                 val_config.bad_bpms,
             )
             spawned.metadata.append(

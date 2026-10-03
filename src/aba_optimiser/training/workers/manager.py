@@ -9,19 +9,19 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from collections import Counter, defaultdict
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
+import psutil
 
-from aba_optimiser.training.config.tracking import ArcByArcTrackingPlan, TrackingPlan
+from aba_optimiser.training.config.tracking import TrackingPlan
 from aba_optimiser.training.workers.payloads import WorkerPayloadBuilder
 from aba_optimiser.training.workers.screening import OutlierScreener
 from aba_optimiser.training.workers.setup import WorkerRuntimeMetadata, WorkerSetupHelper
 from aba_optimiser.training.workers.spawning import WorkerSpawner
-from aba_optimiser.training.workers.validation import (
-    ValidationSplitResult,
-    split_validation_payloads,
-)
+from aba_optimiser.training.workers.validation import ValidationSplitResult
+from aba_optimiser.workers.common import UncertaintyPart, merge_uncertainty_parts, noise_matrix
 from aba_optimiser.workers.protocol import WorkerChannels, raise_for_worker_error_payload
 
 if TYPE_CHECKING:
@@ -29,10 +29,11 @@ if TYPE_CHECKING:
     from multiprocessing.connection import Connection
     from pathlib import Path
 
-    import pandas as pd
-
     from aba_optimiser.accelerators import Accelerator
     from aba_optimiser.config import SimulationConfig
+    from aba_optimiser.training.config.tracking import WorkerRangeSpec
+    from aba_optimiser.training.data_manager import FileTracks
+    from aba_optimiser.training.workers.setup import WorkerObservationPlan
     from aba_optimiser.workers import TrackingData, WorkerConfig
 
 
@@ -44,8 +45,6 @@ class WorkerManager:
 
     def __init__(
         self,
-        n_data_points: dict[tuple[str, str], int],
-        ybpm: str,
         magnet_range: str,
         fixed_start: str,
         fixed_end: str,
@@ -58,14 +57,10 @@ class WorkerManager:
         debug: bool = False,
         mad_logfile: Path | None = None,
         python_logfile: Path | None = None,
-        optimise_knobs: list[str] | None = None,
         tracking_plan: TrackingPlan | None = None,
     ) -> None:
-        # `n_data_points` is kept for constructor compatibility with existing callers.
-        self.n_data_points = n_data_points
         self.parent_conns: list[Connection] = []
         self.workers: list[mp.Process] = []
-        self.y_bpm = ybpm
         self.magnet_range = magnet_range
         self.fixed_start = fixed_start
         self.fixed_end = fixed_end
@@ -75,20 +70,18 @@ class WorkerManager:
         self.all_bpms = all_bpms
         self.file_kick_planes = file_kick_planes or {}
         self.use_fixed_bpm = use_fixed_bpm
-        self.kinetic_energy = accelerator.kinetic_energy
         self.debug = debug
         self.mad_logfile = mad_logfile
         self.python_logfile = python_logfile
-        self.optimise_knobs = optimise_knobs
-        self.tracking_plan = tracking_plan if tracking_plan is not None else ArcByArcTrackingPlan()
+        self.tracking_plan = tracking_plan if tracking_plan is not None else TrackingPlan()
         self.worker_metadata: list[WorkerRuntimeMetadata] = []
+        self._worker_particle_counts: list[int] = []
         self.validation_parent_conns: list[Connection] = []
         self.validation_workers: list[mp.Process] = []
         self.validation_channels: WorkerChannels | None = None
         self.validation_metadata: list[WorkerRuntimeMetadata] = []
         self._validation_worker_particle_counts: list[int] = []
         self.channels: WorkerChannels | None = None
-        self.track_data: dict[int, pd.DataFrame] = {}
         self.turn_batches: list[list[int]] = []
         self.validation_turn_batches: list[list[int]] = []
         self.file_turn_map: dict[int, int] = {}
@@ -112,25 +105,7 @@ class WorkerManager:
             python_logfile=python_logfile,
             tracking_plan=self.tracking_plan,
         )
-        self.payload_builder = WorkerPayloadBuilder(
-            accelerator=accelerator,
-            all_bpms=all_bpms,
-            tracking_anchor_markers=self.tracking_plan.tracking_anchor_markers,
-        )
-
-    def _sync_helpers(self) -> None:
-        """Keep helper objects aligned with mutable manager attributes."""
-        self.setup_helper.bad_bpms = self.bad_bpms
-        self.setup_helper.file_kick_planes = self.file_kick_planes
-        self.setup_helper.interface_options_per_file = self.interface_options_per_file
-        self.setup_helper.tracking_plan = self.tracking_plan
-        self.setup_helper.tracking_anchor_markers = set(
-            self.tracking_plan.tracking_anchor_markers
-        )
-        self.payload_builder.all_bpms = self.all_bpms
-        self.payload_builder.tracking_anchor_markers = set(
-            self.tracking_plan.tracking_anchor_markers
-        )
+        self.payload_builder = WorkerPayloadBuilder(accelerator)
 
     def _channels(self) -> WorkerChannels:
         """Return the active training-worker channels."""
@@ -148,6 +123,7 @@ class WorkerManager:
     def _summarise_file_usage(
         payloads: list[tuple[TrackingData, WorkerConfig, int]],
         num_files: int,
+        files_covered: frozenset[int] | None = None,
     ) -> None:
         """Log measurement-file usage and validate that at least one worker exists."""
         file_usage: dict[int, int] = {}
@@ -160,11 +136,12 @@ class WorkerManager:
             ", ".join(f"file_{idx}={count} workers" for idx, count in sorted(file_usage.items())),
         )
 
-        if len(file_usage) < num_files:
+        covered = files_covered if files_covered is not None else frozenset(file_usage)
+        if len(covered) < num_files:
             LOGGER.warning(
                 "Only %d/%d measurement files are being used by workers! "
                 "This may lead to poor optimisation if different files have different deltap values.",
-                len(file_usage),
+                len(covered),
                 num_files,
             )
         if not file_usage:
@@ -174,7 +151,7 @@ class WorkerManager:
 
     def create_worker_payloads(
         self,
-        track_data: dict[int, pd.DataFrame],
+        tracks: dict[int, FileTracks],
         turn_batches: list[list[int]],
         file_turn_map: dict[int, int],
         start_bpms: list[str],
@@ -182,15 +159,10 @@ class WorkerManager:
         simulation_config: SimulationConfig,
         machine_deltaps: list[float],
     ) -> list[tuple[TrackingData, WorkerConfig, int]]:
-        """Create per-worker data/config payloads from measurement files."""
-        self._sync_helpers()
+        """Create one payload per (range, worker plane, turn batch); each batch belongs to one file."""
         payloads: list[tuple[TrackingData, WorkerConfig, int]] = []
-        arrays_cache = {idx: self.payload_builder.extract_arrays(df) for idx, df in track_data.items()}
-        file_available_bpms = {
-            idx: set(df.index.get_level_values("name")) for idx, df in track_data.items()
-        }
-        plan_cache: dict[tuple[str, str, int, int], list] = {}
-        range_specs = self.setup_helper.build_range_specs(start_bpms, end_bpms, simulation_config)
+        plans: dict[tuple[WorkerRangeSpec, int], list[WorkerObservationPlan]] = {}
+        range_specs = self.setup_helper.build_range_specs(start_bpms, end_bpms)
 
         LOGGER.info("Creating %d range specs x %d batches", len(range_specs), len(turn_batches))
 
@@ -200,63 +172,33 @@ class WorkerManager:
                     raise ValueError(
                         f"Empty batch {batch_idx} for {range_spec.start_bpm}/{range_spec.end_bpm}"
                     )
-
-                primary_file_idx = self.setup_helper.get_primary_file_idx(turn_batch, file_turn_map)
-                cache_key = (
-                    range_spec.start_bpm,
-                    range_spec.end_bpm,
-                    range_spec.sdir,
-                    primary_file_idx,
-                )
-                plans = plan_cache.get(cache_key)
-                if plans is None:
-                    plans = self.setup_helper.build_observation_plans(
-                        range_spec,
-                        primary_file_idx,
-                        available_bpms=file_available_bpms.get(primary_file_idx),
+                file_idx = file_turn_map[turn_batch[0]]
+                key = (range_spec, file_idx)
+                if key not in plans:
+                    plans[key] = self.setup_helper.build_observation_plans(
+                        range_spec, file_idx, available_bpms=set(tracks[file_idx].marker_col)
                     )
-                    plan_cache[cache_key] = plans
-                if not plans:
-                    LOGGER.debug(
-                        "Skipping worker for %s/%s sdir=%d on file %d: no valid observation plan",
-                        range_spec.start_bpm,
-                        range_spec.end_bpm,
-                        range_spec.sdir,
-                        primary_file_idx,
-                    )
-                    continue
-
-                for plan in plans:
+                for plan in plans[key]:
                     data = self.payload_builder.make_tracking_data(
                         turn_batch=turn_batch,
                         file_turn_map=file_turn_map,
                         plan=plan,
                         machine_deltaps=machine_deltaps,
-                        arrays_cache=arrays_cache,
-                        track_data=track_data,
+                        tracks=tracks,
                         n_run_turns=simulation_config.n_run_turns,
                     )
-                    config = self.setup_helper.make_worker_config(plan)
-                    payloads.append((data, config, primary_file_idx))
+                    payloads.append((data, self.setup_helper.make_worker_config(plan), file_idx))
 
-                    LOGGER.debug(
-                        "Worker %d: file=%d, range=%s/%s, sdir=%d, turns=%d, kick_plane=%s, observed_bpms=%d",
-                        len(payloads) - 1,
-                        primary_file_idx,
-                        range_spec.start_bpm,
-                        range_spec.end_bpm,
-                        range_spec.sdir,
-                        len(turn_batch),
-                        plan.kick_plane,
-                        len(plan.bpm_names),
-                    )
-
-        self._summarise_file_usage(payloads, len(self.interface_options_per_file))
+        self._summarise_file_usage(
+            payloads,
+            len(self.interface_options_per_file),
+            frozenset(file_turn_map[turn] for batch in turn_batches for turn in batch),
+        )
         return payloads
 
     def _build_payload_split(
         self,
-        track_data: dict[int, pd.DataFrame],
+        tracks: dict[int, FileTracks],
         turn_batches: list[list[int]],
         validation_turn_batches: list[list[int]],
         file_turn_map: dict[int, int],
@@ -273,7 +215,7 @@ class WorkerManager:
         training and validation losses live on the same scale and are comparable.
         """
         training_payloads = self.create_worker_payloads(
-            track_data,
+            tracks,
             turn_batches,
             file_turn_map,
             start_bpms,
@@ -283,14 +225,12 @@ class WorkerManager:
         )
         if not validation_turn_batches:
             self.payload_builder.attach_global_weights(
-                training_payloads,
-                simulation_config.num_batches,
-                optimise_momenta=simulation_config.optimise_momenta,
+                training_payloads, optimise_momenta=simulation_config.optimise_momenta
             )
             return ValidationSplitResult(training_payloads, [])
 
         validation_candidates = self.create_worker_payloads(
-            track_data,
+            tracks,
             validation_turn_batches,
             file_turn_map,
             start_bpms,
@@ -302,14 +242,13 @@ class WorkerManager:
         # place) so validation loss is directly comparable to training loss.
         self.payload_builder.attach_global_weights(
             training_payloads + validation_candidates,
-            simulation_config.num_batches,
             optimise_momenta=simulation_config.optimise_momenta,
         )
-        return split_validation_payloads(training_payloads, validation_candidates, LOGGER)
+        return ValidationSplitResult(training_payloads, validation_candidates)
 
     def start_workers(
         self,
-        track_data: dict[int, pd.DataFrame],
+        tracks: dict[int, FileTracks],
         turn_batches: list[list[int]],
         validation_turn_batches: list[list[int]],
         file_turn_map: dict[int, int],
@@ -321,7 +260,6 @@ class WorkerManager:
         enable_validation: bool = True,
     ) -> None:
         """Start training workers plus held-out validation workers."""
-        self.track_data = {}
         self.turn_batches = turn_batches
         self.validation_turn_batches = validation_turn_batches
         self.file_turn_map = file_turn_map
@@ -330,18 +268,11 @@ class WorkerManager:
         self.simulation_config = simulation_config
         self.machine_deltaps = machine_deltaps
 
-        n_run_turns = 1 if simulation_config.run_arc_by_arc else simulation_config.n_run_turns
-        worker_mode = "arc-by-arc" if simulation_config.run_arc_by_arc else "multi-turn"
-
+        n_run_turns = simulation_config.n_run_turns
         training_payloads, validation_payloads = self._build_worker_payloads(
-            track_data, simulation_config, enable_validation
+            tracks, simulation_config, enable_validation
         )
 
-        LOGGER.info(
-            "Worker tracking mode: %s (n_run_turns=%d)",
-            worker_mode,
-            simulation_config.n_run_turns,
-        )
         LOGGER.info(
             "Starting %d trn worker(s) + %d held-out val worker(s)",
             len(training_payloads),
@@ -350,7 +281,7 @@ class WorkerManager:
 
         spawner = WorkerSpawner(self.setup_helper)
         training = spawner.spawn_training(
-            training_payloads, simulation_config, worker_mode, n_run_turns, initial_knobs
+            training_payloads, simulation_config, n_run_turns, initial_knobs
         )
         self.parent_conns = training.parent_conns
         self.workers = training.workers
@@ -365,7 +296,6 @@ class WorkerManager:
                 validation_payloads,
                 len(training_payloads),
                 simulation_config,
-                worker_mode,
                 n_run_turns,
                 initial_knobs,
             )
@@ -383,14 +313,14 @@ class WorkerManager:
 
     def _build_worker_payloads(
         self,
-        track_data: dict[int, pd.DataFrame],
+        tracks: dict[int, FileTracks],
         simulation_config: SimulationConfig,
         enable_validation: bool,
     ) -> tuple[list, list]:
         """Build training and held-out validation payloads with global weights attached."""
         validation_batches = self.validation_turn_batches if enable_validation else []
         split = self._build_payload_split(
-            track_data,
+            tracks,
             self.turn_batches,
             validation_batches,
             self.file_turn_map,
@@ -461,7 +391,8 @@ class WorkerManager:
         worker_sigma_threshold: float = 2.0,
     ) -> None:
         """Screen and mask outliers before optimisation starts."""
-        OutlierScreener(self.payload_builder).screen(
+        screener = OutlierScreener(self.payload_builder)
+        result = screener.screen(
             channels=self._channels(),
             parent_conns=self.parent_conns,
             worker_metadata=self.worker_metadata,
@@ -469,11 +400,28 @@ class WorkerManager:
             bpm_sigma_threshold=bpm_sigma_threshold,
             worker_sigma_threshold=worker_sigma_threshold,
         )
+        # The same decisions must reach the validation workers: they partition
+        # the same measurement files, so leaving them unscreened makes the
+        # held-out loss score precisely the data the fit was told to ignore.
+        if result is not None and self.validation_parent_conns:
+            masks, disabled = screener.build_validation_screening(
+                self.worker_metadata,
+                result.bpm_masks,
+                result.worker_disabled,
+                self.validation_metadata,
+            )
+            screener.apply_screening_actions(
+                self.validation_parent_conns,
+                self.validation_metadata,
+                masks,
+                disabled,
+                self._validation_channels(),
+            )
 
     def collect_worker_results(self, total_turns: int) -> tuple[float, np.ndarray]:
         """Collect results from all workers for an epoch."""
         total_loss = 0.0
-        agg_grad = np.zeros_like(self.optimise_knobs, dtype=np.float64)
+        agg_grad: np.ndarray | None = None
         if not self.parent_conns:
             raise RuntimeError("No workers to collect results from!")
 
@@ -482,10 +430,7 @@ class WorkerManager:
                 raise_for_worker_error_payload(result)
             _, grad, loss = result  # ty:ignore[not-iterable]
             grad_flat = grad.flatten()
-            if i == 0:
-                agg_grad = grad_flat.copy()
-            else:
-                agg_grad += grad_flat
+            agg_grad = grad_flat.copy() if agg_grad is None else agg_grad + grad_flat
             total_loss += loss
 
         return total_loss / total_turns, agg_grad
@@ -536,7 +481,7 @@ class WorkerManager:
                 self._validation_channels(), self._validation_worker_particle_counts, offset
             )
 
-    def build_update_coords(self, updated_track_data: dict[int, pd.DataFrame]) -> np.ndarray:
+    def build_update_coords(self, tracks: dict[int, FileTracks]) -> np.ndarray:
         """Build the combined ``x, px, y, py`` array for training and validation workers.
 
         Returns a float64 array of shape ``(n_total_particles, 4)`` suitable for
@@ -549,7 +494,7 @@ class WorkerManager:
         has_validation = bool(self._validation_worker_particle_counts)
         if has_validation:
             split = self._build_payload_split(
-                updated_track_data,
+                tracks,
                 self.turn_batches,
                 self.validation_turn_batches,
                 self.file_turn_map,
@@ -561,7 +506,7 @@ class WorkerManager:
             all_payloads = split.training_payloads + split.validation_payloads
         else:
             all_payloads = self.create_worker_payloads(
-                updated_track_data,
+                tracks,
                 self.turn_batches,
                 self.file_turn_map,
                 self.start_bpms,
@@ -595,12 +540,24 @@ class WorkerManager:
             if result_dict is None:
                 raise RuntimeError(f"Unexpected validation payload from worker: {result!r}")
 
+            if result_dict.get("disabled"):
+                # Screened out before the loop started; it holds no usable data.
+                continue
             loss_value = result_dict.get("loss")
             if not isinstance(loss_value, int | float | np.floating):
                 raise RuntimeError(f"Validation worker payload missing numeric loss: {result!r}")
             losses.append(float(loss_value))
 
         if not losses:
+            if results:
+                # Every validation worker was screened out. That degrades early
+                # stopping to the training loss silently, so say so rather than
+                # looking like validation was never configured.
+                LOGGER.warning(
+                    "All %d validation workers were disabled by screening; no held-out "
+                    "loss is available and early stopping falls back to the training loss.",
+                    len(results),
+                )
             return None
 
         # Each validation worker already reports a per-turn, per-BPM-point loss, so
@@ -634,57 +591,103 @@ class WorkerManager:
             worker.terminate()
             worker.join()
 
+    def set_training_knobs(self, knobs: dict[str, float]) -> None:
+        """Load ``knobs`` into every training worker, e.g. the best knobs before the Hessian."""
+        channels = self._channels()
+        channels.send_all({"cmd": "set_knobs", "knobs": knobs})
+        for response in channels.recv_all():
+            self._assert_control_ack(response, command="set_knobs")
+
     def termination_and_hessian(
         self,
         n_knobs: int,
         estimate_hessian: bool = True,
-        parallelism: bool | int = True,
-    ) -> np.ndarray:
-        """Terminate training workers, collect Hessians, then stop validation."""
-        LOGGER.info("Terminating workers...")
-        hessians = self._collect_hessians(estimate_hessian, parallelism)
-        self._stop_validation_workers()
-        return np.add.reduce(hessians) if hessians else np.zeros((n_knobs, n_knobs))
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Terminate training workers, collect ``(A, B)``, then stop validation.
 
-    def _collect_hessians(self, estimate_hessian: bool, parallelism: bool | int) -> list[np.ndarray]:
-        """Collect worker Hessians and shut workers down with bounded concurrency.
-
-        When max_parallel >= n_workers (parallelism=True), all workers are shut down in a
-        single broadcast using the pre-built self.channels. Otherwise workers are stopped in
-        consecutive chunks of max_parallel; parallelism=False gives chunk size 1 (serial).
+        Feed both matrices to :func:`sandwich_uncertainties`.
         """
-        max_parallel = self._normalise_hessian_parallelism(parallelism)
+        LOGGER.info("Terminating workers...")
+        normal, noise = self._collect_uncertainty(n_knobs, estimate_hessian)
+        self._stop_validation_workers()
+        return normal, noise
 
-        def _drain(channels: WorkerChannels, workers: list) -> list[np.ndarray]:
-            if not estimate_hessian:
-                channels.send_all({"cmd": "set_hessian_mode", "enabled": False})
-                for response in channels.recv_all():
-                    self._assert_control_ack(response, command="set_hessian_mode")
-            channels.send_all((None, None))
-            hessians = []
-            for hessian in channels.recv_all():
-                if not isinstance(hessian, np.ndarray):
-                    raise RuntimeError(f"Unexpected Hessian payload from worker: {hessian!r}")
-                hessians.append(hessian)
-            for worker in workers:
-                worker.join()
-            return hessians
+    def _collect_uncertainty(
+        self, n_knobs: int, estimate_hessian: bool
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Stop training workers in memory-bounded chunks and fold their parts into ``(A, B)``.
 
-        if max_parallel >= len(self.workers):
-            channels = self.channels if self.channels is not None else WorkerChannels(self.parent_conns, self.workers)
-            return _drain(channels, self.workers)
+        Reading ids are file-scoped, so once every worker of a file has reported, that
+        file's merged readings become its ``B`` contribution and are dropped. Workers are
+        drained in file order, so besides the chunk being received at most one partly
+        merged file is held.
+        """
+        normal = np.zeros((n_knobs, n_knobs), dtype=np.float64)
+        noise = np.zeros((n_knobs, n_knobs), dtype=np.float64)
+        files = [meta.file_idx for meta in self.worker_metadata]
+        order = sorted(range(len(self.workers)), key=files.__getitem__)
+        remaining = Counter(files)
+        chunk_size = (
+            self._uncertainty_concurrency(n_knobs) if estimate_hessian else max(1, len(order))
+        )
 
-        hessians: list[np.ndarray] = []
-        for start in range(0, len(self.workers), max_parallel):
-            chunk_conns = self.parent_conns[start : start + max_parallel]
-            chunk_workers = self.workers[start : start + max_parallel]
-            hessians.extend(_drain(WorkerChannels(chunk_conns, chunk_workers), chunk_workers))
-        return hessians
+        pending: dict[int, UncertaintyPart] = {}
+        for start in range(0, len(order), chunk_size):
+            chunk = order[start : start + chunk_size]
+            parts_by_file: dict[int, list[UncertaintyPart]] = defaultdict(list)
+            for idx, part in zip(chunk, self._drain_uncertainty_parts(chunk, estimate_hessian)):
+                parts_by_file[files[idx]].append(part)
+            for file_idx, parts in parts_by_file.items():
+                remaining[file_idx] -= len(parts)
+                if file_idx in pending:
+                    parts.append(pending.pop(file_idx))
+                merged = merge_uncertainty_parts(parts, n_knobs)
+                if remaining[file_idx]:
+                    pending[file_idx] = merged
+                else:
+                    normal += merged.normal
+                    noise += noise_matrix(merged)
+        return normal, noise
 
-    def _normalise_hessian_parallelism(self, parallelism: bool | int) -> int:
-        """Convert config input into an explicit concurrency cap."""
-        if isinstance(parallelism, bool):
-            return len(self.workers) if parallelism else 1
-        if parallelism < 1:
-            raise ValueError("Hessian parallelism must be at least 1")
-        return min(parallelism, len(self.workers))
+    def _drain_uncertainty_parts(
+        self, indices: list[int], estimate_hessian: bool
+    ) -> list[UncertaintyPart]:
+        """Send the termination sentinel to the given workers and return their parts in order."""
+        workers = [self.workers[idx] for idx in indices]
+        channels = WorkerChannels([self.parent_conns[idx] for idx in indices], workers)
+        if not estimate_hessian:
+            channels.send_all({"cmd": "set_hessian_mode", "enabled": False})
+            for response in channels.recv_all():
+                self._assert_control_ack(response, command="set_hessian_mode")
+        channels.send_all((None, None))
+        parts = channels.recv_all()
+        for part in parts:
+            if not isinstance(part, UncertaintyPart):
+                raise RuntimeError(f"Unexpected uncertainty payload from worker: {part!r}")
+        for worker in workers:
+            worker.join()
+        return cast("list[UncertaintyPart]", parts)
+
+    def _uncertainty_concurrency(self, n_knobs: int) -> int:
+        """Return how many workers may send uncertainty parts at once within half the free memory.
+
+        A part has at most one row per observed point for up to two observables per
+        kicked plane, plus one start row per plane and particle. Each row holds
+        ``n_knobs`` sensitivities, an id and a variance, 8 bytes each.
+        """
+        largest = 0
+        for meta, particles in zip(self.worker_metadata, self._worker_particle_counts):
+            planes = 2 if self._plane_value(meta.kick_plane) == "xy" else 1
+            points = len(meta.bpm_names) * meta.n_run_turns
+            rows = particles * planes * (2 * points + 1)
+            largest = max(largest, rows * (n_knobs + 2) * 8)
+        available = psutil.virtual_memory().available
+        concurrency = max(1, min(len(self.workers), int(0.5 * available // max(largest, 1))))
+        LOGGER.info(
+            "Uncertainty stage: largest worker part <= %.1f MiB, %.1f MiB available, "
+            "%d worker(s) at once",
+            largest / 2**20,
+            available / 2**20,
+            concurrency,
+        )
+        return concurrency

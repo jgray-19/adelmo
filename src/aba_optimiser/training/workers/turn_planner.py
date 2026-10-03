@@ -3,8 +3,9 @@
 Batching is intentionally simple: the caller (``DataManager``) has already carved
 out the held-out validation turns and applied ``data_fraction`` sampling, so the
 turns handed to the planner are exactly the training turns to be used. The planner
-only has to spread those turns evenly across the batches implied by
-``num_workers`` (one batch per turn-group, later fanned out over range specs).
+only has to spread those turns evenly across the batches implied by ``num_workers``
+(one batch per turn-group, later fanned out over range specs). Every batch comes
+from a single measurement file.
 """
 
 from __future__ import annotations
@@ -73,28 +74,6 @@ def _split_even(turns: list[int], num_chunks: int) -> list[list[int]]:
     return chunks
 
 
-def _get_range_spec_plan(
-    *,
-    run_arc_by_arc: bool,
-    use_fixed_bpm: bool,
-    num_starts: int,
-    num_ends: int,
-) -> tuple[int, str]:
-    """Return (range_specs_per_batch, description) for the given planning mode.
-
-    Thin wrapper around ``TrackingPlan.range_specs_per_batch`` for use in tests
-    and helper code that does not have a ``TrackingPlan`` instance.
-    """
-    from aba_optimiser.training.config.tracking import ArcByArcTrackingPlan
-
-    return ArcByArcTrackingPlan().range_specs_per_batch(
-        run_arc_by_arc=run_arc_by_arc,
-        use_fixed_bpm=use_fixed_bpm,
-        num_starts=num_starts,
-        num_ends=num_ends,
-    )
-
-
 @dataclass(frozen=True)
 class WorkerTurnBatchPlan:
     """Concrete turn-batch plan plus logging metadata."""
@@ -139,7 +118,6 @@ class WorkerTurnPlanner:
         turns_by_file = group_turns_by_file(available_turns, file_map)
         num_workers = self.simulation_config.num_workers
         range_specs_per_batch, range_specs_desc = self.tracking_plan.range_specs_per_batch(
-            run_arc_by_arc=self.simulation_config.run_arc_by_arc,
             use_fixed_bpm=self.simulation_config.use_fixed_bpm,
             num_starts=num_starts,
             num_ends=num_ends,
@@ -152,6 +130,20 @@ class WorkerTurnPlanner:
         worker_turn_batches = max(1, num_workers // max(1, range_specs_per_batch))
         total_turns = sum(len(turns) for turns in turns_by_file.values())
         num_turn_batches = min(worker_turn_batches, total_turns)
+        # Every batch comes from one file, so fewer batches than files would leave
+        # whole files untrained (lowest file ids win). Never drop data to honour the
+        # worker cap: give every file with training turns at least one batch.
+        if num_turn_batches < len(turns_by_file):
+            LOGGER.warning(
+                "num_workers=%d gives %d turn batches for %d files with training turns; "
+                "raising to %d batches (%d workers) so that every file is trained",
+                num_workers,
+                num_turn_batches,
+                len(turns_by_file),
+                len(turns_by_file),
+                len(turns_by_file) * range_specs_per_batch,
+            )
+            num_turn_batches = len(turns_by_file)
 
         LOGGER.info(
             "Worker planning: requested=%d workers, range_specs_per_batch=%d (%s), starts=%d, ends=%d",
@@ -182,8 +174,10 @@ class WorkerTurnPlanner:
             self.simulation_config.num_batches,
         )
 
+        turn_batches = self._materialise_turn_batches(turns_by_file, num_turn_batches)
+
         return WorkerTurnBatchPlan(
-            turn_batches=self._materialise_turn_batches(turns_by_file, num_turn_batches),
+            turn_batches=turn_batches,
             range_specs_per_batch=range_specs_per_batch,
             range_specs_desc=range_specs_desc,
         )
