@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 import tfs
 from pymadng_utils.io.utils import read_knobs
-from tmom_recon.lattice.bpms import find_common_bpms
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -25,6 +24,16 @@ __all__ = [
     "load_tfs_files",
     "normalise_true_strengths",
 ]
+
+
+def find_common_bpms(*dataframes: pd.DataFrame) -> list[str]:
+    """Return BPM names common to all tables, preserving the first table order."""
+    if not dataframes:
+        return []
+    common = set(dataframes[0].index)
+    for dataframe in dataframes[1:]:
+        common &= set(dataframe.index)
+    return [str(bpm) for bpm in dataframes[0].index if bpm in common]
 
 
 def filter_bad_bpms(
@@ -189,4 +198,13 @@ def create_bpm_range_specs(
             (s, e, sdir) for s in bpm_start_points for e in bpm_end_points for sdir in (1, -1)
         ]
 
+    # MAD tracks "A/A" as the single element A: the worker would observe only its own
+    # start point and constrain nothing.
+    degenerate = sorted({s for s, e, _ in range_specs if s == e})
+    if degenerate:
+        raise ValueError(
+            f"BPM ranges must not start and end at the same BPM: {degenerate}. "
+            "Choose start and end points that differ (with use_fixed_bpm, the fixed start "
+            "and end BPMs must also not appear among the end and start points)."
+        )
     return range_specs

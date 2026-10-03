@@ -140,6 +140,8 @@ class BaseFitter(ABC):
         true_strengths_dict = normalise_true_strengths(true_strengths)
         true_strengths_delta = self.convert_deltap_to_pt(true_strengths_dict)
         initial_knobs_delta = self.convert_deltap_to_pt(initial_knob_strengths)
+        if initial_knobs_delta is not None:
+            initial_knobs_delta = self.accelerator.normalise_initial_knobs(initial_knobs_delta)
 
         # Initialize knob strengths in optimisation space
         self.initial_knobs, self.filtered_true_strengths = (

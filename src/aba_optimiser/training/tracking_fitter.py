@@ -6,7 +6,6 @@ entry points are its thin subclasses, one per tracking geometry:
 
 * :class:`ArcByArcFitter` -- arc-by-arc ranges, with the AC dipole optionally
   accounted for (``acd_excited``).
-* :class:`FullRingFitter` -- whole-ring multi-turn tracking from ``$start``.
 * :class:`KickerFitter` -- forward-only tracking from a kicker marker.
 * :class:`ACDMarkerFitter` -- bidirectional tracking from the AC-dipole markers.
 """
@@ -28,12 +27,11 @@ from aba_optimiser.training.config.tracking import (
     TrackingModeSetup,
     acd_marker_setup,
     arc_by_arc_setup,
-    full_ring_setup,
     kicker_setup,
 )
 from aba_optimiser.training.data_manager import DataManager
 from aba_optimiser.training.workers.manager import WorkerManager
-from aba_optimiser.workers.common import hessian_uncertainties
+from aba_optimiser.workers.common import sandwich_uncertainties
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -72,6 +70,7 @@ class FitterOptions(TypedDict, total=False):
     output_config: OutputConfig | None
     checkpoint_config: CheckpointConfig | None
     initial_conditions_callback: Callable[[dict[str, float], dict[str, float]], np.ndarray | None] | None
+    loss_callback: Callable[[int, float, float | None, float, float], None] | None
 
 
 class TrackingFitter(BaseFitter):
@@ -82,8 +81,8 @@ class TrackingFitter(BaseFitter):
     optimisation loop, and Hessian-based uncertainties) shared by every tracking
     geometry. It is not constructed directly: the ``tracking_plan`` and rewritten
     ``simulation_config`` come from a :class:`TrackingModeSetup` built by one of the
-    public subclasses (:class:`ArcByArcFitter`, :class:`FullRingFitter`,
-    :class:`KickerFitter`, :class:`ACDMarkerFitter`). Those subclasses forward the
+    public subclasses (:class:`ArcByArcFitter`, :class:`KickerFitter`,
+    :class:`ACDMarkerFitter`). Those subclasses forward the
     shared optional inputs here as ``**fitter_options`` (see :class:`FitterOptions`).
 
     Design: optimisation-space only internally and externally. All user inputs,
@@ -106,8 +105,11 @@ class TrackingFitter(BaseFitter):
         optimise_knobs: list[str] | None = None,
         output_config: OutputConfig | None = None,
         checkpoint_config: CheckpointConfig | None = None,
-        initial_conditions_callback: Callable[[dict[str, float], dict[str, float]], np.ndarray | None]
+        initial_conditions_callback: Callable[
+            [dict[str, float], dict[str, float]], np.ndarray | None
+        ]
         | None = None,
+        loss_callback: Callable[[int, float, float | None, float, float], None] | None = None,
     ):
         """
         Initialise the fitter with all required managers.
@@ -156,6 +158,7 @@ class TrackingFitter(BaseFitter):
         self.output_config = output_config if output_config is not None else OutputConfig()
         self.checkpoint_config = checkpoint_config
         self.initial_conditions_callback = initial_conditions_callback
+        self.loss_callback = loss_callback
 
         # BaseFitter will normalise the optimisation-space inputs and handle
         # tracking-specific energy parameter conversions in this subclass.
@@ -173,14 +176,14 @@ class TrackingFitter(BaseFitter):
             output_config=self.output_config,
         )
 
-        # Initialize tracking-specific managers
+        # Initialise tracking-specific managers
         self._init_data_manager()
 
         self._init_worker_manager(
             sequence_config.magnet_range,
             sequence_config.bad_bpms,
         )
-        # Initialize OptimisationLoop and ResultManager now that _init_data_manager
+        # Initialise OptimisationLoop and ResultManager now that _init_data_manager
         # has finalised simulation_config.num_batches.
         BaseFitter._init_managers(self)
 
@@ -201,7 +204,7 @@ class TrackingFitter(BaseFitter):
 
         try:
             self.worker_manager.start_workers(
-                self.data_manager.track_data,
+                self.data_manager.tracks,
                 self.data_manager.turn_batches,
                 self.data_manager.validation_turn_batches,
                 self.data_manager.file_map,
@@ -236,13 +239,17 @@ class TrackingFitter(BaseFitter):
                 total_turns,
                 checkpoint_config=self.checkpoint_config,
                 validation_loss_fn=self.worker_manager.compute_validation_loss,
+                loss_callback=self.loss_callback,
                 epoch_end_hook=epoch_end_hook,
             )
 
+            # Workers still hold the last batch's knobs; the Hessian must be taken
+            # at the knobs we return.
+            if self.output_config.include_uncertainty:
+                self.worker_manager.set_training_knobs(self.final_knobs)
             total_hessian = self.worker_manager.termination_and_hessian(
                 len(self.final_knobs),
                 estimate_hessian=self.output_config.include_uncertainty,
-                parallelism=self.output_config.parallel_hessian,
             )
         except RuntimeError as e:
             logger.error(f"optimisation failed: {e}")
@@ -258,9 +265,6 @@ class TrackingFitter(BaseFitter):
         finally:
             if self.final_knobs is None:
                 self.final_knobs = self.optimisation_loop.best_knobs
-
-        self.final_knobs = self._format_result_knobs(self.final_knobs)
-        self.filtered_true_strengths = self._format_result_knobs(self.filtered_true_strengths)
 
         uncertainties = self._finalise_results(total_hessian, writer)
         uncertainties = dict(zip(self.final_knobs.keys(), uncertainties))
@@ -289,7 +293,7 @@ class TrackingFitter(BaseFitter):
         workers_finalised = False
         try:
             self.worker_manager.start_workers(
-                self.data_manager.track_data,
+                self.data_manager.tracks,
                 self.data_manager.turn_batches,
                 self.data_manager.validation_turn_batches,
                 self.data_manager.file_map,
@@ -300,16 +304,12 @@ class TrackingFitter(BaseFitter):
                 initial_worker_values,
                 enable_validation=self.tracking_plan.enable_validation,
             )
-            total_hessian = self.worker_manager.termination_and_hessian(
+            total_hessian, _ = self.worker_manager.termination_and_hessian(
                 len(self.config_manager.knob_names),
                 estimate_hessian=True,
-                parallelism=self.output_config.parallel_hessian,
             )
             # termination_and_hessian shuts the workers down cleanly itself.
             workers_finalised = True
-        except Exception as e:
-            logger.error(f"degeneracy check failed: {e}")
-            raise
         finally:
             if not workers_finalised:
                 self.worker_manager.terminate_workers()
@@ -383,11 +383,6 @@ class TrackingFitter(BaseFitter):
         del self.data_manager
         gc.collect()
 
-    def _format_result_knobs(self, knobs: dict[str, float]) -> dict[str, float]:
-        """Map internal optimisation-space knob names to user-facing result names."""
-        formatted = knobs.copy()
-        return formatted
-
     def _format_result_uncertainties(self, uncertainties: np.ndarray) -> np.ndarray:
         """Align uncertainty values with the formatted output knob ordering."""
         uncertainty_by_knob = dict(zip(self.config_manager.knob_names, uncertainties, strict=True))
@@ -398,16 +393,15 @@ class TrackingFitter(BaseFitter):
 
     def _finalise_results(
         self,
-        total_hessian: np.ndarray | None,
+        total_hessian: tuple[np.ndarray, np.ndarray] | None,
         writer: SummaryWriter | None,
     ) -> np.ndarray:
         """Save final results in optimisation space."""
         # Calculate uncertainties only when explicitly requested.
         if self.output_config.include_uncertainty and total_hessian is not None:
-            # The tracking Hessian is accumulated in MAD as ``Σ jᵀ W j`` = ``JᵀWJ``
-            # with physical (raw inverse-variance) weights, so it is exactly the
-            # normal matrix the shared helper expects.
-            uncertainties = hessian_uncertainties(total_hessian)
+            # ``(A, B)``: the normal matrix and the measurement noise propagated
+            # through every observation and start coordinate, Cov = A⁻¹ B A⁻¹.
+            uncertainties = sandwich_uncertainties(*total_hessian)
         else:
             uncertainties = np.zeros(len(self.final_knobs), dtype=np.float64)
 
@@ -421,7 +415,7 @@ class TrackingFitter(BaseFitter):
         return uncertainties_abs
 
     def _init_data_manager(self) -> None:
-        """Initialize data manager and load track data."""
+        """Initialise data manager and load track data."""
         observed_bpms = self.tracking_plan.observed_bpms(
             self.config_manager.bpms_in_range,
             self.config_manager.all_bpms,
@@ -462,8 +456,6 @@ class TrackingFitter(BaseFitter):
         )
 
         self.worker_manager = WorkerManager(
-            self.config_manager.calculate_n_data_points(),
-            ybpm=magnet_range.split("/")[0],  # Assume start bpm has largest vertical kick
             magnet_range=magnet_range,
             fixed_start=self.config_manager.fixed_start,
             fixed_end=self.config_manager.fixed_end,
@@ -522,39 +514,6 @@ class ArcByArcFitter(TrackingFitter):
             bpm_start_points=bpm_start_points,
             bpm_end_points=bpm_end_points,
             acd_excited=acd_excited,
-        )
-        super().__init__(
-            setup,
-            accelerator=accelerator,
-            optimiser_config=optimiser_config,
-            sequence_config=sequence_config,
-            measurement_config=measurement_config,
-            **fitter_options,
-        )
-
-
-class FullRingFitter(TrackingFitter):
-    """Fit magnet strengths from whole-ring multi-turn tracking.
-
-    Every worker tracks the full ring bidirectionally from the fixed turn-increment
-    start, for free-oscillation data spanning many turns
-    (``simulation_config.n_run_turns``). The ``bpm_start_points`` only seed the
-    per-plane split; the ring anchor is always ``$start``.
-    """
-
-    def __init__(
-        self,
-        accelerator: Accelerator,
-        optimiser_config: OptimiserConfig,
-        simulation_config: SimulationConfig,
-        sequence_config: SequenceConfig,
-        measurement_config: MeasurementConfig,
-        bpm_start_points: list[str],
-        **fitter_options: Unpack[FitterOptions],
-    ):
-        setup = full_ring_setup(
-            simulation_config=simulation_config,
-            bpm_start_points=bpm_start_points,
         )
         super().__init__(
             setup,

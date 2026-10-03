@@ -96,12 +96,14 @@ class OptimisationLoop:
         """Initialise the optimiser based on type."""
         optimiser_type = optimiser_config.optimiser_type
         if optimiser_type in {"adam", "amsgrad"}:
+            eps = {} if optimiser_config.adam_eps is None else {"eps": optimiser_config.adam_eps}
             self.optimiser = BaseOptimiser.create(
                 optimiser_type,
                 shape=shape,
                 beta1=0.9,
                 beta2=0.999,
                 weight_decay=optimiser_config.adam_weight_decay,
+                **eps,
             )
         elif optimiser_type == "lbfgs":
             self.optimiser = BaseOptimiser.create(
@@ -168,6 +170,8 @@ class OptimisationLoop:
         total_turns: int,
         checkpoint_config: CheckpointConfig | None = None,
         validation_loss_fn: Callable[[dict[str, float]], float | None] | None = None,
+        loss_callback: Callable[[int, float, float | None, float, float], None]
+        | None = None,
         epoch_end_hook: Callable[[dict[str, float], dict[str, float]], str | None]
         | None = None,
     ) -> dict[str, float]:
@@ -280,6 +284,8 @@ class OptimisationLoop:
                 validation_loss,
                 hook_note,
             )
+            if loss_callback is not None:
+                loss_callback(epoch, epoch_loss, validation_loss, grad_norm, sum_true_diff)
 
             if stop_for_loss_change:
                 LOGGER.info(f"\nLoss change below threshold. Stopping early at epoch {epoch}.")
