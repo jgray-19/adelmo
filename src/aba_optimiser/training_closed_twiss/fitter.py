@@ -40,13 +40,21 @@ logger = logging.getLogger(__name__)
 #: ``mu1``/``mu2`` are special: the measured frame carries the *cumulative* phase
 #: and its cumulative variance, which are differenced into per-interval advances
 #: (with the variance difference) by :func:`_advance_targets`.
+#:
+#: ``betx``/``bety``/``alfx``/``alfy`` are the physical-plane projections, never
+#: ``beta11``/``beta22``/``alfa11``/``alfa22`` (MAD-NG's generalised-mode
+#: columns, only meaningful with ``coupling=true`` -- see
+#: ``run_closed_twiss_init.mad``). Phase advance has no such projected name in
+#: MAD-NG (confirmed against its own optical-function name list: only
+#: ``mu``/``dmu`` with a mode-index suffix exist, no ``mux``/``muy``), so
+#: ``mu1``/``mu2`` remain mode-indexed on both sides here.
 MEASUREMENT_COLUMNS: dict[str, tuple[str, str]] = {
     "x": ("X", "ERRX"),
     "y": ("Y", "ERRY"),
-    "beta11": ("BETX", "ERRBETX"),
-    "beta22": ("BETY", "ERRBETY"),
-    "alfa11": ("ALFX", "ERRALFX"),
-    "alfa22": ("ALFY", "ERRALFY"),
+    "betx": ("BETX", "ERRBETX"),
+    "bety": ("BETY", "ERRBETY"),
+    "alfx": ("ALFX", "ERRALFX"),
+    "alfy": ("ALFY", "ERRALFY"),
     "dx": ("DX", "ERRDX"),
     "dy": ("DY", "ERRDY"),
     "dpx": ("DPX", "ERRDPX"),
@@ -76,10 +84,10 @@ MEASUREMENT_COLUMNS: dict[str, tuple[str, str]] = {
 DEFAULT_OBSERVABLES: tuple[str, ...] = (
     "x",
     "y",
-    "beta11",
-    "beta22",
-    "alfa11",
-    "alfa22",
+    "betx",
+    "bety",
+    "alfx",
+    "alfy",
     "mu1",
     "mu2",
     "dx",
@@ -180,13 +188,16 @@ class _GaussNewtonFitter(BaseFitter):
         """
         knob_names = list(self.config_manager.knob_names)
         current = np.array([float(self.initial_knobs[name]) for name in knob_names], dtype=float)
-        prior_mean = current.copy()
+        # Error knobs are regularised toward the ideal zero-error lattice. The
+        # optimisation start is independent and must not redefine that prior.
+        prior_mean = np.zeros_like(current)
         prior_alphas: np.ndarray | None = None
         run_start = time.time()
 
         optimiser = LevenbergMarquardtOptimiser(self.lm_config, initial_params=current)
         last_update = None
         completed_iterations = 0
+        accepted_evaluations = 0
 
         for iteration in range(self.lm_config.max_iterations):
             completed_iterations = iteration + 1
@@ -207,6 +218,8 @@ class _GaussNewtonFitter(BaseFitter):
                 )
             update = optimiser.update(current, loss, grad, hessian, particle_loss)
             last_update = update
+            if update.accepted:
+                accepted_evaluations += 1
             current = update.next_params
 
             # A rejected step is not a no-op: the optimiser has already retried
@@ -260,6 +273,7 @@ class _GaussNewtonFitter(BaseFitter):
                 None if last_update is None else float(last_update.grad_norm)
             ),
             "damping": None if last_update is None else float(last_update.damping),
+            "accepted_evaluations": accepted_evaluations,
         }
         # The optimiser's Hessian is in the worker's normalised weight space, so
         # its inverse is not a covariance in physical knob units. Re-evaluate the
@@ -288,12 +302,19 @@ class _GaussNewtonFitter(BaseFitter):
         physical (un-normalised, true inverse-variance) Hessian whose inverse is
         the parameter covariance in real knob units.
         """
+        return self._sum_gn(self._exchange(channels, knobs), len(knob_names))
+
+    def _exchange(self, channels, knobs: dict[str, float]) -> list:
+        """Send ``knobs`` to the workers and return their replies (the summed workers' replies, in order)."""
         channels.send_all((knobs, 0))
-        results = channels.recv_all()
+        return channels.recv_all()
+
+    @staticmethod
+    def _sum_gn(results: list, n: int) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, bool]:
+        """Sum the ``(id, grad, loss, hessian, hessian_phys)`` replies of the workers (see :meth:`_collect_gn`)."""
         if not results:
             raise RuntimeError("No closed-twiss workers returned results")
 
-        n = len(knob_names)
         total_loss = 0.0
         agg_grad = np.zeros(n)
         agg_hess = np.zeros((n, n))
@@ -530,8 +551,11 @@ def load_measurement(
         observables: Observable names that must be present.
 
     Returns:
-        DataFrame indexed by BPM name. Missing error columns are filled with NaN,
-        which drops those points unless ``use_errors=False``.
+        DataFrame indexed by BPM name. Missing error columns are filled with NaN.
+        Individual NaN errors drop their own points; an observable whose errors
+        are *all* unusable is rejected by :func:`_build_observable` unless the
+        caller passes ``use_errors=False``, because a family with no variances
+        cannot be weighted commensurably against families that have them.
     """
     if isinstance(source, pd.DataFrame):
         measurement = source.copy()
@@ -736,20 +760,40 @@ def _build_observable(
         errors = measurement.loc[bpms, err_column].to_numpy(dtype=float)
         variances = errors**2
 
-    if not use_errors or not np.any(np.isfinite(variances) & (variances > 0)):
+    usable = np.isfinite(variances) & (variances > 0)
+    if use_errors and not np.any(usable):
+        finite = np.isfinite(variances)
+        raise ValueError(
+            f"Observable {name!r} (pt={pt:g}) has no usable measurement errors: "
+            f"n={variances.size}, finite={int(np.count_nonzero(finite))}, "
+            f"positive=0, zero={int(np.count_nonzero(finite & (variances == 0)))}, "
+            f"negative={int(np.count_nonzero(finite & (variances < 0)))}. "
+            f"Column {err_column!r} is empty or identically zero. Falling back to a "
+            "1/<target^2> weight is not an option here: that scale is in this "
+            "family's own physical units, so against families that do carry real "
+            "variances it is not a weight at all -- the family is silently deleted "
+            "from the fit. Supply real errors, or set use_errors=False so *every* "
+            "family is normalised the same way."
+        )
+
+    if not use_errors:
         # Weight each family by the inverse of its own mean square target. Without
         # this an unweighted fit would be dominated by whichever family happens to
         # carry the largest numbers (beta in metres against orbit in millimetres),
         # which is a units artefact rather than a statement about information.
+        # Safe only because *no* family carries real variances in this branch.
         scale = float(np.mean(targets[np.isfinite(targets)] ** 2)) if targets.size else 1.0
         if not np.isfinite(scale) or scale <= 0.0:
             scale = 1.0
+        variances = np.full_like(targets, scale, dtype=float)
+    elif not np.all(usable):
         logger.warning(
-            "No usable errors for '%s' (pt=%g); weighting by 1/<target^2> = %.3e.",
+            "Observable '%s' (pt=%g): %d/%d points have no usable error and carry "
+            "zero weight.",
             name,
             pt,
-            1.0 / scale,
+            int(np.count_nonzero(~usable)),
+            usable.size,
         )
-        variances = np.full_like(targets, scale, dtype=float)
 
     return Observable(name=name, targets=targets, variances=variances)
