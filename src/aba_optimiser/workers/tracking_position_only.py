@@ -14,7 +14,6 @@ class PositionOnlyConfigMixin:
 
     observables = ("x", "y")
     include_momentum = False
-    hessian_weight_order = ("x", "y")
 
 
 class PositionOnlyTrackingWorker(PositionOnlyConfigMixin, TrackingWorker):

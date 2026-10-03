@@ -41,10 +41,6 @@ class WorkerConfig:
     fields describe the local BPM range, tracking direction, and optional input
     files needed by the worker.
 
-    Note:
-        The old `start_bpm` / `end_bpm` / `observation_start_bpm` /
-        `init_marker` names were removed in favour of explicit tracking and
-        initial-condition terminology.
     """
 
     accelerator: Accelerator
@@ -56,11 +52,9 @@ class WorkerConfig:
     interface_options: dict[str, Any] = field(default_factory=dict)
     observation_range_start_bpm: str | None = None
     initial_condition_marker: str | None = None
-    # When False the worker leaves the sequence at its natural ``$start`` instead of
-    # cycling to ``tracking_start_bpm``. Cycling to a BPM places that BPM at both the
-    # ring start and the wrap, so full-ring multi-turn tracking observes it twice per
-    # turn and overflows the result vectors; full-ring workers therefore track from the
-    # fixed turn-increment start (``$start``) and only compare against their BPM range.
+    # Whether to cycle the sequence so tracking starts at this worker's init
+    # marker. Closed-twiss workers fit the whole ring from ``$start`` and set it
+    # False; every tracking plan cycles.
     cycle_sequence: bool = True
     sdir: int = 1
     kick_plane: KickPlane = KickPlane.XY
@@ -76,21 +70,17 @@ class WorkerConfig:
 
 @dataclass
 class PrecomputedTrackingWeights:
-    """Per-observable weights reused by multiple tracking workers.
+    """Per-observable, globally normalised weights for the loss and gradient.
 
-    The normalised arrays are used in the loss and gradient calculation, while
-    the Hessian arrays keep the unfloored aggregate weights needed for the
-    approximate second-order terms.
+    ``scale`` undoes the normalisation (``weight · scale = 1/σ²``), so the
+    uncertainty propagation can report a physical normal matrix.
     """
 
     x: np.ndarray
     y: np.ndarray
     px: np.ndarray
     py: np.ndarray
-    hessian_x: np.ndarray
-    hessian_y: np.ndarray
-    hessian_px: np.ndarray
-    hessian_py: np.ndarray
+    scale: float
 
 
 @dataclass
@@ -100,6 +90,10 @@ class TrackingData:
     Position and momentum comparison arrays use shape
     ``(n_particles, n_data_points, 2)``, with the last axis storing the two
     transverse components for each observable family.
+
+    Reading ids identify one measured grid cell (file, turn, marker) across all
+    workers, so the uncertainty propagation can add up every use of the same noisy
+    reading -- as an observation or as a start coordinate.
     """
 
     position_comparisons: np.ndarray  # Shape: (n_particles, n_data_points, 2)
@@ -108,7 +102,36 @@ class TrackingData:
     momentum_variances: np.ndarray  # Shape: (n_particles, n_data_points, 2)
     init_coords: np.ndarray  # Shape: (n_particles, 6)
     init_pts: np.ndarray  # Shape: (n_particles,)
+    reading_ids: np.ndarray  # Shape: (n_particles, n_data_points)
+    init_reading_ids: np.ndarray  # Shape: (n_particles,)
+    init_variances: np.ndarray  # Shape: (n_particles, 2), var of the start x, y
     precomputed_weights: PrecomputedTrackingWeights | None
+
+
+@dataclass
+class UncertaintyPart:
+    """One worker's contribution to the propagated knob covariance.
+
+    ``normal`` is ``Σ w J Jᵀ``. Each row ``r`` of ``sensitivities`` is the change in
+    that worker's gradient per unit noise on reading ``reading_ids[r]`` (an
+    observation, a start coordinate, or both), with ``variances[r]`` its declared
+    variance.
+    """
+
+    normal: np.ndarray  # Shape: (n_knobs, n_knobs)
+    reading_ids: np.ndarray  # Shape: (n_rows,)
+    sensitivities: np.ndarray  # Shape: (n_rows, n_knobs)
+    variances: np.ndarray  # Shape: (n_rows,)
+
+    @classmethod
+    def empty(cls, n_knobs: int) -> UncertaintyPart:
+        """A worker that contributes nothing (disabled, or uncertainty not requested)."""
+        return cls(
+            normal=np.zeros((n_knobs, n_knobs)),
+            reading_ids=np.zeros(0, dtype=np.int64),
+            sensitivities=np.zeros((0, n_knobs)),
+            variances=np.zeros(0),
+        )
 
 
 class ObservableKind(str, Enum):
@@ -132,10 +155,21 @@ class ObservableKind(str, Enum):
 #: to how their residual is formed. Names are ``gphys.optfun`` function names,
 #: except the closed-orbit coordinates which are read off the map's constant part.
 #:
-#: ``beta11``/``beta22`` are the uncoupled Ripken betas (the ``beta11``/``beta22``
-#: twiss columns). The coupled Edwards-Teng ``betx``/``bety`` are deliberately not
-#: offered: ``gphys`` routes those through ``nf_cplg``, which needs the beam's
-#: relativistic beta on the map and is unavailable on a bare saved map.
+#: ``betx``/``bety``/``alfx``/``alfy`` are the coupled Edwards-Teng/physical-plane
+#: projections, requested via ``coupling=true`` on the ``twiss{}`` call in
+#: ``run_closed_twiss_init.mad``. They are computed live as part of that twiss
+#: (the beam is attached throughout), not read back off a bare saved map
+#: afterward -- only the orbit coordinates (``x``/``y``/``px``/``py``, via
+#: ``ORBIT_COORDS``) take that route, for their knob Jacobian. Never use the
+#: uncoupled Ripken ``beta11``/``beta22``/``alfa11``/``alfa22`` columns here:
+#: under real coupling their mode/plane identity is not guaranteed to track x/y,
+#: so they are not comparable to an omc3 ``BETX``/``ALFX`` measurement by name
+#: coincidence alone.
+#:
+#: ``mu1``/``mu2`` stay mode-indexed: MAD-NG has no ``mux``/``muy`` optical
+#: function at all (confirmed against its own name list -- only ``mu``/``dmu``
+#: with a mode-index suffix exist), so there is no physical-plane phase-advance
+#: column to request in the first place.
 #:
 #: ``dx``/``dy`` are ``d(x)/d(pt)`` and ``d(y)/d(pt)`` - the MAD-X ``DX`` convention.
 #: ``dpx``/``dpy`` are available but should normally be left out when fitting
@@ -146,10 +180,10 @@ OBSERVABLE_KINDS: dict[str, ObservableKind] = {
     "y": ObservableKind.POINTWISE,
     "px": ObservableKind.POINTWISE,
     "py": ObservableKind.POINTWISE,
-    "beta11": ObservableKind.POINTWISE,
-    "beta22": ObservableKind.POINTWISE,
-    "alfa11": ObservableKind.POINTWISE,
-    "alfa22": ObservableKind.POINTWISE,
+    "betx": ObservableKind.POINTWISE,
+    "bety": ObservableKind.POINTWISE,
+    "alfx": ObservableKind.POINTWISE,
+    "alfy": ObservableKind.POINTWISE,
     "dx": ObservableKind.POINTWISE,
     "dy": ObservableKind.POINTWISE,
     "dpx": ObservableKind.POINTWISE,
@@ -262,107 +296,71 @@ class WeightProcessor:
             return tuple(weights / global_max for weights in weights_arrays)
         return weights_arrays
 
-    @staticmethod
-    def aggregate_hessian_weights(weights: np.ndarray) -> np.ndarray:
-        """Aggregate per-particle weights into per-BPM weights for Hessian.
 
-        Computes mean weight across particles for each BPM, used in
-        approximate Hessian calculations.
+def _floored_inverse(matrix: np.ndarray, min_eigenvalue: float) -> np.ndarray:
+    """Inverse of the symmetrised ``matrix`` with eigenvalues floored to ``min_eigenvalue``."""
+    matrix = np.asarray(matrix, dtype=np.float64)
+    sym = 0.5 * (matrix + matrix.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(sym)
+    clipped = np.maximum(eigenvalues, min_eigenvalue)
 
-        Args:
-            weights: Array of shape (n_particles, n_bpms)
-
-        Returns:
-            Array of shape (n_bpms,) with aggregated weights
-        """
-        if weights.size == 0:
-            return np.array([], dtype=np.float64)
-
-        sums = np.sum(weights, axis=0)
-        counts = np.count_nonzero(weights, axis=0)
-        aggregated = np.zeros_like(sums, dtype=np.float64)
-        np.divide(sums, counts, out=aggregated, where=counts > 0)
-        return aggregated
-
-    @staticmethod
-    def compute_variance_floor(
-        variances: np.ndarray, percentile: float = 5, factor: float = 1.0
-    ) -> float | None:
-        """Compute a percentile-based variance floor value.
-
-        Args:
-            variances: Array of variance values
-            percentile: Percentile (0-100) used to define the reference variance
-            factor: Multiplicative factor applied to the percentile value
-
-        Returns:
-            Scalar floor value, or None if no valid variances are present.
-        """
-        v = np.asarray(variances, dtype=np.float64)
-        valid = np.isfinite(v) & (v > 0.0)
-        if not np.any(valid):
-            return None
-        ref = np.percentile(v[valid], percentile)
-        return factor * ref
-
-    @staticmethod
-    def floor_variances(
-        variances: np.ndarray,
-        percentile: float = 10,
-        factor: float = 1.0,
-        floor_value: float | None = None,
-    ) -> np.ndarray:
-        """
-        Floor unrealistically small variance values using a robust percentile-based rule.
-
-        This function is intended to protect inverse-variance weighting from domination
-        by a small number of pathologically tiny variances (e.g. due to numerical noise,
-        quantisation, or failed uncertainty estimates).
-
-        The floor is computed as:
-            floor = factor * P_percentile(valid variances)
-
-        where P_percentile is taken over finite, strictly positive variances only.
-
-        Invalid (non-finite or non-positive) variances are left unchanged and are expected
-        to be handled downstream (typically by assigning zero weight).
-
-        Args:
-            variances:
-                Array of variance values. Can be any shape.
-            percentile:
-                Percentile (0-100) used to define the reference variance.
-                Typical values: 0.5-2.0. Default is 1.0.
-            factor:
-                Multiplicative factor applied to the percentile value to obtain the floor.
-                Values < 1 only floor extreme outliers; values ≈ 1 enforce a stricter floor.
-            floor_value:
-                Optional precomputed floor value to apply instead of computing from the
-                provided variances.
-
-        Returns:
-            A new array with the same shape as `variances`, where valid entries smaller
-            than the computed floor have been raised to the floor value.
-        """
-        v = np.asarray(variances, dtype=np.float64)
-
-        # Identify valid variances
-        valid = np.isfinite(v) & (v > 0.0)
-        if not np.any(valid):
-            return v.copy()
-
-        # Compute robust floor
-        var_floor = (
-            WeightProcessor.compute_variance_floor(v, percentile=percentile, factor=factor)
-            if floor_value is None
-            else floor_value
+    n_clipped = int(np.count_nonzero(eigenvalues < min_eigenvalue))
+    if n_clipped:
+        logger.warning(
+            "Normal matrix had %d eigenvalue(s) below %.3e; using the floor to keep "
+            "uncertainties finite and non-negative.",
+            n_clipped,
+            min_eigenvalue,
         )
+    return (eigenvectors / clipped) @ eigenvectors.T
 
-        # Apply floor
-        v_out = v.copy()
-        v_out[valid] = np.maximum(v_out[valid], var_floor)  # ty:ignore[no-matching-overload]
 
-        return v_out
+def merge_uncertainty_parts(parts: list[UncertaintyPart], n_knobs: int) -> UncertaintyPart:
+    """Sum the normal matrices and merge rows that share a reading id.
+
+    ``G_e`` adds every part's sensitivity to reading ``e`` (shared between workers, or
+    used as both an observation and a start), so :func:`noise_matrix` counts its noise
+    once. Merging a merged part with further parts gives the same result.
+    """
+    normal = np.zeros((n_knobs, n_knobs), dtype=np.float64)
+    for part in parts:
+        normal += part.normal
+    ids = np.concatenate([part.reading_ids for part in parts]) if parts else np.zeros(0, np.int64)
+    if ids.size == 0:
+        return UncertaintyPart(normal, ids, np.zeros((0, n_knobs)), np.zeros(0))
+
+    order = np.argsort(ids, kind="stable")
+    sorted_ids = ids[order]
+    starts = np.flatnonzero(np.r_[True, sorted_ids[1:] != sorted_ids[:-1]])
+    sensitivities = np.concatenate([part.sensitivities for part in parts])[order]
+    return UncertaintyPart(
+        normal=normal,
+        reading_ids=sorted_ids[starts],
+        sensitivities=np.add.reduceat(sensitivities, starts, axis=0),
+        variances=np.concatenate([part.variances for part in parts])[order][starts],
+    )
+
+
+def noise_matrix(part: UncertaintyPart) -> np.ndarray:
+    """``B = Σ_e σ_e² G_e G_eᵀ`` for a merged part; readings without a finite variance add nothing."""
+    variances = np.where(np.isfinite(part.variances), part.variances, 0.0)
+    return (part.sensitivities * variances[:, None]).T @ part.sensitivities
+
+
+def sandwich_uncertainties(
+    normal_matrix: np.ndarray,
+    noise_matrix: np.ndarray,
+    *,
+    min_eigenvalue: float = HESSIAN_MIN_EIGENVALUE,
+) -> np.ndarray:
+    """1-sigma uncertainties ``sqrt(diag(A⁻¹ B A⁻¹))``.
+
+    Invariant to the loss-weight scale (``A ∝ w``, ``B ∝ w²``), so ``A`` and ``B`` may
+    be built from the globally normalised loss weights.
+    """
+    inverse = _floored_inverse(normal_matrix, min_eigenvalue)
+    covariance = inverse @ np.asarray(noise_matrix, dtype=np.float64) @ inverse
+    return np.sqrt(np.clip(np.diag(covariance), 0.0, None))
 
 
 def hessian_uncertainties(
@@ -388,21 +386,7 @@ def hessian_uncertainties(
     non-negative uncertainties rather than blowing up or turning negative through
     accumulated numerical noise.
     """
-    matrix = np.asarray(normal_matrix, dtype=np.float64)
-    sym = 0.5 * (matrix + matrix.T)
-    eigenvalues, eigenvectors = np.linalg.eigh(sym)
-    clipped = np.maximum(eigenvalues, min_eigenvalue)
-
-    n_clipped = int(np.count_nonzero(eigenvalues < min_eigenvalue))
-    if n_clipped:
-        logger.warning(
-            "Normal matrix had %d eigenvalue(s) below %.3e; using the floor to keep "
-            "uncertainties finite and non-negative.",
-            n_clipped,
-            min_eigenvalue,
-        )
-
-    covariance = (eigenvectors / clipped) @ eigenvectors.T
+    covariance = _floored_inverse(normal_matrix, min_eigenvalue)
     variances = np.clip(np.diag(covariance), 0.0, None)
     return np.sqrt(variances)
 

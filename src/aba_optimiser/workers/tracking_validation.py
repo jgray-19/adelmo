@@ -52,16 +52,12 @@ class ValidationTrackingWorker(TrackingWorker):
         worker_id: int,
         payloads: list[tuple[TrackingData, WorkerConfig, int]],
         simulation_config: SimulationConfig,
-        mode: str = "multi-turn",
     ) -> None:
-        if mode not in ("multi-turn", "arc-by-arc"):
-            raise ValueError(f"Invalid mode '{mode}'. Must be 'multi-turn' or 'arc-by-arc'")
         if len(payloads) != 1:
             raise ValueError(
                 f"ValidationTrackingWorker requires exactly one payload, got {len(payloads)}"
             )
 
-        self.mode = mode
         self.file_idx = payloads[0][2]
         AbstractWorker.__init__(self, conn, worker_id, payloads[0][0], payloads[0][1], simulation_config)
 
@@ -160,19 +156,27 @@ class ValidationTrackingWorker(TrackingWorker):
             observed_tracking_anchor_markers=self.config.observed_tracking_anchor_markers,
         )
 
+        # Same cycling and BPM sizing as the training workers
+        # (AbstractWorker.setup_mad_interface); without it the tracking range is
+        # taken on an uncycled sequence and validation scores a different path.
+        cycle_target = self._cycle_target()
+        if cycle_target is not None:
+            mad_iface.cycle_to_start(cycle_target)
+
         self.knob_name_set = set(mad_iface.knob_names)
         self.fixed_pt = (
             float(init_knobs.get("pt", 0.0)) if "pt" not in self.knob_name_set else 0.0
         )
 
         mad = mad_iface.mad
-        mad["nbpms"] = mad_iface.nbpms
+        nbpms = len(mad_iface.all_bpms) if self.tracking_range is None else mad_iface.nbpms
+        mad["nbpms"] = nbpms
         mad["sdir"] = self.config.sdir
         mad.load("MAD", "damap", "matrix", "vector")
 
         self.setup_mad_sequence(mad)
         self._setup_da_maps(mad)
-        return mad, mad_iface.nbpms
+        return mad, nbpms
 
     def _initialise_mad_computation(self, mad: MAD) -> None:
         """Initialise MAD-NG environment for validation computation."""
@@ -229,7 +233,14 @@ end
             total_loss += batch_loss / (self.normalisation_points * n_turns)
         return total_loss / max(1, self.num_batches)
 
-    def _send_init_condition_update(self, mad: MAD, new_px: np.ndarray, new_py: np.ndarray) -> None:
+    def _send_init_condition_update(
+        self,
+        mad: MAD,
+        new_x: np.ndarray,
+        new_px: np.ndarray,
+        new_y: np.ndarray,
+        new_py: np.ndarray,
+    ) -> None:
         """Keep update arrays aligned with this worker's prepared particles.
 
         Validation normally keeps every held-out turn. The slice also keeps older
@@ -237,7 +248,13 @@ end
         longer than this worker's prepared coordinate table.
         """
         n_init = len(self._init_coords_np)
-        super()._send_init_condition_update(mad, new_px.ravel()[:n_init], new_py.ravel()[:n_init])
+        super()._send_init_condition_update(
+            mad,
+            new_x.ravel()[:n_init],
+            new_px.ravel()[:n_init],
+            new_y.ravel()[:n_init],
+            new_py.ravel()[:n_init],
+        )
 
     def _replace_validation_payloads(
         self,
@@ -251,10 +268,18 @@ end
 
         mad = getattr(self, "mad", None)
         nbpms = getattr(self, "nbpms", None)
+        # ``prepare_data`` rebuilds ``keep_bpm_mask`` as all-ones, so a screening
+        # mask applied earlier would be silently dropped here, leaving the worker
+        # scoring BPMs the fit was told to ignore. Carry it across when the new
+        # payload has the same BPM count; a different count means the mask no
+        # longer refers to the same points and must not be reused.
+        previous_mask = getattr(self, "keep_bpm_mask", None)
         data, config, file_idx = payloads[0]
         self.config = config
         self.file_idx = file_idx
         self.prepare_data(data)
+        if previous_mask is not None and previous_mask.size == self.keep_bpm_mask.size:
+            self._apply_runtime_mask(previous_mask)
         self.mad = mad
         self.nbpms = nbpms
         if self.mad is not None:
@@ -281,6 +306,7 @@ end
         """Main validation-worker run loop."""
         try:
             self.configure_python_worker_logging()
+            self.configure_worker_threads()
             knob_values, _batch = self.conn.recv()
             if knob_values is None:
                 return
@@ -329,9 +355,24 @@ end
                     continue
 
                 if cmd == "update_init_coords":
+                    new_x = np.asarray(message["x"], dtype=np.float64)
                     new_px = np.asarray(message["px"], dtype=np.float64)
+                    new_y = np.asarray(message["y"], dtype=np.float64)
                     new_py = np.asarray(message["py"], dtype=np.float64)
-                    self._send_init_condition_update(self.mad, new_px, new_py)
+                    self._send_init_condition_update(self.mad, new_x, new_px, new_y, new_py)
+                    self.conn.send({"worker_id": self.worker_id, "status": "ok"})
+                    continue
+
+                if cmd == "apply_mask":
+                    # Pre-loop screening decisions are taken on the training
+                    # workers, but validation partitions the same measurement
+                    # files. Leaving these workers unscreened would score the
+                    # held-out loss on precisely the data the fit was told to
+                    # ignore, so the mask has to reach them too.
+                    keep_bpm_mask = np.asarray(message.get("keep_bpm_mask", []), dtype=bool)
+                    if keep_bpm_mask.size:
+                        self._apply_runtime_mask(keep_bpm_mask)
+                    self.worker_disabled = bool(message.get("disable_worker", False))
                     self.conn.send({"worker_id": self.worker_id, "status": "ok"})
                     continue
 
@@ -339,11 +380,19 @@ end
                     raise ValueError(f"Worker {self.worker_id}: unknown command {cmd}")
 
                 parsed_knobs = self._parse_knobs(message, self.worker_id)
-                loss = self.compute_validation_loss(self.mad, parsed_knobs)
+                # A screened-out worker contributes no loss at all rather than a
+                # zero: averaging a zero in would dilute the validation loss by
+                # the fraction of workers that were disabled.
+                loss = (
+                    None
+                    if self.worker_disabled
+                    else self.compute_validation_loss(self.mad, parsed_knobs)
+                )
                 self.conn.send(
                     {
                         "worker_id": self.worker_id,
                         "loss": loss,
+                        "disabled": bool(self.worker_disabled),
                         "payloads": 1,
                         "tracks": self.track_count,
                     }

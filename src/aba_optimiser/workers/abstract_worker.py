@@ -13,6 +13,8 @@ from abc import ABC, abstractmethod
 from multiprocessing import Process
 from typing import TYPE_CHECKING, Generic, TypeVar
 
+from threadpoolctl import threadpool_limits
+
 from aba_optimiser.mad import GradientDescentMadInterface
 from aba_optimiser.mad.scripts import PYTHON_IN_MAD
 
@@ -209,6 +211,15 @@ class AbstractWorker(Process, ABC, Generic[WorkerDataType]):
             )
         return logfile_path.with_name(f"{logfile_path.name}_worker_{self.worker_id}")
 
+    def configure_worker_threads(self) -> None:
+        """Limit this worker process's BLAS threads (``SimulationConfig.worker_blas_threads``).
+
+        Must run inside the worker process: the pool is already initialised in the forked
+        parent, so the ``OPENBLAS_NUM_THREADS`` environment variable would be too late.
+        """
+        if self.simulation_config.worker_blas_threads is not None:
+            threadpool_limits(limits=self.simulation_config.worker_blas_threads)
+
     def configure_python_worker_logging(self) -> None:
         """Attach a file handler so worker Python logs land in the worker logfile."""
         worker_logfile = self._resolve_per_worker_logfile(
@@ -245,6 +256,23 @@ class AbstractWorker(Process, ABC, Generic[WorkerDataType]):
             worker_logfile,
         )
 
+    def _cycle_target(self) -> str | None:
+        """Element the sequence is cycled to before tracking, or None.
+
+        The initial-condition marker (kicker/ACD) or the point where this
+        worker's measured turn increment starts. For backward ranges that is the
+        tracking end, because the payload initial coordinates are taken there.
+        Validation workers must cycle identically or they track a different path.
+        """
+        if not self.config.cycle_sequence:
+            return None
+        tracking_init_bpm = (
+            self.config.tracking_start_bpm
+            if self.config.sdir > 0
+            else self.config.tracking_end_bpm
+        )
+        return self.config.cycle_marker or self.config.initial_condition_marker or tracking_init_bpm
+
     def setup_mad_interface(self, init_knobs: dict[str, float]) -> tuple[MAD, int]:
         """Initialize and configure the MAD-NG interface.
 
@@ -266,21 +294,7 @@ class AbstractWorker(Process, ABC, Generic[WorkerDataType]):
 
         worker_logfile = self._resolve_per_worker_logfile(self.config.mad_logfile)
 
-        # Cycle to the initial-condition marker (kicker) or to the point where this
-        # worker's measured turn increment starts. For backward ranges that is the
-        # tracking end, because the payload initial coordinates are taken there.
-        # Full-ring workers keep the natural $start so no BPM is duplicated at the
-        # ring wrap.
-        tracking_init_bpm = (
-            self.config.tracking_start_bpm
-            if self.config.sdir > 0
-            else self.config.tracking_end_bpm
-        )
-        cycle_target = (
-            self.config.cycle_marker or self.config.initial_condition_marker or tracking_init_bpm
-            if self.config.cycle_sequence
-            else None
-        )
+        cycle_target = self._cycle_target()
 
         # Use accelerator factory to create MAD interface
         mad_iface = GradientDescentMadInterface(
@@ -298,9 +312,8 @@ class AbstractWorker(Process, ABC, Generic[WorkerDataType]):
             observed_tracking_anchor_markers=self.config.observed_tracking_anchor_markers,
         )
 
-        # Range-limited plans (arc-by-arc, kicker, ACD) cycle the sequence to this
-        # worker's init marker so its tracking range is one contiguous segment.
-        # Full-ring workers keep the natural $start and do not cycle.
+        # Cycle the sequence to this worker's init marker so its tracking range is
+        # one contiguous segment. Closed-twiss workers fit from $start and do not.
         if cycle_target is not None:
             mad_iface.cycle_to_start(cycle_target)
 

@@ -6,6 +6,11 @@ TPSA parameters on the sequence. twiss finds the parametric closed orbit with
 alpha, phase and dispersion at every BPM are the *periodic* solution of the ring
 as a function of the knobs.
 
+When only orbit coordinates are observed the normal form is dead weight, so the
+worker calls ``cofind`` and a single parametric ``track`` instead
+(``compute_closed_orbit`` in ``run_closed_twiss_init.mad``), on a first-order map.
+It returns the same orbit and Jacobian as twiss.
+
 The optical functions and their knob derivatives are requested through twiss's
 own ``trkopt`` list, which fills one mtable column per requested name; the knob
 monomial is encoded in the name, so ``beta11_`` is the value and
@@ -44,6 +49,18 @@ LOGGER = logging.getLogger(__name__)
 ORBIT_COORDS = ("x", "px", "y", "py")
 
 
+def read_orbit_only(mad: MAD, n_coords: int, n_knobs: int):
+    """Receive BPM names, orbit values and Jacobian from ``compute_closed_orbit``."""
+    mad.send("send_orbit_only()")
+    names = list(mad.recv())
+    values = np.empty((n_coords, len(names)))
+    jacobian = np.empty((n_coords, len(names), n_knobs))
+    for i in range(n_coords):
+        values[i] = np.asarray(mad.recv(), dtype=float).ravel()
+        jacobian[i] = np.asarray(mad.recv(), dtype=float).reshape(len(names), n_knobs)
+    return names, values, jacobian
+
+
 class ClosedTwissWorker(AbstractWorker[ClosedTwissData]):
     """Worker that fits knobs to a measured closed-twiss solution."""
 
@@ -64,6 +81,11 @@ class ClosedTwissWorker(AbstractWorker[ClosedTwissData]):
         # saved-map route; everything else goes through twiss's trkopt columns.
         self.orbit_coords = [obs.name for obs in self.observables if obs.name in ORBIT_COORDS]
         self.optics_names = [obs.name for obs in self.observables if obs.name not in ORBIT_COORDS]
+        # No optical function to normalise for: skip twiss. The MAD-side map order
+        # is chosen from the same condition (an empty ``optics_columns``).
+        self.closed_solver = (
+            "compute_closed_twiss()" if self.optics_names else "compute_closed_orbit()"
+        )
         self._measured_index = {name: i for i, name in enumerate(data.bpm_names)}
         # Known momentum offset of this measurement; pinned on x0map.pt (not a knob).
         self.pt = float(data.pt)
@@ -163,7 +185,7 @@ class ClosedTwissWorker(AbstractWorker[ClosedTwissData]):
         # would be off by a column.
         n_knobs = self.n_knobs
 
-        mad.send("compute_closed_twiss()")
+        mad.send(self.closed_solver)
         if not mad.recv():
             # cofind lost the closed orbit (knobs in an unstable region). Signal a
             # recoverable step with NaN loss so the optimiser backtracks.
@@ -178,28 +200,35 @@ class ClosedTwissWorker(AbstractWorker[ClosedTwissData]):
                 np.zeros((n_knobs, n_knobs)),
             )
 
-        columns = ["name", *self.orbit_coords, *self.value_columns, *self.derivative_columns]
-        frame = mad.twiss_tbl.to_df(columns=columns)
-        twiss_names = list(frame["name"])
+        if self.optics_names:
+            columns = ["name", *self.orbit_coords, *self.value_columns, *self.derivative_columns]
+            frame = mad.closed_tbl.to_df(columns=columns)
+            twiss_names = list(frame["name"])
+        else:
+            twiss_names, orbit_values, orbit_jacobian = read_orbit_only(
+                mad, len(self.orbit_coords), n_knobs
+            )
         if self._twiss_bpm_order != twiss_names:
             self._align_targets_to_twiss(twiss_names)
 
         n_bpms = len(twiss_names)
         n_optics = len(self.optics_names)
-        optics_values = frame[self.value_columns].to_numpy(dtype=float).T
-        optics_jacobian = (
-            frame[self.derivative_columns]
-            .to_numpy(dtype=float)
-            .reshape(n_bpms, n_optics, n_knobs)
-            .transpose(1, 0, 2)
-        )
-
-        orbit_values = frame[list(self.orbit_coords)].to_numpy(dtype=float).T
-        orbit_jacobian = np.empty((len(self.orbit_coords), n_bpms, n_knobs))
-        if self.orbit_coords:
-            mad.send("send_orbit_jacobian()")
-            for i in range(len(self.orbit_coords)):
-                orbit_jacobian[i] = np.asarray(mad.recv(), dtype=float).reshape(n_bpms, n_knobs)
+        if self.optics_names:
+            optics_values = frame[self.value_columns].to_numpy(dtype=float).T
+            optics_jacobian = (
+                frame[self.derivative_columns]
+                .to_numpy(dtype=float)
+                .reshape(n_bpms, n_optics, n_knobs)
+                .transpose(1, 0, 2)
+            )
+            orbit_values = frame[list(self.orbit_coords)].to_numpy(dtype=float).T
+            orbit_jacobian = np.empty((len(self.orbit_coords), n_bpms, n_knobs))
+            if self.orbit_coords:
+                mad.send("send_orbit_jacobian()")
+                for i in range(len(self.orbit_coords)):
+                    orbit_jacobian[i] = np.asarray(mad.recv(), dtype=float).reshape(
+                        n_bpms, n_knobs
+                    )
 
         # Re-interleave into the caller's observable order: (n_obs, n_bpms) and
         # (n_obs, n_bpms, n_knobs).
@@ -239,6 +268,7 @@ class ClosedTwissWorker(AbstractWorker[ClosedTwissData]):
             self.targets,
             self.weights,
             self.raw_weights,
+            self.weight_scale,
         )
 
     def run(self) -> None:
@@ -246,6 +276,7 @@ class ClosedTwissWorker(AbstractWorker[ClosedTwissData]):
         mad: MAD | None = None
         try:
             self.configure_python_worker_logging()
+            self.configure_worker_threads()
             message = self.conn.recv()
             if message is None:
                 return
@@ -342,11 +373,17 @@ def _weighted_loss_gradient_hessian(
     targets,
     weights,
     raw_weights,
+    weight_scale: float,
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
-    """Evaluate weighted least squares for explicitly supplied observable blocks."""
+    """Evaluate weighted least squares for explicitly supplied observable blocks.
+
+    ``weights`` are ``raw_weights / weight_scale`` (see :func:`_align_observables`), so
+    the Gauss-Newton Hessian ``2 JᵀWJ`` is the physical normal matrix ``Jᵀ W_raw J``
+    times ``2 / weight_scale``. Only the latter is formed, once per observable, as a
+    symmetric ``Aᵀ A`` product of the sqrt-weighted Jacobian.
+    """
     n_knobs = jacobian.shape[-1]
     grad = np.zeros(n_knobs)
-    hessian = np.zeros((n_knobs, n_knobs))
     normal_matrix = np.zeros((n_knobs, n_knobs))
     loss = 0.0
 
@@ -356,13 +393,15 @@ def _weighted_loss_gradient_hessian(
             values, jac = _to_advance(values, jac)
 
         weight, raw_weight = weights[index], raw_weights[index]
+        if not np.allclose(weight * weight_scale, raw_weight, rtol=1e-9, atol=0.0):
+            raise ValueError("weights must equal raw_weights / weight_scale")
         residual = np.where(weight > 0.0, values - targets[index], 0.0)
         grad += 2.0 * (weight * residual) @ jac
-        hessian += 2.0 * (jac.T * weight) @ jac
-        normal_matrix += (jac.T * raw_weight) @ jac
+        weighted_jac = jac * np.sqrt(raw_weight)[:, None]
+        normal_matrix += weighted_jac.T @ weighted_jac  # numpy uses a symmetric rank-k update
         loss += float(np.sum(weight * residual**2))
 
-    return grad, loss, hessian, normal_matrix
+    return grad, loss, (2.0 / weight_scale) * normal_matrix, normal_matrix
 
 
 def _knob_monomial(index: int, n_knobs: int) -> str:

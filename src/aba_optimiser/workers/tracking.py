@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from aba_optimiser.mad.scripts import (
-    build_tracking_hessian_script,
     build_tracking_init_script,
     build_tracking_preflight_script,
     build_tracking_script,
@@ -23,6 +22,7 @@ from aba_optimiser.workers.abstract_worker import AbstractWorker
 from aba_optimiser.workers.common import (
     PrecomputedTrackingWeights,
     TrackingData,
+    UncertaintyPart,
     split_array_to_batches,
 )
 
@@ -48,6 +48,11 @@ OBSERVABLE_SPECS: dict[str, tuple[str, int]] = {
     "py": ("momentum_comparisons", 1),
 }
 
+#: Last digit of a reading id: which number in a (file, turn, marker) grid cell was
+#: read. The start coordinates x0, y0 are the x and y readings of their cell.
+READING_CODES: dict[str, int] = {"x": 0, "y": 1, "px": 2, "py": 3}
+START_CODES = np.array([READING_CODES["x"], READING_CODES["y"]])
+
 
 class TrackingWorker(AbstractWorker[TrackingData]):
     """Worker for particle tracking simulations.
@@ -57,17 +62,18 @@ class TrackingWorker(AbstractWorker[TrackingData]):
     of the loss function with respect to optimisation knobs using
     differential algebra techniques.
 
-    Supports two modes:
-    - 'multi-turn': Track particles for multiple turns (default)
-    - 'arc-by-arc': Single-turn tracking through one arc/section
-
     The implementation treats x/y and position/momentum symmetrically,
     ensuring consistent handling of all phase space dimensions.
     """
 
+    #: Set by the ``apply_mask`` control command. Declared at class level because
+    #: subclasses override ``prepare_data`` without calling super (see
+    #: ``ValidationTrackingWorker``), and the command loop reads this on every
+    #: message -- an unset attribute would crash any run with screening disabled.
+    worker_disabled: bool = False
+
     observables: tuple[str, ...] = ("x", "y", "px", "py")
     include_momentum = True
-    hessian_weight_order: tuple[str, ...] = ("x", "y", "px", "py")
 
     def __init__(
         self,
@@ -76,7 +82,6 @@ class TrackingWorker(AbstractWorker[TrackingData]):
         data: TrackingData,
         config: WorkerConfig,
         simulation_config: SimulationConfig,
-        mode: str = "multi-turn",
     ) -> None:
         """Initialize the tracking worker.
 
@@ -86,14 +91,7 @@ class TrackingWorker(AbstractWorker[TrackingData]):
             data: TrackingData container with reference measurements
             config: Configuration parameters
             simulation_config: Simulation configuration settings
-            mode: Tracking mode - 'multi-turn' or 'arc-by-arc'
-
-        Raises:
-            ValueError: If mode is not 'multi-turn' or 'arc-by-arc'
         """
-        if mode not in ("multi-turn", "arc-by-arc"):
-            raise ValueError(f"Invalid mode '{mode}'. Must be 'multi-turn' or 'arc-by-arc'")
-        self.mode = mode
         super().__init__(conn, worker_id, data, config, simulation_config)
 
     def prepare_data(self, data: TrackingData) -> None:
@@ -106,7 +104,6 @@ class TrackingWorker(AbstractWorker[TrackingData]):
             data: TrackingData container with reference measurements
         """
         self.observables = self._resolve_observables()
-        self.hessian_weight_order = self.observables
         num_batches = min(self.simulation_config.num_batches, len(data.init_coords))
         if num_batches <= 0:
             raise ValueError(f"Worker {self.worker_id}: No initial coordinates available")
@@ -125,11 +122,10 @@ class TrackingWorker(AbstractWorker[TrackingData]):
         self.comparison_arrays = self._extract_observable_arrays(data, n_init)
         if data.precomputed_weights is None:
             raise ValueError("Precomputed weights must be provided for TrackingWorker")
-        self.weight_arrays, self.hessian_weights = self._load_precomputed_weights(
-            data.precomputed_weights,
-            n_init,
-        )
+        self.weight_arrays = self._load_precomputed_weights(data.precomputed_weights, n_init)
+        self.weight_scale = data.precomputed_weights.scale
         self._prepare_batches(init_coords, data.init_pts, num_batches)
+        self._prepare_uncertainty_batches(data, n_init, num_batches)
 
         self.worker_disabled = False
         self.compute_hessian_on_exit = True
@@ -141,7 +137,9 @@ class TrackingWorker(AbstractWorker[TrackingData]):
             start_on_first_turn=self.config.initial_condition_marker is not None,
         )
         self.run_track_script = build_tracking_script(self.observables)
-        self.hessian_script_text = build_tracking_hessian_script(self.observables)
+        self.uncertainty_track_script = build_tracking_script(
+            self.observables, include_start_derivatives=True
+        )
         self._dump_debug_scripts()
 
     def _dump_debug_scripts(self) -> None:
@@ -161,8 +159,8 @@ class TrackingWorker(AbstractWorker[TrackingData]):
             worker_id=self.worker_id,
         )
         dump_debug_script(
-            "estimate_hessian",
-            self.hessian_script_text,
+            "run_track_uncertainty",
+            self.uncertainty_track_script,
             debug=self.config.debug,
             mad_logfile=self.config.mad_logfile,
             worker_id=self.worker_id,
@@ -192,15 +190,24 @@ class TrackingWorker(AbstractWorker[TrackingData]):
         self,
         weights: PrecomputedTrackingWeights,
         n_init: int,
-    ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-        """Return per-particle and Hessian weights for the active observables."""
-        batch_weights = {
+    ) -> dict[str, np.ndarray]:
+        """Return per-particle weights for the active observables."""
+        return {
             observable: getattr(weights, observable)[:n_init] for observable in self.observables
         }
-        hessian_weights = {
-            observable: getattr(weights, f"hessian_{observable}") for observable in self.observables
-        }
-        return batch_weights, hessian_weights
+
+    def _prepare_uncertainty_batches(self, data: TrackingData, n_init: int, num_batches: int) -> None:
+        """Split reading ids and variances like the comparisons, for the uncertainty part."""
+        self.variances = {}
+        for observable in self.observables:
+            source_attr, plane_idx = OBSERVABLE_SPECS[observable]
+            variances = getattr(data, source_attr.replace("comparisons", "variances"))
+            self.variances[observable] = split_array_to_batches(
+                variances[:n_init, :, plane_idx], num_batches
+            )
+        self.reading_ids = split_array_to_batches(data.reading_ids[:n_init], num_batches)
+        self.init_reading_ids = split_array_to_batches(data.init_reading_ids[:n_init], num_batches)
+        self.init_variances = split_array_to_batches(data.init_variances[:n_init], num_batches)
 
     def _prepare_batches(
         self, init_coords: np.ndarray, init_pts: np.ndarray, num_batches: int
@@ -238,23 +245,14 @@ class TrackingWorker(AbstractWorker[TrackingData]):
     def setup_mad_sequence(self, mad: MAD) -> None:
         """Configure MAD-NG sequence for tracking.
 
-        Sets batch size, number of batches, and optimisation flags.
-        For arc-by-arc mode, also sets single-turn tracking.
-
         Args:
             mad: MAD-NG interface object
         """
         mad["batch_size"] = self.batch_size
         mad["num_batches"] = self.num_batches
         mad["optimise_energy"] = self.config.accelerator.optimise_energy
-
         mad["tracking_range"] = self.tracking_range
-        if self.mode == "arc-by-arc":
-            # Single-turn tracking for arc-by-arc mode
-            mad["n_run_turns"] = 1
-        else:
-            # Multi-turn tracking over the full ring, each worker gets its own init BPM.
-            mad["n_run_turns"] = self.simulation_config.n_run_turns
+        mad["n_run_turns"] = self.simulation_config.n_run_turns
 
     def _setup_da_maps(self, mad: MAD) -> None:
         """Setup differential algebra maps for tracking.
@@ -379,11 +377,15 @@ end
         # Compute loss and gradients
         return self._compute_loss_and_gradients(results, batch)
 
-    def _receive_tracking_results(self, mad: MAD) -> dict[str, np.ndarray]:
+    def _receive_tracking_results(
+        self, mad: MAD, *, include_start_derivatives: bool = False
+    ) -> dict[str, np.ndarray]:
         """Receive tracking results from MAD-NG.
 
         Args:
             mad: MAD-NG interface object
+            include_start_derivatives: Also receive ``d{o}_dc0``, shape
+                ``(n_particles, 2, n_points)``, the derivatives by the start x and y.
 
         Returns:
             Dictionary with one result array and one derivative array per active
@@ -397,6 +399,9 @@ end
             results[observable] = np.asarray(mad.recv()).squeeze(-1)
         for observable in self.observables:
             results[self._gradient_key(observable)] = np.stack(mad.recv(), axis=0)
+        if include_start_derivatives:
+            for observable in self.observables:
+                results[f"d{observable}_dc0"] = np.stack(mad.recv(), axis=0)
         if n_lost > 0:
             pct = 100.0 * n_lost / n_total
             raise ParticleLostError(
@@ -404,19 +409,22 @@ end
             )
         return results
 
+    def _send_knobs(self, mad: MAD, knobs: dict[str, float]) -> None:
+        """Set this worker's sequence knobs; ``pt`` is applied per particle instead."""
+        update_commands = [
+            f"loaded_sequence['{name}']:set0({val:.15e})"
+            for name, val in knobs.items()
+            if name != "pt" and name in self.knob_name_set
+        ]
+        if update_commands:
+            mad.send("\n".join(update_commands))
+
     def _run_tracking_batch(
         self, mad: MAD, knob_updates: dict[str, float], batch: int
     ) -> dict[str, np.ndarray]:
         """Run MAD-NG tracking for a single batch and return all outputs."""
         machine_pt = knob_updates.get("pt", getattr(self, "fixed_pt", 0.0))
-
-        update_commands = [
-            f"loaded_sequence['{name}']:set0({val:.15e})"
-            for name, val in knob_updates.items()
-            if name != "pt" and name in self.knob_name_set
-        ]
-        if update_commands:
-            mad.send("\n".join(update_commands))
+        self._send_knobs(mad, knob_updates)
 
         mad.send(f"batch = {batch + 1}")
         mad.send(f"""
@@ -581,6 +589,19 @@ end
             self.conn.send({"worker_id": self.worker_id, "status": "ok"})
             return
 
+        if cmd == "set_knobs":
+            knobs = command["knobs"]
+            self._send_knobs(mad, knobs)
+            mad.send(f"""
+for b = 1, num_batches do
+    for i = 1, batch_size do
+        da_x0_c[b][i].pt:set0({knobs.get("pt", getattr(self, "fixed_pt", 0.0)):.15e} + init_pts[b][i])
+    end
+end
+""")
+            self.conn.send({"worker_id": self.worker_id, "status": "ok"})
+            return
+
         if cmd == "update_init_coords":
             self._send_init_condition_update(
                 mad,
@@ -594,21 +615,46 @@ end
 
         raise ValueError(f"Worker {self.worker_id}: Unknown command {cmd}")
 
-    def _send_hessian_weights(self, mad: MAD) -> None:
-        """Send Hessian weights to MAD for the active observables."""
-        hmask = self.keep_bpm_mask.astype(np.float64)
-        bindings = "\n".join(
-            f"weights_{observable} = python:recv()" for observable in self.hessian_weight_order
-        )
-        mad.send(f"{bindings}\n")
-        for observable in self.hessian_weight_order:
-            mad.send((self.hessian_weights[observable] * hmask).tolist())
+    def _compute_uncertainty_part(self, mad: MAD, n_knobs: int) -> UncertaintyPart:
+        """Track every batch at the loaded knobs and return this worker's uncertainty part.
 
-    def _compute_hessian_part(self, mad: MAD, n_knobs: int) -> np.ndarray:
-        """Compute this worker's Hessian contribution."""
-        self._send_hessian_weights(mad)
-        mad.send(self.hessian_script_text)
-        return np.asarray(mad.recv())
+        With ``r = m − y`` and loss weights ``w = 1/σ²`` (masked):
+        ``A = Σ w J Jᵀ``; an observed reading moves the gradient by ``−w J``; a start
+        coordinate by ``Σ_n w J ∂m/∂c0``. :func:`merge_uncertainty_parts` adds these
+        over every worker using the same reading. Only rows that can carry noise are
+        built: observations with a non-zero weight and starts with a finite variance.
+        """
+        normal = np.zeros((n_knobs, n_knobs))
+        ids, sensitivities, variances = [], [], []
+        mad.send("save_start_derivatives = true")
+        for batch in range(self.num_batches):
+            mad.send(f"batch = {batch + 1}")
+            mad.send(self.uncertainty_track_script)
+            results = self._receive_tracking_results(mad, include_start_derivatives=True)
+            weights = self._masked_weights(batch)
+            start = np.zeros((len(self.init_reading_ids[batch]), 2, n_knobs))
+            for observable in self.observables:
+                jacobian = results[self._gradient_key(observable)]  # (particles, knobs, points)
+                weight = weights[observable] * self.weight_scale  # (particles, points)
+                weighted = jacobian * weight[:, None, :]
+                normal += np.einsum("pkn,pjn->kj", weighted, jacobian)
+                noisy = weight != 0.0
+                ids.append(self.reading_ids[batch][noisy] * 4 + READING_CODES[observable])
+                sensitivities.append(-weighted.transpose(0, 2, 1)[noisy])
+                variances.append(self.variances[observable][batch][noisy])
+                start += np.einsum("pkn,pcn->pck", weighted, results[f"d{observable}_dc0"])
+            noisy_start = np.isfinite(self.init_variances[batch])  # (particles, 2)
+            ids.append((self.init_reading_ids[batch][:, None] * 4 + START_CODES)[noisy_start])
+            sensitivities.append(start[noisy_start])
+            variances.append(self.init_variances[batch][noisy_start])
+        mad.send("save_start_derivatives = false")
+
+        return UncertaintyPart(
+            normal=normal,
+            reading_ids=np.concatenate(ids),
+            sensitivities=np.concatenate(sensitivities),
+            variances=np.concatenate(variances),
+        )
 
     def _compute_loss_and_gradients(
         self, results: dict[str, np.ndarray], batch: int
@@ -649,6 +695,7 @@ end
 
         try:
             self.configure_python_worker_logging()
+            self.configure_worker_threads()
             knob_values, batch = self.conn.recv()
             if knob_values is None:
                 return
@@ -664,7 +711,6 @@ end
             message: tuple[dict[str, float] | None, int | None] | dict[str, object] = (
                 self.conn.recv()
             )
-            normalisation_points = self.normalisation_points
 
             while True:
                 while isinstance(message, dict):
@@ -689,8 +735,13 @@ end
                         self.conn.send(
                             (
                                 self.worker_id,
-                                grad / normalisation_points,
-                                loss / (normalisation_points * n_turns),
+                                # Read live: ``apply_mask`` shrinks
+                                # ``normalisation_points`` to the kept BPM count, and
+                                # a snapshot taken before the command loop would keep
+                                # dividing the masked loss by the unmasked count --
+                                # putting training and validation on different scales.
+                                grad / self.normalisation_points,
+                                loss / (self.normalisation_points * n_turns),
                             )
                         )
                 except ParticleLostError as exc:
@@ -709,14 +760,14 @@ end
                 message = self.conn.recv()
 
             if computation_success and not self.worker_disabled and self.compute_hessian_on_exit:
-                LOGGER.debug(f"Worker {self.worker_id}: Computing Hessian approximation")
+                LOGGER.debug(f"Worker {self.worker_id}: Propagating uncertainty")
                 try:
-                    self.conn.send(self._compute_hessian_part(mad, n_knobs))
+                    self.conn.send(self._compute_uncertainty_part(mad, n_knobs))
                 except Exception as exc:  # noqa: BLE001
                     self.send_error_payload(exc, phase="hessian")
                     computation_success = False
             else:
-                self.conn.send(np.zeros((n_knobs, n_knobs)))
+                self.conn.send(UncertaintyPart.empty(n_knobs))
         except Exception as exc:  # noqa: BLE001
             self.send_error_payload(exc, phase="startup")
         finally:
