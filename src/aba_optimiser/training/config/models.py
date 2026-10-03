@@ -90,10 +90,6 @@ class OutputConfig:
         write_tensorboard_logs: Whether to write TensorBoard event files.
         include_uncertainty: Whether to compute uncertainties. Disabling this
             skips worker-side Hessian estimation for faster execution.
-        parallel_hessian: Controls how many worker-side Hessians may be computed
-            concurrently during shutdown. ``True`` means use all workers, ``False``
-            means run one-by-one, and a positive integer sets an explicit concurrency
-            cap.
         tensorboard_root: Root directory for TensorBoard event-file runs.
         mad_logfile: Optional MAD log file path.
         python_logfile: Optional Python worker log file path.
@@ -101,16 +97,9 @@ class OutputConfig:
 
     write_tensorboard_logs: bool = True
     include_uncertainty: bool = True
-    parallel_hessian: bool | int = True
     tensorboard_root: Path = field(default_factory=lambda: TRAINING_RUNS_ROOT)
     mad_logfile: Path | None = None
     python_logfile: Path | None = None
-    def __post_init__(self) -> None:
-        """Normalise Hessian parallelism settings."""
-        if isinstance(self.parallel_hessian, bool):
-            return
-        if self.parallel_hessian < 1:
-            raise ValueError("parallel_hessian must be a positive integer, True, or False")
 
     def log_state(self) -> None:
         """Log the current output config settings."""

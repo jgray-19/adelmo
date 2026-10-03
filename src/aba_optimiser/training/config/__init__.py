@@ -13,8 +13,6 @@ from aba_optimiser.training.config.models import (
 from aba_optimiser.training.config.tracking import (
     ACDArcByArcTrackingPlan,
     ACDTrackingPlan,
-    ArcByArcTrackingPlan,
-    FullRingBpmTrackingPlan,
     KickerTrackingPlan,
     RangeContext,
     TrackingModeSetup,
@@ -22,17 +20,14 @@ from aba_optimiser.training.config.tracking import (
     WorkerRangeSpec,
     acd_marker_setup,
     arc_by_arc_setup,
-    full_ring_setup,
     kicker_setup,
 )
 
 __all__ = [
     "ACDArcByArcTrackingPlan",
     "ACDTrackingPlan",
-    "ArcByArcTrackingPlan",
     "CheckpointConfig",
     "ConfigurationManager",
-    "FullRingBpmTrackingPlan",
     "KickerConfig",
     "KickerTrackingPlan",
     "MeasurementConfig",
@@ -46,6 +41,5 @@ __all__ = [
     "acd_marker_setup",
     "arc_by_arc_setup",
     "create_arc_measurement_config",
-    "full_ring_setup",
     "kicker_setup",
 ]

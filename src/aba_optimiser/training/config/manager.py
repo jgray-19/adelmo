@@ -9,11 +9,7 @@ import numpy as np
 
 from aba_optimiser.mad import GradientDescentMadInterface
 from aba_optimiser.mad.optimising_mad_interface import is_magnet_strength_name
-from aba_optimiser.training.config.tracking import (
-    ArcByArcTrackingPlan,
-    RangeContext,
-    TrackingPlan,
-)
+from aba_optimiser.training.config.tracking import RangeContext, TrackingPlan
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -54,7 +50,7 @@ class ConfigurationManager:
         self.magnet_range = sequence_config.magnet_range
         self.simulation_config = simulation_config
         self.optimise_knobs = optimise_knobs
-        self.tracking_plan = tracking_plan if tracking_plan is not None else ArcByArcTrackingPlan()
+        self.tracking_plan = tracking_plan if tracking_plan is not None else TrackingPlan()
 
     def setup_mad_interface(
         self,
@@ -113,17 +109,9 @@ class ConfigurationManager:
         ]
         self.end_bpms = [bpm for bpm in self.end_bpms if bpm in self.bpms_in_range]
 
-        # When use_fixed_bpm is True we derive a fixed BPM window from magnet_range and
-        # store its start/end in fixed_start/fixed_end. When it is False we intentionally
-        # leave fixed_start/fixed_end at their default values (empty strings), which
-        # indicates to downstream code that no fixed BPM window should be enforced and
-        # that the active BPM range should instead be taken from start_bpms/end_bpms or
-        # other model-derived information.
+        # With use_fixed_bpm the fixed BPM window comes from magnet_range; otherwise
+        # fixed_start/fixed_end stay empty and ranges come from start_bpms/end_bpms.
         if self.simulation_config.use_fixed_bpm and self.tracking_plan.uses_fixed_bpm_window:
-            # Use magnet_range to determine fixed start and end points. Tracking plans
-            # that anchor on installed markers (e.g. the AC-dipole markers) ignore
-            # fixed_start/fixed_end entirely, so skip the derivation for them; otherwise
-            # a magnet_range of "$start/$end" yields a spurious "not found in model" warning.
             self.fixed_start, self.fixed_end = self.magnet_range.split("/", 1)
 
             # Validate fixed points are in the model
@@ -146,18 +134,7 @@ class ConfigurationManager:
 
     @property
     def bpm_pairs(self) -> list[tuple[str, str]]:
-        """Return BPM ranges as explicit (start, end) tuples.
-
-        When run_arc_by_arc is False (multi-turn mode), workers are start-driven:
-        only start BPMs are configured explicitly, and end BPM is auto-defined as
-        the BPM immediately behind each start BPM in ring order.
-
-        When use_fixed_bpm is True (default), creates pairs by varying starts
-        with fixed end and varying ends with fixed start.
-
-        When use_fixed_bpm is False, creates all combinations (Cartesian product)
-        of start_bpms with end_bpms (every start with every end).
-        """
+        """Return the plan's BPM ranges as explicit (start, end) tuples."""
         return self.tracking_plan.bpm_pairs(self._range_context())
 
     def _range_context(self) -> RangeContext:
@@ -166,7 +143,6 @@ class ConfigurationManager:
             start_bpms=self.start_bpms,
             end_bpms=self.end_bpms,
             all_bpms=self.all_bpms,
-            run_arc_by_arc=self.simulation_config.run_arc_by_arc,
             use_fixed_bpm=self.simulation_config.use_fixed_bpm,
             fixed_start=self.fixed_start,
             fixed_end=self.fixed_end,
@@ -235,20 +211,3 @@ class ConfigurationManager:
                 knob: true_strengths[knob] for knob in self.knob_names if knob in true_strengths
             }
         return current_knobs, filtered_true_strengths
-
-    def calculate_n_data_points(self) -> dict[tuple[str, str], int]:
-        """Calculate number of data points for each BPM pair."""
-        n_turns = 1 if self.simulation_config.run_arc_by_arc else self.simulation_config.n_run_turns
-        n_data_points = self.tracking_plan.n_data_points(
-            all_bpms=self.all_bpms,
-            mad_iface=self.mad_iface,
-            bpm_pairs=self.bpm_pairs,
-            n_turns=n_turns,
-        )
-        for (start, end), count in n_data_points.items():
-            n_bpms = count // n_turns
-            LOGGER.info(
-                f"{start}/{end}: {count} data points "
-                f"({n_bpms} BPMs x {n_turns} turn(s))"
-            )
-        return n_data_points
