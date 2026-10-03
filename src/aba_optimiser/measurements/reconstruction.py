@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pandas as pd
 from pymadng_utils.physics import beta_from_energy, dp2pt
-from tmom_recon import ACDipoleConfig, ModelDetails, ReconstructionFrame, calculate_pz
+from tmom_recon import ACDipoleConfig, ModelDetails, OpticsInput, calculate_pz
 from tmom_recon.svd import weighted_svd_clean_measurements
 
 from aba_optimiser.measurements.preprocessing import trim_measurement_to_kick
@@ -19,6 +20,8 @@ from aba_optimiser.measurements.variances import (
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from aba_optimiser.measurements.reference import ReconstructionFrame
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,7 +35,7 @@ def process_single_dataframe(
     beam: int,
     model_details: ModelDetails,
     frame: ReconstructionFrame,
-    ac_dipole_inputs_factory: Callable[[int], tuple[ModelDetails, ACDipoleConfig] | None]
+    ac_dipole_inputs_factory: Callable[[int], tuple[ModelDetails, ACDipoleConfig, float] | None]
     | None = None,
     machine_deltap: float | None = None,
     trim_to_kick: bool = False,
@@ -56,8 +59,8 @@ def process_single_dataframe(
     ac_dipole_inputs = (
         ac_dipole_inputs_factory(index) if ac_dipole_inputs_factory is not None else None
     )
-    call_model_details, ac_dipole_config = (
-        ac_dipole_inputs if ac_dipole_inputs is not None else (model_details, None)
+    call_model_details, ac_dipole_config, barrier_s = (
+        ac_dipole_inputs if ac_dipole_inputs is not None else (model_details, None, None)
     )
 
     if trim_to_kick:
@@ -78,25 +81,36 @@ def process_single_dataframe(
     cleaned = weighted_svd_clean_measurements(df)
     svd_ranks = (cleaned.attrs.get("svd_rank_x"), cleaned.attrs.get("svd_rank_y"))
     n_bpms = int(cleaned["name"].nunique())
-    df = cleaned
+    # Scale before calculate_pz: it builds var_px/var_py from var_x/var_y, so the
+    # momentum weights must see the cleaned-data position variance too.
+    df = _scale_position_variances_after_svd(cleaned, n_bpms=n_bpms, svd_ranks=svd_ranks)
 
-    machine_pt = _machine_deltap_to_pt(machine_deltap, twiss)
+    # tmom-recon takes the measurement pt on the ModelDetails and the measured
+    # optics through OpticsInput. Phase, beta and alpha come from the omc3
+    # analysis directory; dispersion stays on the model because a single kick
+    # measures no dispersion, and OpticsInput refuses to substitute silently.
+    if machine_deltap is not None:
+        call_model_details = replace(
+            call_model_details, pt=_machine_deltap_to_pt(machine_deltap, twiss)
+        )
     df = calculate_pz(
         df,
         call_model_details,
-        frame=frame,
-        measurement_dir=analysis_dir,
-        reverse_meas_tws=beam == 2,
-        measurement_pt_offset=machine_pt,
+        closed_orbit_at_zero=frame.closed_orbit_at_zero,
+        orbit_mode=frame.orbit_mode,
+        optics=OpticsInput(
+            measurement_dir=analysis_dir,
+            sources=dict.fromkeys(("phase", "beta", "alpha"), "measurement"),
+            reverse_measurement_order=beam == 2,
+        ),
         acd=ac_dipole_config,
-        barrier_s=None if ac_dipole_config is None else ac_dipole_config.barrier_s,
+        barrier_s=barrier_s,
     )
     if not isinstance(df, pd.DataFrame):
         raise ValueError(f"Reconstruction returned unexpected type {type(df)} for dataframe")
-    df = _scale_position_variances_after_svd(df, n_bpms=n_bpms, svd_ranks=svd_ranks)
     df = _drop_nan_momenta(df, dataframe_index=index)
     if ac_dipole_config is not None:
-        df.attrs["ac_dipole_barrier_s"] = ac_dipole_config.barrier_s
+        df.attrs["ac_dipole_barrier_s"] = barrier_s
     df["bunch_number"] = bunch_number
     return index, df
 
@@ -172,6 +186,31 @@ def _scale_position_variances_after_svd(
 
 def _drop_nan_momenta(df: pd.DataFrame, *, dataframe_index: int) -> pd.DataFrame:
     if df["px"].isna().any() or df["py"].isna().any():
-        LOGGER.warning("NaN values found in px or py for dataframe %s, dropping rows.", dataframe_index)
+        LOGGER.warning(
+            "NaN values found in px or py for dataframe %s, dropping rows.", dataframe_index
+        )
         return df.dropna(subset=["px", "py"])
     return df
+
+
+def append_acd_marker_rows(frame: pd.DataFrame, acd_result: pd.DataFrame) -> pd.DataFrame:
+    """Append tmom-recon's ``<acd>_before`` / ``<acd>_after`` marker rows to ``frame``.
+
+    The ACD fits start bidirectional tracking at these markers, so the
+    measurement parquet must carry their reconstructed phase space per turn.
+    Without them the worker setup drops the marker as a missing BPM and no
+    observation plan survives. Row order does not matter: the data loader
+    reorders every file into ring order. Marker rows are reindexed to
+    ``frame``'s columns; ``frame`` is returned unchanged if there are none.
+    """
+    is_marker = acd_result["name"].astype(str).str.lower().str.endswith(("_before", "_after"))
+    marker_rows = acd_result.loc[is_marker]
+    if marker_rows.empty:
+        LOGGER.warning("ACD reconstruction carried no _before/_after marker rows to append.")
+        return frame
+    LOGGER.info(
+        "Appending %d AC-dipole marker row(s) (%s).",
+        len(marker_rows),
+        ", ".join(sorted(marker_rows["name"].astype(str).unique())),
+    )
+    return pd.concat([frame, marker_rows.reindex(columns=frame.columns)], ignore_index=True)
