@@ -73,6 +73,7 @@ def _table_definitions(observables: tuple[str, ...], *, include_derivatives: boo
     lines = _per_observable(observables, "{o} = table.new(batch_size, 0)")
     if include_derivatives:
         lines += _per_observable(observables, "d{o}_dk = table.new(batch_size, 0)")
+        lines += _per_observable(observables, "d{o}_dc0 = table.new(batch_size, 0)")
     return _join_lines(lines)
 
 
@@ -81,6 +82,9 @@ def _allocation_block(observables: tuple[str, ...], *, include_derivatives: bool
     if include_derivatives:
         lines += _per_observable(
             observables, "d{o}_dk[i] = matrix(matrix_size, nbpms * n_run_turns)", level=1
+        )
+        lines += _per_observable(
+            observables, "d{o}_dc0[i] = matrix(2, nbpms * n_run_turns)", level=1
         )
     return _join_lines(lines)
 
@@ -111,27 +115,36 @@ def _save_energy_derivative_block(observables: tuple[str, ...]) -> str:
     )
 
 
+def _save_start_derivative_block(observables: tuple[str, ...]) -> str:
+    """Store d(observable)/d(x0) and d(observable)/d(y0), TPSA monomials 2 and 4."""
+    lines = _per_observable(
+        observables, "d{o}_dc0[i]:set(1, observe_count, mflw[i].{o}:get(2))", level=4
+    )
+    lines += _per_observable(
+        observables, "d{o}_dc0[i]:set(2, observe_count, mflw[i].{o}:get(4))", level=4
+    )
+    return _join_lines(lines)
+
+
 def _reset_block(observables: tuple[str, ...], *, include_derivatives: bool = True) -> str:
     lines = _per_observable(observables, "{o}[i]:zeros()", level=2)
     if include_derivatives:
         lines += _per_observable(observables, "d{o}_dk[i]:zeros()", level=2)
+        lines += _per_observable(observables, "d{o}_dc0[i]:zeros()", level=2)
     return _join_lines(lines)
 
 
-def _send_block(observables: tuple[str, ...], *, include_derivatives: bool = True) -> str:
+def _send_block(
+    observables: tuple[str, ...],
+    *,
+    include_derivatives: bool = True,
+    include_start_derivatives: bool = False,
+) -> str:
     lines = _per_observable(observables, f"{PYTHON_IN_MAD}:send({{o}}, true)")
     if include_derivatives:
         lines += _per_observable(observables, f"{PYTHON_IN_MAD}:send(d{{o}}_dk, true)")
-    return _join_lines(lines)
-
-
-def _hessian_weight_block(observables: tuple[str, ...]) -> str:
-    return _join_lines(_per_observable(observables, "local W_{o} = vector(weights_{o}):diag()"))
-
-
-def _hessian_accumulation_block(observables: tuple[str, ...]) -> str:
-    lines = _per_observable(observables, "local j_{o} = d{o}_dk[part]", level=2)
-    lines += _per_observable(observables, "Htot = Htot + j_{o} * (W_{o} * j_{o}:t())", level=2)
+    if include_start_derivatives:
+        lines += _per_observable(observables, f"{PYTHON_IN_MAD}:send(d{{o}}_dc0, true)")
     return _join_lines(lines)
 
 
@@ -204,6 +217,8 @@ end
 {_observation_gate_definition()}
 
 observe_count = {initial_observe_count}
+-- Only the uncertainty propagation needs the start-coordinate derivatives.
+save_start_derivatives = false
 function save_data(elm, mflw, _, slc)
     if is_observation_point(elm, slc) then
         for i=1,batch_size do
@@ -216,6 +231,10 @@ function save_data(elm, mflw, _, slc)
             if optimise_energy then
                 local dpt_idx = num_knobs + 1
 {_save_energy_derivative_block(observables)}
+            end
+
+            if save_start_derivatives then
+{_save_start_derivative_block(observables)}
             end
         end
         observe_count = observe_count + 1
@@ -231,8 +250,14 @@ end
 """
 
 
-def build_tracking_script(observables: tuple[str, ...]) -> str:
-    """Build the tracking script for the requested observables."""
+def build_tracking_script(
+    observables: tuple[str, ...], *, include_start_derivatives: bool = False
+) -> str:
+    """Build the tracking script for the requested observables.
+
+    ``include_start_derivatives`` also sends ``d{o}_dc0``; the caller must set
+    ``save_start_derivatives = true`` in MAD first.
+    """
     observables = _validate_observables(observables)
     return f"""! Generated tracking script
 reset_before_tracking()
@@ -243,7 +268,7 @@ for i=1,batch_size do
     if mflw[i] and mflw[i].status == 'lost' then n_lost = n_lost + 1 end
 end
 {PYTHON_IN_MAD}:send({{n_lost=n_lost, n_total=batch_size}}, true)
-{_send_block(observables)}
+{_send_block(observables, include_start_derivatives=include_start_derivatives)}
 """
 
 
@@ -314,28 +339,6 @@ reset_before_validation()
 """
 
 
-def build_tracking_hessian_script(observables: tuple[str, ...]) -> str:
-    """Build the Hessian script for the requested observables."""
-    observables = _validate_observables(observables)
-    return f"""! Generated tracking Hessian script
-local matrix, vector in MAD
-local matrix_size = optimise_energy and (num_knobs + 1) or num_knobs
-local Htot = matrix(matrix_size, matrix_size):zeros()
-{_hessian_weight_block(observables)}
-collectgarbage("collect")
-
-for batch=1,num_batches do
-    reset_before_tracking()
-{_track_call(x0="da_x0_c[batch]", atexit="save_data", level=1)}
-
-    for part = 1, batch_size do
-{_hessian_accumulation_block(observables)}
-    end
-end
-{PYTHON_IN_MAD}:send(Htot, true)
-"""
-
-
 if __name__ == "__main__":
     scripts = {
         "tracking init": build_tracking_init_script(TRACKING_OBSERVABLES),
@@ -343,7 +346,9 @@ if __name__ == "__main__":
         "tracking preflight": build_tracking_preflight_script(),
         "validation init": build_validation_init_script(TRACKING_OBSERVABLES),
         "validation": build_validation_script(TRACKING_OBSERVABLES),
-        "tracking Hessian": build_tracking_hessian_script(TRACKING_OBSERVABLES),
+        "tracking uncertainty": build_tracking_script(
+            TRACKING_OBSERVABLES, include_start_derivatives=True
+        ),
     }
     for name, script in scripts.items():
         print(f"{'=' * 80}\n{name}\n{'=' * 80}\n{script}")

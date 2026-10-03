@@ -53,9 +53,9 @@ the offset degrades the reconstructed ``px`` from 4.741e-4 to 7.702e-2, against
 penalty lands on the second-order dispersion term, so the mistake is invisible on
 a linear lattice and ruinous on a real one.
 
-Do not do that subtraction here. Build a mandatory
-:class:`tmom_recon.ReconstructionFrame` from the measured positions and fitted
-momenta, then pass only the measurement momentum offset to ``tmom_recon``.
+Do not do that subtraction here. Pass the measured positions as
+``closed_orbit_at_zero`` and ``orbit_mode="dynamic"`` to ``tmom_recon``, and
+pass only the measurement momentum offset alongside them.
 """
 
 from __future__ import annotations
@@ -88,14 +88,20 @@ ORBIT_AND_PHASE: tuple[str, ...] = ("x", "y", "mu1", "mu2")
 
 #: Observables that carry quadrupole-gradient information. The closed orbit does
 #: not: a gradient error on a centred orbit produces no deflection.
-GRADIENT_SENSITIVE: frozenset[str] = frozenset({"mu1", "mu2", "beta11", "beta22", "dx", "dy"})
+GRADIENT_SENSITIVE: frozenset[str] = frozenset({"mu1", "mu2", "betx", "bety", "dx", "dy"})
 
 #: Dimensionless Tikhonov prior towards zero magnet error, scaled internally to
 #: ``median(diag H)``. Non-zero by default because an unregularised fit of this
-#: size is worse than no fit; PSB ACD reference probes favoured the high end of
-#: the broad useful range (1e-2 to 1e-1), especially when phase unlocks quad
-#: knobs.
-DEFAULT_PRIOR_STRENGTH: float = 1e-1
+#: size is worse than no fit, but it must stay at the *low* end of the broad
+#: useful range (1e-2 to 1e-1): the prior is a shrinkage, so a knob at the family
+#: median curvature is fitted a factor ``1/(1 + strength)`` too small. At 1e-1
+#: that is a 9.1% systematic under-estimate of every bend error, and since the
+#: bends are what carry the closed-orbit *angle*, it biases the reconstructed
+#: ``px`` by the same 9.1% -- 1.3e-4 rad against a 1.4e-3 rad true angle, which
+#: is most of the residual and swamps the 9.2e-5 rad noise floor. A prior scan on
+#: the PSB reference fixture puts the fit on that noise floor by 1e-2 with no
+#: sign of ill-conditioning, so the extra regularisation bought nothing.
+DEFAULT_PRIOR_STRENGTH: float = 1e-2
 
 #: Columns of the returned closed-orbit reference.
 REFERENCE_COLUMNS: tuple[str, ...] = ("x", "y", "px", "py")
@@ -183,7 +189,9 @@ def _check_observable_knob_match(
     it is harmful: the extra knobs absorb measurement noise into compensating
     errors, which measured ~2.6x worse than leaving them out.
     """
-    if not getattr(accelerator, "optimise_quadrupoles", False):
+    if not any(
+        spec.kind == "quadrupole" and spec.attribute == "k1" for spec in accelerator.get_knob_specs()
+    ):
         return
     if GRADIENT_SENSITIVE.intersection(observables):
         return
@@ -191,7 +199,7 @@ def _check_observable_knob_match(
         "Quadrupole knobs are enabled but none of the observables "
         f"{tuple(observables)} responds to a gradient error; the closed orbit is "
         "blind to gradients on a centred orbit. Add mu1/mu2 (or beta/dispersion), "
-        "or disable optimise_quadrupoles."
+        "or stop fitting quadrupole k1."
     )
 
 
@@ -213,8 +221,8 @@ def fit_momentum_reference(
 
     Args:
         accelerator: Configured accelerator. Enable the knob families you intend
-            to fit (``optimise_bends`` and, if the observables can constrain
-            them, ``optimise_quadrupoles``).
+            to fit (bend ``k0`` and, if the observables can constrain them,
+            quadrupole ``k1``) via its ``errors`` selection.
         measurements: Measured optics keyed by the *known MAD-NG ``pt``* the
             measurement was taken at. At least two momenta are required: at one
             momentum the per-magnet Jacobians are degenerate.
@@ -266,8 +274,7 @@ def fit_momentum_reference(
                     "k1": "dk1l",
                     "k2": "dk2l",
                 }.get(spec.attribute, spec.attribute): prior_strength
-                for spec in accelerator.get_supported_knob_specs()
-                if spec.enabled
+                for spec in accelerator.get_knob_specs()
             }
             if prior_strength > 0.0
             else None

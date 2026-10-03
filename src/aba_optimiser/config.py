@@ -9,8 +9,6 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pymadng_utils.physics import PROTON_MASS_GEV as PROTON_MASS
-
 # =============================================================================
 # OPTIMISATION SETTINGS
 # =============================================================================
@@ -43,8 +41,11 @@ class OptimiserConfig:
     lbfgs_max_step_norm: float | None = field(default=1.0)
     lbfgs_powell_damping: float = field(default=0.2)
 
-    # Adam/AMSGrad-specific parameter (ignored for lbfgs)
+    # Adam/AMSGrad-specific parameters (ignored for lbfgs)
     adam_weight_decay: float = field(default=0.0)
+    # None keeps each optimiser's own default. Lower it when the gradients are far
+    # below the default, or eps rather than the gradient scale sets the step size.
+    adam_eps: float | None = field(default=None)
 
     # Computed fields
     decay_epochs: int = field(init=False)
@@ -85,41 +86,29 @@ class SimulationConfig:
     # When False, only positions (x, y) are used for optimisation
     optimise_momenta: bool = field(default=True)
 
-    # Worker mode: arc-by-arc vs whole ring
-    # True: single-turn, range-limited tracking
-    # False: multi-turn tracking with range=nil
-    run_arc_by_arc: bool = field(default=True)
-
-    # Number of turns to track in multi-turn worker mode.
-    # Ignored when run_arc_by_arc=True.
+    # Number of turns tracked from each start turn. Arc-by-arc and AC-dipole
+    # marker modes force this to 1; kicker mode sets it to the kicker track length.
     n_run_turns: int = field(default=1)
 
-    # Whether to use different turns for each BPM range
-    different_turns_per_range: bool = field(default=False)
-
-    # Whether to use fixed BPMs for start/end points
-    # When True (default): Uses fixed reference approach - pairs by varying starts
-    #                      with a fixed end, and varying ends with a fixed start.
-    #                      Example: [A,B,C] x [X,Y,Z] -> [(A,Z), (B,Z), (C,Z), (A,X), (A,Y)]
-    # When False: Creates ALL combinations (Cartesian product) of start and end BPMs.
-    #             Every start BPM is paired with every end BPM.
-    #             Example: [A,B,C] x [X,Y,Z] -> [(A,X), (A,Y), (A,Z), (B,X), (B,Y), (B,Z), (C,X), (C,Y), (C,Z)]
-    #             This provides many more measurement combinations to constrain the fit.
+    # How start x end BPM points expand into ranges. True (default) pairs every
+    # start with one fixed end and every end with one fixed start; False takes the
+    # full cartesian product, giving many more (but more correlated) ranges.
     use_fixed_bpm: bool = field(default=True)
 
     # Logging level for worker processes (separate from main process)
     worker_logging_level: int = field(default=logging.WARNING)
 
-    # Pre-optimisation outlier screening.
-    # When enabled, workers are probed at the initial knob settings before the main
-    # optimisation loop starts. BPMs/workers whose losses have z-scores above the
-    # thresholds below are masked/disabled and excluded from subsequent fitting,
-    # which can make the optimisation more robust to obviously bad data or failing
-    # workers at the cost of using fewer measurements.
-    # You may want to disable this for debugging (to see raw behaviour of all
-    # BPMs/workers), for reproducibility/benchmarking against legacy runs that did
-    # not perform screening, or when working with very small datasets where
-    # discarding any measurements would overly weaken constraints.
+    # BLAS/LAPACK threads per worker process. Every worker does dense linear algebra
+    # (e.g. the Gauss-Newton Hessian) while the other workers do the same, so the
+    # library default (one thread per core, per worker) oversubscribes the machine:
+    # 16 closed-orbit workers took 3.4x longer per Hessian and pushed the load
+    # average to ~290 on a 64-core host. 1 (default) keeps one thread per worker;
+    # None leaves the library default.
+    worker_blas_threads: int | None = field(default=1)
+
+    # Probe the workers at the initial knobs before optimising and mask BPMs and
+    # workers whose loss z-score exceeds the thresholds below, so obviously bad
+    # data cannot dominate the fit. Disable it to see the raw per-BPM behaviour.
     enable_preloop_outlier_screening: bool = field(default=True)
     bpm_loss_outlier_sigma: float = field(default=3.0)
     worker_loss_outlier_sigma: float = field(default=3.0)
@@ -141,72 +130,6 @@ class SimulationConfig:
         """Log the current simulation config settings."""
         logger.info("SimulationConfig: %s", self)
 
-
-# In the future, mode needs to be removed, instead it needs to be a flexible code that can set which parameters will be optimised on the fly.
-# This includes bends, quadrupoles and energy.
-
-# Optimiser configuration for dp/p optimisation
-DPP_OPTIMISER_CONFIG = OptimiserConfig(
-    # max_epochs=400,
-    max_epochs=150,
-    warmup_epochs=1,
-    # num_batches=10,
-    # warmup_epochs=2,
-    # adam
-    warmup_lr_start=4e-7,
-    max_lr=3e-6,
-    min_lr=3e-6,
-    # lbfgs
-    # warmup_lr_start=5e-7,
-    # max_lr=1e0,
-    # min_lr=1e0,
-    # gradient_converged_value=1e-8,
-    gradient_converged_value=3e-7,
-    optimiser_type="adam",
-    # optimiser_type="lbfgs",
-)
-
-# Simulation configuration for dp/p optimisation
-DPP_SIMULATION_CONFIG = SimulationConfig(
-    num_workers=60,
-    num_batches=20,
-)
-
-# Optimiser configuration for quadrupole optimisation
-QUAD_OPTIMISER_CONFIG = OptimiserConfig(
-    max_epochs=5000,
-    # Adam settings
-    warmup_epochs=100,
-    warmup_lr_start=2e-8,
-    max_lr=1e-6,
-    min_lr=5e-7,
-    # LBFGS settings
-    # warmup_epochs=20,
-    # warmup_lr_start=1e-3,
-    # max_lr=5e-2,
-    # min_lr=5e-2,
-    # Rest
-    gradient_converged_value=1e-9,
-    optimiser_type="adam",
-    # optimiser_type="lbfgs",
-)
-
-# Simulation configuration for quadrupole optimisation
-QUAD_SIMULATION_CONFIG = SimulationConfig(
-    num_workers=60,
-    num_batches=10,
-)
-
-# =============================================================================
-# NOISE PARAMETERS
-# =============================================================================
-
-# Standard error of the noise
-POSITION_STD_DEV = 1e-4  # Standard deviation of the position noise
-MOMENTUM_STD_DEV = 3e-6  # Standard deviation of the momentum noise
-REL_K1_STD_DEV = 1e-4  # Standard deviation of the K1 noise
-MACHINE_DELTAP = -16e-5  # -11e-5  # The energy deviation of the machine from expected.
-DELTAP = 1e-3
 
 # Global schema constant for data files (this is appropriate as a global)
 FILE_COLUMNS: tuple[str, ...] = (
@@ -230,12 +153,10 @@ FILE_COLUMNS: tuple[str, ...] = (
 PROJECT_ROOT = Path(__file__).absolute().parent.parent.parent
 ARTIFACTS_ROOT = PROJECT_ROOT / "artifacts"
 TRAINING_RUNS_ROOT = ARTIFACTS_ROOT / "training" / "runs"
-MEASUREMENTS_ARTIFACTS_ROOT = ARTIFACTS_ROOT / "measurements"
 logger.info(f"Current project root: {PROJECT_ROOT}")
 
 # Data files
 NO_NOISE_FILE = PROJECT_ROOT / "data/track_data.parquet"  # Measurement Parquet file
-NOISY_FILE = PROJECT_ROOT / "data/noise_data.parquet"  # Noise Parquet file
 CLEANED_FILE = PROJECT_ROOT / "data/filtered_data.parquet"  # Filtered TFS file
 
 # Other files
@@ -243,20 +164,3 @@ CLEANED_FILE = PROJECT_ROOT / "data/filtered_data.parquet"  # Filtered TFS file
 TRUE_STRENGTHS_FILE = PROJECT_ROOT / "data/true_strengths.txt"
 # Where to write final strengths
 OUTPUT_KNOBS = PROJECT_ROOT / "data/final_knobs.txt"
-# Markdown summary of results
-KNOB_TABLE = PROJECT_ROOT / "data/knob_strengths_table.txt"
-# Matched tunes file
-TUNE_KNOBS_FILE = PROJECT_ROOT / "data/matched_tunes.txt"
-# Corrector strengths file
-CORRECTOR_STRENGTHS = PROJECT_ROOT / "data/corrector_strengths.txt"
-# Bend errors file
-BEND_ERROR_FILE = PROJECT_ROOT / "data/bend_errors.tfs"
-
-# =============================================================================
-# TODO AND NOTES
-# =============================================================================
-
-# Historical notes preserved from development:
-# - the optimisation used to plateau near 5e-4 even when more files were added
-# - follow-up ideas included staged optimisation by magnet family and additional
-#   off-momentum simulations for uncertainty studies

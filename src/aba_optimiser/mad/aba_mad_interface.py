@@ -17,10 +17,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# The multipole/misalignment magnet-strength machinery now lives in
-# ``pymadng_utils.mad.accelerator_mad_interface`` (``set_magnet_strengths`` and
-# friends are inherited via ``KnobMadInterface``). These names are re-exported here
-# for backward compatibility with existing ``aba_optimiser`` imports.
 __all__ = [
     "AbaMadInterface",
 ]

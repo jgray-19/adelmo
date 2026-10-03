@@ -26,7 +26,6 @@ from pymadng_utils.mad.accelerator_mad_interface import (
 from pymadng_utils.mad.knob_mad_interface import resolve_knobs
 
 from aba_optimiser.accelerators import LHC
-from aba_optimiser.measurements.b2_errors import read_b2_error_table
 
 from .aba_mad_interface import AbaMadInterface
 
@@ -134,6 +133,12 @@ local function make_dksl_deferred_knob(e)
     end
 end
 """
+
+
+def read_b2_error_table(path: Path | str) -> dict[str, float]:
+    """Read an OMC3-style ``.errors`` table as an element-name to K1L mapping."""
+    table = tfs.read(path, index="NAME")
+    return {str(name): float(value) for name, value in table["K1L"].items()}
 
 
 def apply_b2_errors_to_sequence(
@@ -364,11 +369,9 @@ class GenericMadInterface(AbaMadInterface):
 
     def make_all_monitors_thin(self, monitors: list[str], observe_after: bool = True) -> None:
         """Replace monitor elements with markers in the specified BPM range."""
-        for bpm in monitors:
-            assert "monitor" in self.mad.MADX[bpm].kind, (
-                f"Element {bpm} is not a monitor, cannot be made thin"
-            )
-            self.make_element_thin(bpm, observe_after=observe_after)
+        self.make_elements_thin(
+            monitors, observe_after=observe_after, require_kind="monitor"
+        )
         LOGGER.info(
             "Replaced %d monitor BPMs with thin observation markers in range: %s",
             len(monitors),
@@ -574,29 +577,8 @@ class GradientDescentMadInterface(GenericMadInterface):
             self.set_magnet_strengths(magnet_values)
 
     def get_knob_specs(self) -> list[KnobSpec]:
-        """
-        Return all knob specifications supported by this accelerator.
-
-        Returns:
-            List of KnobSpec named tuples with fields:
-            - kind: MAD element kind (e.g., "sbend", "quadrupole", "hkicker")
-            - attribute: MAD element attribute (e.g., "k0", "k1", "kick")
-            - pattern: Regex pattern to match element names
-            - nonzero_attr: Optional MAD attribute that must be nonzero for a knob to be created
-            - enabled: Whether this spec is currently enabled
-            - label: Human-readable label for logging
-        """
-        return self.accelerator.get_supported_knob_specs()
-
-    def _filter_knob_specs(
-        self, all_specs: list[KnobSpec]
-    ) -> list[tuple[str, str, str, str | None]]:
-        """Keep only specs enabled by the accelerator's optimise_* flags."""
-        return [
-            (spec.kind, spec.attribute, spec.pattern, spec.nonzero_attr)
-            for spec in all_specs
-            if spec.enabled
-        ]
+        """Return the knob specs selected by the accelerator's errors / misalignments."""
+        return self.accelerator.get_knob_specs()
 
     def _build_attr_block(self, attr_conditions: list[tuple[str, str, str]]) -> str:
         """
@@ -656,17 +638,17 @@ class GradientDescentMadInterface(GenericMadInterface):
 
     def _make_adj_knobs(self) -> None:
         """Create deferred-strength knobs in MAD for all elements matching the knob specs."""
-        filtered_specs = self._filter_knob_specs(self.get_knob_specs())
-        self.accelerator.prepare_mad_for_knob_creation(self, filtered_specs)
+        specs = self.get_knob_specs()
+        self.accelerator.prepare_mad_for_knob_creation(self, specs)
 
         attr_block = ""
-        if filtered_specs:
+        if specs:
             attr_conditions = [
                 (
                     kind, attr,
                     f'(e.kind == "{kind}" {"and e." + nonzero_attr + " ~=0 " if nonzero_attr else ""}and e.name:match("{pattern}"))',
                 )
-                for kind, attr, pattern, nonzero_attr in filtered_specs
+                for kind, attr, pattern, nonzero_attr, _label in specs
             ]
             attr_block = f"""
 local function store_knobs(k_str_name, mad_value, attr, spos)
