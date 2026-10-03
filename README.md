@@ -11,13 +11,17 @@ full details.
 
 High-level modules (concise):
 
-- `config` — configuration dataclasses and defaults
-- `training` — `Controller` runtime and orchestration (energy, quads, bends)
-- `training_optics` — optics-specific matching controller
-- `simulation` / `mad` — model creation and tracking utilities
-- `measurements` / `dataframes` / `filtering` — measurement IO and cleaning
+- `accelerators` / `config` — LHC, PSB and SPS optimiser accelerators and configuration dataclasses
+- `training` — tracking fitters (`ArcByArcFitter`, `ACDMarkerFitter`, `KickerFitter`), data manager and worker orchestration
+- `training_closed_twiss` — Levenberg–Marquardt closed-orbit / optics fitting
+- `workers` / `mad` / `simulation` — MAD-NG tracking workers, interfaces and simulation helpers
+- `measurements` / `noise` — measurement preparation shared by the PSB and LHC workflows (reconstruction, ACD marker rows, variances)
 - `optimisers` — Adam / AMSGrad / L-BFGS implementations
-- `io` / `plotting` / `matching` — helpers and utilities
+- `analysis` / `dispersion` / `dataframes` / `io` — helpers and utilities
+
+dp/p ↔ pt conversion comes from `pymadng_utils.physics` (or `accelerator.dp2pt`).
+The LHC measurement workflows live in `lhc_measurements`; the PSB campaign
+entry points live in `psb_md/scripts/optimisation/`.
 
 Use the tests in `tests/training/` as compact examples of real workflows.
 
@@ -61,16 +65,6 @@ For development (tests + docs):
 pip install -e .[test,docs,tracking]
 ```
 
-## Quick usage
-
-Run the main scripts (examples):
-
-```bash
-python scripts/run_optimiser.py
-python scripts/optimise_energy.py
-python scripts/plot_results.py
-```
-
 ## Kicker mode
 
 Kicker mode supports single-start tracking where the initial conditions come
@@ -83,68 +77,20 @@ Requirements:
 - The model sequence should include the kicker element so the sequence can be
 	cycled to it.
 
-Use the controller with ``KickerConfig``:
+Use `KickerFitter` with a `KickerConfig`:
 
 ```python
-from aba_optimiser.training.controller_config import KickerConfig
+from aba_optimiser.training import KickerConfig, KickerFitter
 
-kicker = KickerConfig(kicker_name="KICKER.NAME", turns_after_kicker=1024)
-controller = Controller(
-		accelerator=accelerator,
-		optimiser_config=optimiser_config,
-		simulation_config=simulation_config,
-		sequence_config=sequence_config,
-		measurement_config=measurement_config,
-		bpm_start_points=["KICKER.NAME"],
-		bpm_end_points=[],
-		kicker_config=kicker,
+fitter = KickerFitter(
+    accelerator=accelerator,
+    optimiser_config=optimiser_config,
+    simulation_config=simulation_config,
+    sequence_config=sequence_config,
+    measurement_config=measurement_config,
+    kicker_config=KickerConfig(kicker_name="KICKER.NAME", turns_after_kicker=1024),
 )
-```
-
-## Tests
-
-Run tests with pytest::
-
-```bash
-pytest tests/
-pytest tests/ --cov=aba_optimiser
-```
-
-## Docs
-
-Build docs::
-
-```bash
-pip install -e .[docs]
-cd docs && make html
-```
-
-View at `docs/_build/html/index.html`.
-
-## Installation
-
-Clone and install in editable mode::
-
-```bash
-git clone https://github.com/jgray-19/sgd-magnet-tuner.git
-cd sgd-magnet-tuner
-pip install -e .
-```
-
-For development (tests + docs):
-
-```bash
-pip install -e .[test,docs,tracking]
-```
-
-## Quick usage
-
-Run the main scripts (examples):
-
-```bash
-python scripts/run_optimiser.py
-python scripts/optimise_energy.py
-python scripts/plot_results.py
+knobs, uncertainties = fitter.run()
 ```
 
 ## Tests

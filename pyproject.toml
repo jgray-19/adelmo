@@ -14,17 +14,20 @@ license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
     "numpy",
+    "threadpoolctl",
     "pandas",
     "tfs-pandas",
     "tensorboardX",
     "pymadng>=0.3.0",
     "pymadng-utils",
-    "tmom-recon",
     "matplotlib",
     "uncertainties",
 ]
 
 [project.optional-dependencies]
+measurements = [
+    "tmom-recon",
+]
 test = [
     "pytest",
     "pytest-cov",
