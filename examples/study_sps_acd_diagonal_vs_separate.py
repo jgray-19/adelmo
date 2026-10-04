@@ -157,7 +157,7 @@ def build_fitter(data: StudyData, case: str, output_dir: Path, *, max_epochs: in
     fit_dir = output_dir / case
     fit_dir.mkdir(parents=True, exist_ok=True)
     measurements = {
-        path: MeasurementDetails(interface_options={"tune_knobs": data.tune_knobs_file})
+        path: MeasurementDetails(interface_options={"machine_state": data.tune_knobs_file})
         for path in data.files[case]
     }
     return ACDMarkerFitter(

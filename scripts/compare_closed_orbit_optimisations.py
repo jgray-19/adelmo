@@ -19,7 +19,7 @@ from pymadng_utils.io.utils import read_knobs
 
 from aba_optimiser.accelerators import LHC
 from aba_optimiser.config import PROJECT_ROOT
-from aba_optimiser.mad import GenericMadInterface
+from aba_optimiser.mad import GenericMadInterface, merge_machine_states
 
 PC = 6800  # Beam energy in GeV
 logging.basicConfig(level=logging.INFO)
@@ -89,8 +89,7 @@ def generate_closed_orbit(
     accelerator = LHC(beam=beam, kinetic_energy=PC, sequence_file=sequence_file)
     mad_iface = GenericMadInterface(
         accelerator,
-        corrector_knobs=corrector_file,
-        tune_knobs=tune_knobs,
+        machine_state=merge_machine_states(corrector_file, tune_knobs),
     )
     if new_magnet_strengths:
         mad_iface.set_magnet_strengths(new_magnet_strengths)

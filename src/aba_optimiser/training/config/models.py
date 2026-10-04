@@ -42,7 +42,7 @@ class MeasurementDetails:
 
     ``interface_options`` are passed straight through as keyword arguments to the
     MAD-NG interface for this measurement, so any MAD interface option is
-    supported (commonly ``corrector_knobs``, ``tune_knobs``,
+    supported (commonly ``machine_state``,
     ``b2_errors``). The bunch structure is read from the ``bunch_number`` column
     of the measurement parquet, so it is not configured here.
 

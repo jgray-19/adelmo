@@ -124,6 +124,8 @@ class _GaussNewtonFitter(BaseFitter):
 
         self.lm_config = lm_config or LevenbergMarquardtConfig()
         self.diagnostics: dict[str, object] = {}
+        #: ``(knobs, loss)`` of every accepted iteration, in order
+        self.history: list[tuple[dict[str, float], float]] = []
         simulation_config = SimulationConfig(
             num_workers=num_workers, num_batches=1, use_fixed_bpm=True
         )
@@ -141,6 +143,12 @@ class _GaussNewtonFitter(BaseFitter):
 
         self.use_errors = use_errors
         self.prior_strengths = _validate_prior_strengths(prior_strengths)
+
+    def close(self) -> None:
+        """Shut down the MAD process of the model; call once the fit (and any use of its model) is done."""
+        mad_iface = getattr(self.config_manager, "mad_iface", None)
+        if mad_iface is not None:
+            mad_iface.close()
 
     def run(self) -> tuple[dict[str, float], dict[str, float]]:
         """Execute the closed-twiss optimisation with a Gauss-Newton solve."""
@@ -220,6 +228,7 @@ class _GaussNewtonFitter(BaseFitter):
             last_update = update
             if update.accepted:
                 accepted_evaluations += 1
+                self.history.append((current_knobs, float(loss)))
             current = update.next_params
 
             # A rejected step is not a no-op: the optimiser has already retried
@@ -370,8 +379,7 @@ class ClosedTwissFitter(_GaussNewtonFitter):
         observables: tuple[str, ...] = DEFAULT_OBSERVABLES,
         lm_config: LevenbergMarquardtConfig | None = None,
         initial_knob_strengths: dict[str, float] | None = None,
-        corrector_knobs: Path | None = None,
-        tune_knobs: Path | None = None,
+        machine_state: Path | Mapping[str, float] | None = None,
         true_strengths: Path | dict[str, float] | None = None,
         use_errors: bool = True,
         prior_strengths: Mapping[str, float] | None = None,
@@ -404,14 +412,7 @@ class ClosedTwissFitter(_GaussNewtonFitter):
             float(pt): load_measurement(source, observables)
             for pt, source in measurements.items()
         }
-        interface_options = {
-            key: value
-            for key, value in (
-                ("corrector_knobs", corrector_knobs),
-                ("tune_knobs", tune_knobs),
-            )
-            if value is not None
-        }
+        interface_options = {} if machine_state is None else {"machine_state": machine_state}
         self.worker_payloads = create_worker_payloads(
             self.measurements,
             observables,

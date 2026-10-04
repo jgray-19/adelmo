@@ -338,17 +338,3 @@ reset_before_validation()
 {_send_block(observables, include_derivatives=False)}
 """
 
-
-if __name__ == "__main__":
-    scripts = {
-        "tracking init": build_tracking_init_script(TRACKING_OBSERVABLES),
-        "tracking": build_tracking_script(TRACKING_OBSERVABLES),
-        "tracking preflight": build_tracking_preflight_script(),
-        "validation init": build_validation_init_script(TRACKING_OBSERVABLES),
-        "validation": build_validation_script(TRACKING_OBSERVABLES),
-        "tracking uncertainty": build_tracking_script(
-            TRACKING_OBSERVABLES, include_start_derivatives=True
-        ),
-    }
-    for name, script in scripts.items():
-        print(f"{'=' * 80}\n{name}\n{'=' * 80}\n{script}")

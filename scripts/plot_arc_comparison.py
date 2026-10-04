@@ -195,7 +195,7 @@ def plot_comparison(
         ax.set_xticks(x)
         ax.set_xticklabels([f"Arc {i}" for i in arc_indices])
         ax.axhline(y=0, color="k", linestyle="-", linewidth=0.5, alpha=0.3)
-        ax.grid(True, alpha=0.3, axis="y")
+        ax.grid(visible=True, alpha=0.3, axis="y")
         ax.legend(fontsize=FONT_SIZE - 1)
 
         # Format y-axis
@@ -222,7 +222,7 @@ def plot_comparison(
         )
         ax.set_xticks(arc_indices)
         ax.axhline(y=0, color="k", linestyle="-", linewidth=0.5, alpha=0.3)
-        ax.grid(True, alpha=0.3)
+        ax.grid(visible=True, alpha=0.3)
         ax.legend(fontsize=FONT_SIZE - 1)
         ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:.2f}"))
 
@@ -254,7 +254,7 @@ def plot_comparison(
         ax.set_xticks(arc_pair_indices)
         ax.set_xticklabels(arc_pair_labels)
         ax.axhline(y=0, color="k", linestyle="-", linewidth=1, alpha=0.5)
-        ax.grid(True, alpha=0.3)
+        ax.grid(visible=True, alpha=0.3)
         ax.legend(fontsize=FONT_SIZE - 1)
         ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:.2f}"))
 

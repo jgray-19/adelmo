@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
+from aba_optimiser.mad.machine_state import resolve_machine_state
 from aba_optimiser.training_closed_twiss.fitter import (
     LevenbergMarquardtConfig,
     _create_worker_payload,
@@ -50,7 +51,17 @@ class ClosedOrbitMeasurement:
 
 @dataclass(frozen=True)
 class ClosedOrbitSeries:
-    """Measurements evaluated in one process under one control-knob trim.
+    """Measurements evaluated in one process at one machine state and control-knob trim.
+
+    ``machine_state`` maps MAD-X globals -- tune knobs, quadrupole strengths, corrector
+    kicks (e.g. ``kbrqf``, ``kbr3dhz2l4``) -- to the values the machine had when these orbits
+    were measured, either directly or as a knobs file. It is layered over the fitter's own
+    ``machine_state`` default. They are known inputs, never fitted, and
+    differ freely between series -- varying quadrupole strengths is what makes quadrupole
+    ``dx``/``dy`` observable. Leave it empty to measure at the model's own settings.
+
+    ``control_knob`` (a MAD-X global) is trimmed by ``control_delta`` from its nominal: its
+    value in ``machine_state`` if listed there, else the model's own.
 
     Each measurement keeps its own target and momentum. Combining measurements
     here changes process layout only; their residuals and normal equations are
@@ -59,8 +70,8 @@ class ClosedOrbitSeries:
 
     measurements: tuple[ClosedOrbitMeasurement, ...]
     control_knob: str | None = None
-    control_nominal: float = 0.0
     control_delta: float = 0.0
+    machine_state: Path | Mapping[str, float] = field(default_factory=dict)
     absolute_planes: tuple[str, ...] = ()
     label: str = ""
     #: This series' own observables, overriding the fitter-wide default. A
@@ -94,8 +105,7 @@ class ClosedOrbitFitter(_GaussNewtonFitter):
         observables: tuple[str, ...] = CLOSED_ORBIT_OBSERVABLES,
         lm_config: LevenbergMarquardtConfig | None = None,
         initial_knob_strengths: dict[str, float] | None = None,
-        corrector_knobs: Path | Mapping[str, float] | None = None,
-        tune_knobs: Path | Mapping[str, float] | None = None,
+        machine_state: Path | Mapping[str, float] | None = None,
         true_strengths: Path | dict[str, float] | None = None,
         use_errors: bool = True,
         prior_strengths: Mapping[str, float] | None = None,
@@ -143,17 +153,8 @@ class ClosedOrbitFitter(_GaussNewtonFitter):
             output_config=output_config,
         )
 
-        interface_options = {
-            key: value
-            for key, value in (
-                ("corrector_knobs", corrector_knobs),
-                ("tune_knobs", tune_knobs),
-            )
-            if value is not None
-        }
-        self.worker_payloads = self._create_series_payloads(
-            sequence_config, accelerator, interface_options
-        )
+        self.default_machine_state = resolve_machine_state(machine_state) if machine_state is not None else {}
+        self.worker_payloads = self._create_series_payloads(sequence_config, accelerator)
 
     @staticmethod
     def _worker_count(n_series: int, max_workers: int | None) -> int:
@@ -180,6 +181,9 @@ class ClosedOrbitFitter(_GaussNewtonFitter):
         coords = {tuple(o.name for o in data.measurements[0].observables) for data in needing}
         if len(coords) != 1:
             LOGGER.warning("Series fit different observables (%s); each solves its own reference", sorted(coords))
+            return grouped
+        if any(data.machine_state != needing[0].machine_state for data in needing):
+            LOGGER.warning("Series sit at different machine states (control-knob nominals included); each solves its own reference")
             return grouped
         config, first = next((c, d) for c, d in payloads if d.needs_reference)
         measurements = {m.reference_pt: m for data in needing for m in data.measurements}.values()
@@ -223,7 +227,7 @@ class ClosedOrbitFitter(_GaussNewtonFitter):
             for group in groups
         ]
 
-    def _create_series_payloads(self, sequence_config, accelerator, interface_options):
+    def _create_series_payloads(self, sequence_config, accelerator):
         payloads = []
         for item in self.series:
             item_observables = item.observables or self.observable_names
@@ -253,7 +257,7 @@ class ClosedOrbitFitter(_GaussNewtonFitter):
                     sequence_config.magnet_range,
                     sequence_config.bad_bpms,
                     accelerator,
-                    interface_options,
+                    {},
                     self.use_errors,
                     self.mad_logfile,
                     self.python_logfile,
@@ -274,8 +278,8 @@ class ClosedOrbitFitter(_GaussNewtonFitter):
                         bpm_names=common_bpms,
                         measurements=measurement_data,
                         control_knob=item.control_knob,
-                        control_nominal=float(item.control_nominal),
                         control_delta=float(item.control_delta),
+                        machine_state={**self.default_machine_state, **resolve_machine_state(item.machine_state)},
                         absolute_planes=tuple(item.absolute_planes),
                     ),
                 )

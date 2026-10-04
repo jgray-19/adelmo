@@ -65,6 +65,18 @@ MAD Interface Layer
    aba_optimiser.mad
    aba_optimiser.mad.aba_mad_interface
    aba_optimiser.mad.optimising_mad_interface
+   aba_optimiser.mad.machine_state
+
+
+Closed-Orbit Fitting
+--------------------
+
+.. autosummary::
+   :toctree: _autosummary
+
+   aba_optimiser.training_closed_twiss
+   aba_optimiser.training_closed_twiss.closed_orbit
+   aba_optimiser.workers.closed_orbit
 
 
 Optimisation Runtime

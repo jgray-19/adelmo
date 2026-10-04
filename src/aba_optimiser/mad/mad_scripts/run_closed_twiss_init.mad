@@ -34,6 +34,7 @@
 !   optics_columns    : ordered table of trkopt names (values then derivatives);
 !                       empty when only orbit coordinates are observed
 !   orbit_coords      : ordered table of closed-orbit coordinates to report
+!   nbpms             : number of observed BPMs (sizes the orbit buffers)
 !
 ! After this script runs the worker drives it with, per iteration:
 !   loaded_sequence['<knob>']:set0(value)   -- update the knob constant part
@@ -80,7 +81,9 @@ x0map = MAD.damap {
 ! monomial is kept in the string form that ``tpsa:get`` parses itself.
 knob_mono = {}
 for i, param in ipairs(knob_names) do
-    loaded_sequence[param] = loaded_sequence[param] + x0map[param]
+    ! 'aba_trim' (calibrated fits with the corrector kick in the map) is a parameter of the map only: the worker adds it
+    ! to the control knob's MADX variable per evaluation, so there is no sequence variable to make a TPSA here.
+    if param ~= 'aba_trim' then loaded_sequence[param] = loaded_sequence[param] + x0map[param] end
     knob_mono[i] = "000000" .. string.rep("0", i - 1) .. "1"
 end
 
@@ -111,6 +114,46 @@ function compute_closed_twiss()
     closed_tbl = tws
     local ok = tws ~= nil and (tws.lost == nil or tws.lost == 0)
     python:send(ok and true or false, true)
+end
+
+! Orbit buffers, allocated once (first use) and only zeroed per computation.
+! ``orbit_val[coord]`` is a vector and ``orbit_jac[coord]`` an (nbpm x nknob) matrix.
+local orbit_n, orbit_names, orbit_val, orbit_jac, orbit_ready = 0, {}, {}, {}, false
+
+local function reset_orbit()
+    if not orbit_ready then
+        orbit_ready = true
+        for _, coord in ipairs(orbit_coords) do
+            orbit_val[coord] = vector(nbpms)
+            orbit_jac[coord] = matrix(nbpms, num_knobs)
+        end
+    end
+    orbit_n = 0
+    for _, coord in ipairs(orbit_coords) do
+        orbit_val[coord]:zeros()
+        orbit_jac[coord]:zeros()
+    end
+end
+
+! Orbit values only (compute_orbit_plain). cofind calls the hook on each of its own
+! internal tracking passes, every one visiting all BPMs in order, so the row index
+! wraps and each pass overwrites the last; the final pass is the converged orbit.
+local function save_orbit(elm, mflw, _, slc)
+    if slc ~= -4 or not elm:is_observed() then return end
+    orbit_n = orbit_n % nbpms + 1
+    for _, coord in ipairs(orbit_coords) do orbit_val[coord]:seti(orbit_n, mflw[1][coord]:get0()) end
+end
+
+! Orbit values and, filled straight into the Jacobian rows, d(orbit)/d(knob)
+! (compute_closed_orbit). Also records the BPM names.
+local function save_orbit_jac(elm, mflw, _, slc)
+    if slc ~= -4 or not elm:is_observed() then return end
+    orbit_n = orbit_n + 1
+    orbit_names[orbit_n] = elm.name
+    for _, coord in ipairs(orbit_coords) do
+        orbit_val[coord]:seti(orbit_n, mflw[1][coord]:get0())
+        orbit_jac[coord]:setrow(orbit_n, get_knob_vec(mflw[1][coord]))
+    end
 end
 
 ! Closed orbit and its knob derivatives without ``twiss``.
@@ -147,39 +190,19 @@ function compute_closed_orbit()
     local nf = normal(start)
     nf.a:copy(start):set0(nf.x0)
 
-    orbit_names, orbit_val, orbit_jac = {}, {}, {}
-    local rows = {}
-    for _, coord in ipairs(orbit_coords) do
-        orbit_val[coord], rows[coord] = {}, {}
-    end
-    local n = 0
-    local function save_orbit(elm, mflw, _, slc)
-        if slc == -4 and elm:is_observed() then
-            n = n + 1
-            orbit_names[n] = elm.name
-            for _, coord in ipairs(orbit_coords) do
-                orbit_val[coord][n] = mflw[1][coord]:get0()
-                rows[coord][n] = get_knob_vec(mflw[1][coord])
-            end
-        end
-    end
-
+    reset_orbit()
+    orbit_names = {}
     local _, mflw = track{
         sequence = loaded_sequence,
         observe  = 1,
         X0       = start,
         method   = 6,
         save     = false,
-        atexit   = save_orbit,
+        atexit   = save_orbit_jac,
     }
-    if mflw[1].status == 'lost' then
+    if mflw[1].status == 'lost' or orbit_n ~= nbpms then
         python:send(false, true)
         return
-    end
-    for _, coord in ipairs(orbit_coords) do
-        orbit_val[coord] = vector(orbit_val[coord])
-        orbit_jac[coord] = matrix(n, num_knobs)
-        for r = 1, n do orbit_jac[coord]:setrow(r, rows[coord][r]) end
     end
     python:send(true, true)
 end
@@ -193,53 +216,37 @@ function send_orbit_only()
     end
 end
 
-! Loss-only closed orbit: the orbit values at the BPMs with no knob derivatives, for trial points of the LM fit that
-! only need the loss. The parametric solve carries one TPSA parameter per knob (cost ~3 ms per knob); a plain 6-variable
-! damap does not (measured 1.1-2.5 s against 10-15 s for 2663 knobs, identical orbit to 2e-15 m). The knobs are TPSA-valued
-! in the sequence and a plain-damap solve on them errors, so they are turned into their constants for the call
-! (knobs_to_plain, ~0 s) and back (knobs_to_param, ~0 s); each keeps the value set0 gave it. orbit-only workers only.
 if orbit_only then
     plain_map = MAD.damap { nv = #coord_names, mo = 1, vn = coord_names }
 end
 
 function knobs_to_plain()
-    for _, p in ipairs(knob_names) do loaded_sequence[p] = loaded_sequence[p]:get0() end
+    for _, p in ipairs(knob_names) do if p ~= 'aba_trim' then loaded_sequence[p] = loaded_sequence[p]:get0() end end
 end
 
 function knobs_to_param()
-    for _, p in ipairs(knob_names) do loaded_sequence[p] = loaded_sequence[p] + x0map[p] end
+    for _, p in ipairs(knob_names) do if p ~= 'aba_trim' then loaded_sequence[p] = loaded_sequence[p] + x0map[p] end end
 end
 
-! After knobs_to_plain(): sends success, the BPM names, then each orbit coordinate's values.
-function compute_orbit_plain()
+! After knobs_to_plain(): sends success, then each orbit coordinate's values in BPM order.
+function compute_orbit_plain_core()
     local start = plain_map:copy()
     start.nocopy = true
     start.pt:set0(x0map.pt:get0())  -- the fixed momentum pinned by the worker on x0map
-    cofind{ sequence = loaded_sequence, X0 = start, method = 6 }
-    if start.status ~= 'stable' then
-        python:send(false, true)
-        return
-    end
-    local nf = normal(start)
-    local x = plain_map:copy():set0(nf.x0)
-    x.pt:set0(x0map.pt:get0())
-    local names, vals, n = {}, {}, 0
-    for _, coord in ipairs(orbit_coords) do vals[coord] = {} end
-    local function save_orbit(elm, mflw, _, slc)
-        if slc == -4 and elm:is_observed() then
-            n = n + 1
-            names[n] = elm.name
-            for _, coord in ipairs(orbit_coords) do vals[coord][n] = mflw[1][coord]:get0() end
-        end
-    end
-    local _, mflw = track{ sequence = loaded_sequence, observe = 1, X0 = x, method = 6, save = false, atexit = save_orbit }
-    if mflw[1].status == 'lost' then
+    reset_orbit()
+    cofind{ sequence = loaded_sequence, X0 = start, method = 6, observe = 1, save = false, atexit = save_orbit }
+    -- orbit_n must be exactly nbpms: fewer means one of the passes stopped early
+    if start.status ~= 'stable' or orbit_n ~= nbpms then
         python:send(false, true)
         return
     end
     python:send(true, true)
-    python:send(names, true)
-    for _, coord in ipairs(orbit_coords) do python:send(vector(vals[coord]), true) end
+    for _, coord in ipairs(orbit_coords) do python:send(orbit_val[coord], true) end
+end
+
+function compute_orbit_plain()
+    local ok = pcall(compute_orbit_plain_core)
+    if not ok then python:send(false, true) end
 end
 
 ! Send d(orbit coordinate)/d(knob) as one (nbpm x nknob) matrix per coordinate.

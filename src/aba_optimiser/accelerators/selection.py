@@ -62,13 +62,12 @@ def describe_selections(
     misalignments: Mapping[str, Iterable[str]] | None = None,
 ) -> list[str]:
     """Human-readable labels such as ``["quad k1", "bend k0", "quad dy"]``."""
-    labels = [
+    return [
         f"{family} {attr}"
         for selection in (errors, misalignments)
         for family, attrs in (selection or {}).items()
         for attr in sorted(attrs)
     ]
-    return labels
 
 
 def _families_help(accelerator: type[Accelerator] | None, allowed: str) -> str:

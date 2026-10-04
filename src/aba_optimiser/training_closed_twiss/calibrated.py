@@ -61,8 +61,6 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
         self.sigma_corrector = float(sigma_corrector)
         self.calibration_result: dict[str, float] = {}
         self.calibration_spec: CalibrationSpec | None = None
-        #: ``(magnet knobs, loss)`` of every accepted iteration
-        self.history: list[tuple[dict[str, float], float]] = []
         super().__init__(*args, **kwargs)
 
     def _group_payloads(self, payloads):
@@ -158,7 +156,7 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
                 # evaluation below, so a rejected trial costs one plain closed-orbit solve instead of a parametric one + Hessian.
                 trial = self._collect_loss_only(channels, knobs)
                 if trial is None:
-                    update = optimiser.update(u, float("nan"), zero_grad, zero_hess, True)
+                    update = optimiser.update(u, float("nan"), zero_grad, zero_hess, failed=True)
                 else:
                     shell = SimpleNamespace(loss=trial[0], n_q=n_q)
                     apply_prior(shell, u, b, self.sigma_corrector, self.sigma_bpm, trial[1], sigma_q, loss_only=True)
@@ -170,7 +168,7 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
                             LOGGER.warning("verify: loss-only %.10e  full %.10e  rel diff %.2e (data %.10e vs %.10e)",
                                            shell.loss, check.loss, (shell.loss - check.loss) / check.loss, trial[0], full[0].loss)
                     if not shell.loss < optimiser.best_loss:
-                        update = optimiser.update(u, shell.loss, zero_grad, zero_hess, False)
+                        update = optimiser.update(u, shell.loss, zero_grad, zero_hess, failed=False)
             if update is None:
                 collected = self._collect_calibrated(channels, knobs)
                 if collected is None:

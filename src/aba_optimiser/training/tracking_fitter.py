@@ -474,7 +474,7 @@ class TrackingFitter(BaseFitter):
     def _get_mad_setup_kwargs(self) -> dict:
         """Mirror the worker MAD setup when building the expected knob list."""
         merged: dict = {}
-        for key in ("corrector_knobs", "tune_knobs", "b2_errors"):
+        for key in ("machine_state", "b2_errors"):
             for options in self.interface_options:
                 if options.get(key) is not None:
                     merged[key] = options[key]

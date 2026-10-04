@@ -56,8 +56,7 @@ class ConfigurationManager:
         self,
         debug: bool = False,
         mad_logfile: Path | None = None,
-        corrector_knobs: Path | None = None,
-        tune_knobs: Path | None = None,
+        machine_state: Path | None = None,
         b2_errors: Path | None = None,
     ) -> None:
         """Initialise the MAD-NG interface and get basic model parameters."""
@@ -65,8 +64,7 @@ class ConfigurationManager:
         self.mad_iface = GradientDescentMadInterface(
             accelerator=self.accelerator,
             magnet_range=self.magnet_range,
-            corrector_knobs=corrector_knobs,
-            tune_knobs=tune_knobs,
+            machine_state=machine_state,
             b2_errors=b2_errors,
             bad_bpms=self.sequence_config.bad_bpms,
             debug=debug,
