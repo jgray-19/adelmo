@@ -12,6 +12,7 @@ from aba_optimiser.calibration import (
     CalibrationBlocks,
     add_series,
     bpm_gain_name,
+    corrector_gain_knob_name,
     corrector_gain_name,
 )
 from aba_optimiser.workers.closed_orbit import ClosedOrbitBatchWorker
@@ -21,12 +22,16 @@ if TYPE_CHECKING:
     from pymadng import MAD
 
 LOGGER = logging.getLogger(__name__)
-#: Name of the extra damap parameter that carries the corrector kick ; the last column of the Jacobian.
-TRIM_PARAMETER = "aba_trim"
 
 
 class CalibratedClosedOrbitBatchWorker(ClosedOrbitBatchWorker):
-    """Batch worker that fits ``(1 + b_bpm) * model(q, nominal + (1 + g_corrector) * delta)`` to the measured orbit changes.
+    """Batch worker that fits ``(1 + b_bpm) * model(q, kicks * (1 + g_corrector))`` to the measured orbit changes.
+
+    Every calibrated corrector that is on (a non-zero ``k_<corrector>`` global) in either the series' state or its
+    reference state has its whole kick scaled by its gain, in both states.
+
+    Assumes the baseline lattice has no enabled correctors: a kick that is non-zero only in the baseline (not set by
+    either state) gets no gain knob and is never scaled.
 
     The knob dict it receives carries the gains next to the magnet knobs (names from :mod:`aba_optimiser.calibration`);
     MAD-NG never sees them. It returns the ``u = (q, g)`` gradient and Hessian in the usual slots and the remaining
@@ -34,17 +39,40 @@ class CalibratedClosedOrbitBatchWorker(ClosedOrbitBatchWorker):
     """
 
     def _setup_da_maps(self, mad: MAD) -> None:
-        """The damap gets one more parameter, the corrector kick (last Jacobian column)."""
-        mad["knob_names"] = [name for name in mad["knob_names"] if name != "pt"] + [TRIM_PARAMETER]
+        """One more knob per corrector that is on in this worker's series: its gain offset, after the magnet knobs."""
+        correctors = list(
+            dict.fromkeys(
+                name[2:].upper()
+                for state in self._series_states
+                for name, value in (*state["machine_state"].items(), *state["reference_state"].items())
+                if name.startswith("k_") and name[2:].upper() in state["calibration"].correctors and value != 0.0
+            )
+        )
+        gain_knobs = [corrector_gain_knob_name(corrector) for corrector in correctors]
+        mad.send("\n".join(f"loaded_sequence['{knob}'] = 0" for knob in gain_knobs))
+        mad["knob_names"] = [name for name in mad["knob_names"] if name != "pt"] + gain_knobs
         super()._setup_da_maps(mad)
-        #: Number of magnet knobs; ``n_knobs`` also counts the trim parameter.
-        self.n_q = self.n_knobs - 1
+        #: Number of magnet knobs; ``n_knobs`` also counts the gain knobs.
+        self.n_q = self.n_knobs - len(gain_knobs)
+        #: The correctors with a gain knob, in Jacobian column order (columns ``n_q`` onwards).
+        self._correctors = correctors
 
-    def _set_control(self, mad: MAD, value: float, trim: bool = False) -> None:
-        """``trim``: the control knob is ``value`` plus the map's trim parameter, so the Jacobian carries d(orbit)/d(kick)."""
-        if self.control_knob is not None:
-            expression = f"{value:.15e} + x0map['{TRIM_PARAMETER}']" if trim else f"{value:.15e}"
-            mad.send(f"MADX['{self.control_knob}'] = {expression}")
+    def _enter_scaled(self, mad: MAD, role: str, knob_updates: dict[str, float]) -> None:
+        """Enter *role*'s state with every corrector kick ``k`` set to ``k * (1 + g + gain knob)``.
+
+        The gain knob is 0, so the value is ``k * (1 + g)``, and its Jacobian column is d(orbit)/d(g).
+        """
+        state = self._states[role]
+        self._assign_state(mad, state)
+        commands = []
+        for name, kick in state.items():
+            corrector = name[2:].upper()
+            if name.startswith("k_") and corrector in self._correctors and kick != 0.0:
+                gain = 1.0 + float(knob_updates.get(corrector_gain_name(corrector), 0.0))
+                knob = corrector_gain_knob_name(corrector)
+                commands.append(f"MADX['{name}'] = {kick:.15e} * ({gain:.15e} + loaded_sequence['{knob}'])")
+        if commands:
+            mad.send("\n".join(commands))
 
     def setup_mad_interface(self, knob_values):
         """The startup message also carries the gains, which are not model values."""
@@ -98,26 +126,24 @@ class CalibratedClosedOrbitBatchWorker(ClosedOrbitBatchWorker):
 
     def _evaluate_calibrated_loss(self, mad: MAD, knob_updates: dict[str, float], spec) -> float | None:
         """One series' ``sum w ((1 + b) * model - target)^2`` as in :func:`add_series`, from orbit values only."""
-        corrector = self.control_knob[2:].upper()
-        trim = self.control_delta * (1.0 + float(knob_updates.get(corrector_gain_name(corrector), 0.0)))  # the kick put into the lattice
         cache = {}
 
-        def evaluate(control: float, pt: float, role: str):
-            key = (control, pt)
+        def evaluate(role: str, pt: float):
+            key = (role, pt)
             if key not in cache:
-                self._set_control(mad, control)
+                self._enter_scaled(mad, role, knob_updates)
                 self._set_pt(mad, pt)
-                cache[key] = self._orbit_plain(mad, context=f" ({role}, control={control:+.9g})")
+                cache[key] = self._orbit_plain(mad, context=f" ({role}, pt={pt:+.9g})")
             return cache[key]
 
         loss = 0.0
         with self._in_series(mad):
             for index, measurement in enumerate(self.series_measurements):
-                signal = evaluate(self.control_nominal + trim, float(measurement.pt), "signal")
+                signal = evaluate("signal", float(measurement.pt))
                 if signal is None:
                     return None
                 if np.any(self._subtract):
-                    reference = evaluate(self.control_nominal, float(measurement.reference_pt), "reference")
+                    reference = evaluate("reference", float(measurement.reference_pt))
                     if reference is None:
                         return None
                     model = signal - reference * self._subtract[:, None]
@@ -136,28 +162,24 @@ class CalibratedClosedOrbitBatchWorker(ClosedOrbitBatchWorker):
         n_b = len(PLANES) * len(spec.bpms)
         blocks = CalibrationBlocks(self.n_q, len(spec.correctors), n_b)
         bpm_index = {name: i for i, name in enumerate(spec.bpms)}
-        corrector = self.control_knob[2:].upper()
-        corrector_index = spec.correctors.index(corrector)
-        corrector_gain = float(knob_updates.get(corrector_gain_name(corrector), 0.0))
+        corrector_indices = [spec.correctors.index(corrector) for corrector in self._correctors]
         cache = {}
-        trim = self.control_delta * (1.0 + corrector_gain)  # the kick put into the lattice
 
-        def evaluate(control: float, pt: float, role: str):
-            key = (control, pt)
+        def evaluate(role: str, pt: float):
+            key = (role, pt)
             if key not in cache:
-                # only the signal carries the trim parameter: the reference stands at the nominal kick, whatever g is
-                self._set_control(mad, control, trim=role == "signal")
+                self._enter_scaled(mad, role, knob_updates)
                 self._set_pt(mad, pt)
-                cache[key] = self._model_and_jacobian(mad, context=f" ({role}, control={control:+.9g})")
+                cache[key] = self._model_and_jacobian(mad, context=f" ({role}, pt={pt:+.9g})")
             return cache[key]
 
         with self._in_series(mad):
             for index, measurement in enumerate(self.series_measurements):
-                signal = evaluate(self.control_nominal + trim, float(measurement.pt), "signal")
+                signal = evaluate("signal", float(measurement.pt))
                 if signal is None:
                     return None
                 if np.any(self._subtract):
-                    reference = evaluate(self.control_nominal, float(measurement.reference_pt), "reference")
+                    reference = evaluate("reference", float(measurement.reference_pt))
                     if reference is None:
                         return None
                     model, jacobian = self._compare_to_reference(signal, reference)
@@ -172,7 +194,6 @@ class CalibratedClosedOrbitBatchWorker(ClosedOrbitBatchWorker):
                     for k, name in enumerate(names):
                         cols[o, k] = plane * len(spec.bpms) + bpm_index[name]
                         gains[o, k] = knob_updates.get(bpm_gain_name(observable.name, name), 0.0)
-                # last Jacobian column = d(orbit)/d(kick); the reference has none, so it survives the subtraction
-                d_gain = self.control_delta * jacobian[..., self.n_q]
-                add_series(blocks, model, jacobian[..., : self.n_q], d_gain, targets, weights, gains, cols, corrector_index)
+                q_jac, d_gain = jacobian[..., : self.n_q], jacobian[..., self.n_q :]
+                add_series(blocks, model, q_jac, d_gain, targets, weights, gains, cols, corrector_indices)
         return blocks

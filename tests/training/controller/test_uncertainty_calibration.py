@@ -23,6 +23,7 @@ import pandas as pd
 import pytest
 
 from aba_optimiser.config import OptimiserConfig, SimulationConfig
+from aba_optimiser.mad import merge_machine_states
 from aba_optimiser.training.config.helpers import create_arc_measurement_config
 from aba_optimiser.training.config.models import OutputConfig, SequenceConfig
 from aba_optimiser.training.tracking_fitter import ArcByArcFitter
@@ -67,7 +68,7 @@ def _make_fitter(
             num_workers=3, num_batches=2, optimise_momenta=False, validation_fraction=0.0
         ),
         SequenceConfig(magnet_range="BPM.9R2.B1/BPM.9L3.B1"),
-        create_arc_measurement_config(track, corrector_knobs=corrector, tune_knobs=tune_knobs),
+        create_arc_measurement_config(track, machine_state=merge_machine_states(corrector, tune_knobs)),
         BPM_START_POINTS,
         BPM_END_POINTS,
         output_config=OutputConfig(mad_logfile=log, write_tensorboard_logs=False),

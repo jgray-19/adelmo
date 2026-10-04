@@ -11,6 +11,7 @@ import xtrack as xt
 
 from aba_optimiser.accelerators import PSB
 from aba_optimiser.config import OptimiserConfig
+from aba_optimiser.mad import merge_machine_states
 from aba_optimiser.training.config.helpers import create_arc_measurement_config
 from aba_optimiser.training.config.models import (
     OutputConfig,
@@ -233,7 +234,7 @@ def _build_acd_controller(
         _make_simulation_config_quad(),
         SequenceConfig(magnet_range=magnet_range),
         create_arc_measurement_config(
-            off_magnet_path, corrector_knobs=corrector_file, tune_knobs=tune_knobs
+            off_magnet_path, machine_state=merge_machine_states(corrector_file, tune_knobs)
         ),
         output_config=OutputConfig(
             mad_logfile=tmp_path / "mad_logfile_acd.log",

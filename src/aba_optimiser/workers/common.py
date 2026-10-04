@@ -48,7 +48,7 @@ class WorkerConfig:
     tracking_end_bpm: str
     magnet_range: str
     # Per-measurement keyword arguments forwarded to the MAD-NG interface, e.g.
-    # corrector_knobs, tune_knobs, b2_errors.
+    # machine_state, b2_errors.
     interface_options: dict[str, Any] = field(default_factory=dict)
     observation_range_start_bpm: str | None = None
     initial_condition_marker: str | None = None

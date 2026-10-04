@@ -10,6 +10,7 @@ import pytest
 
 from aba_optimiser.accelerators import PSB
 from aba_optimiser.config import OptimiserConfig
+from aba_optimiser.mad import merge_machine_states
 from aba_optimiser.training.config.helpers import create_arc_measurement_config
 from aba_optimiser.training.config.models import (
     OutputConfig,
@@ -82,7 +83,7 @@ def _build_psb_arc_quad_controller(
         simulation_config,
         SequenceConfig("$start/$end"),
         create_arc_measurement_config(
-            off_magnet_path, corrector_knobs=corrector_file, tune_knobs=tune_knobs
+            off_magnet_path, machine_state=merge_machine_states(corrector_file, tune_knobs)
         ),
         bpm_start_points=PSB_BPM_START_POINTS,
         bpm_end_points=PSB_BPM_END_POINTS,
@@ -196,7 +197,7 @@ def test_controller_quad_opt_psb_ring3(
     )
 
     sequence_config = SequenceConfig("$start/$end")
-    measurement_config = create_arc_measurement_config(off_magnet_path, corrector_knobs=corrector_file, tune_knobs=tune_knobs)
+    measurement_config = create_arc_measurement_config(off_magnet_path, machine_state=merge_machine_states(corrector_file, tune_knobs))
     accelerator = PSB(
         ring=3,
         kinetic_energy=loaded_psb_interface.accelerator.kinetic_energy,

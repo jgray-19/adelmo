@@ -51,7 +51,7 @@ class ClosedOrbitMeasurement:
 
 @dataclass(frozen=True)
 class ClosedOrbitSeries:
-    """Measurements evaluated in one process at one machine state and control-knob trim.
+    """Measurements evaluated in one process at one machine state.
 
     ``machine_state`` maps MAD-X globals -- tune knobs, quadrupole strengths, corrector
     kicks (e.g. ``kbrqf``, ``kbr3dhz2l4``) -- to the values the machine had when these orbits
@@ -60,8 +60,8 @@ class ClosedOrbitSeries:
     differ freely between series -- varying quadrupole strengths is what makes quadrupole
     ``dx``/``dy`` observable. Leave it empty to measure at the model's own settings.
 
-    ``control_knob`` (a MAD-X global) is trimmed by ``control_delta`` from its nominal: its
-    value in ``machine_state`` if listed there, else the model's own.
+    A relative plane is the change from the fitter's own ``machine_state`` (the reference) to this
+    series' state, so changing a corrector is just listing its new kick here; the change is worked out internally.
 
     Each measurement keeps its own target and momentum. Combining measurements
     here changes process layout only; their residuals and normal equations are
@@ -69,13 +69,11 @@ class ClosedOrbitSeries:
     """
 
     measurements: tuple[ClosedOrbitMeasurement, ...]
-    control_knob: str | None = None
-    control_delta: float = 0.0
     machine_state: Path | Mapping[str, float] = field(default_factory=dict)
     absolute_planes: tuple[str, ...] = ()
     label: str = ""
     #: This series' own observables, overriding the fitter-wide default. A
-    #: phase-only series (``("mu1", "mu2")``, no control knob, one measurement)
+    #: phase-only series (``("mu1", "mu2")``, one measurement)
     #: sets this; every existing orbit series leaves it empty.
     observables: tuple[str, ...] = ()
 
@@ -182,9 +180,6 @@ class ClosedOrbitFitter(_GaussNewtonFitter):
         if len(coords) != 1:
             LOGGER.warning("Series fit different observables (%s); each solves its own reference", sorted(coords))
             return grouped
-        if any(data.machine_state != needing[0].machine_state for data in needing):
-            LOGGER.warning("Series sit at different machine states (control-knob nominals included); each solves its own reference")
-            return grouped
         config, first = next((c, d) for c, d in payloads if d.needs_reference)
         measurements = {m.reference_pt: m for data in needing for m in data.measurements}.values()
         reference = replace(first, measurements=list(measurements), shared_reference=False, reference_only=True)
@@ -277,9 +272,8 @@ class ClosedOrbitFitter(_GaussNewtonFitter):
                     ClosedOrbitSeriesData(
                         bpm_names=common_bpms,
                         measurements=measurement_data,
-                        control_knob=item.control_knob,
-                        control_delta=float(item.control_delta),
                         machine_state={**self.default_machine_state, **resolve_machine_state(item.machine_state)},
+                        reference_state=dict(self.default_machine_state),
                         absolute_planes=tuple(item.absolute_planes),
                     ),
                 )

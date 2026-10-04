@@ -20,6 +20,7 @@ from aba_optimiser.calibration import (
     corrector_gain_name,
     reduce_blocks,
 )
+from aba_optimiser.mad.machine_state import resolve_machine_state
 from aba_optimiser.optimisers.levenberg_marquardt import LevenbergMarquardtOptimiser
 from aba_optimiser.training_closed_twiss.closed_orbit import ClosedOrbitFitter
 from aba_optimiser.workers.calibrated_closed_orbit import CalibratedClosedOrbitBatchWorker
@@ -35,7 +36,8 @@ LOGGER = logging.getLogger(__name__)
 class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
     """:class:`ClosedOrbitFitter` with ``(1 + b_bpm)(1 + g_corrector)`` calibration parameters.
 
-    Every series' ``control_knob`` must be ``k_<corrector>``; the corrector's gain is named after it. The BPM gains are
+    Every series' own ``machine_state`` must set exactly one ``k_<corrector>`` kick (its change from the fitter's
+    ``machine_state`` is worked out internally); the corrector's gain is named after it. The BPM gains are
     eliminated by a Schur complement each iteration and recovered by back-substitution, so the Levenberg-Marquardt solve
     is over the magnet knobs and the corrector gains only. ``sigma_bpm`` / ``sigma_corrector`` are Gaussian priors that
     also fix the ``b``/``g`` scale degeneracy. ``knob_sigmas`` (knob name -> absolute width, in the knob's units) adds a
@@ -68,9 +70,15 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
         bpms = tuple(payloads[0][1].bpm_names)
         if any(tuple(data.bpm_names) != bpms for _, data in payloads):
             raise ValueError("Calibration fits need every series to observe the same BPMs")
-        if any(not (data.control_knob or "").startswith("k_") for _, data in payloads):
-            raise ValueError("Calibration fits need every series' control_knob to be 'k_<corrector>'")
-        correctors = tuple(dict.fromkeys(data.control_knob[2:].upper() for _, data in payloads))
+        kicks = [
+            [name for name in resolve_machine_state(item.machine_state) if name.startswith("k_")]
+            for item in self.series
+        ]
+        if any(len(names) != 1 for names in kicks):
+            raise ValueError(
+                f"Calibration fits need every series' machine_state to set exactly one 'k_<corrector>' kick, got {kicks}"
+            )
+        correctors = tuple(dict.fromkeys(names[0][2:].upper() for names in kicks))
         self.calibration_spec = CalibrationSpec(bpms, correctors)
         for _, data in payloads:
             data.calibration = self.calibration_spec

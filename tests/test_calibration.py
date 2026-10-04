@@ -19,7 +19,9 @@ def make_series(n):
         out.append(
             {
                 "model": rng.normal(size=(N_OBS, N_BPM)),
+                "quad": rng.normal(size=(N_OBS, N_BPM)),  # second order in the kick: the orbit is nonlinear in it
                 "jac": rng.normal(size=(N_OBS, N_BPM, N_Q)),
+                "delta": 0.7 + 0.1 * k,
                 "targets": rng.normal(size=(N_OBS, N_BPM)),
                 "weights": rng.uniform(0.5, 2.0, size=(N_OBS, N_BPM)),
                 "corr": k % N_G,
@@ -36,21 +38,26 @@ def full_params(q, g, b):
     return np.concatenate([q, g, b])
 
 
+def orbit(s, q, g):
+    """Orbit change at the kick K = (1 + g) * delta: linear in q, nonlinear in K. Returns (orbit, d/dq, d/dg)."""
+    kick = (1 + g[s["corr"]]) * s["delta"]
+    base = s["model"] + s["jac"] @ q
+    return base * kick + s["quad"] * kick**2, s["jac"] * kick, s["delta"] * (base + 2 * s["quad"] * kick)
+
+
 def residual_vector(q, g, b):
-    # Linearised-in-q model: model(q) = model + jac @ q
     res = []
     for s in SERIES:
-        m = s["model"] + s["jac"] @ q
-        scale = (1 + b[COLS]) * (1 + g[s["corr"]])
-        res.append(np.sqrt(s["weights"]) * (scale * m - s["targets"]))
+        m, _, _ = orbit(s, q, g)
+        res.append(np.sqrt(s["weights"]) * ((1 + b[COLS]) * m - s["targets"]))
     return np.concatenate([r.ravel() for r in res])
 
 
 def blocks_at(q, g, b):
     blocks = CalibrationBlocks(N_Q, N_G, N_OBS * N_BPM)
     for s in SERIES:
-        m = s["model"] + s["jac"] @ q
-        add_series(blocks, m, s["jac"], s["targets"], s["weights"], b[COLS], COLS, g[s["corr"]], s["corr"])
+        m, jac, d_gain = orbit(s, q, g)
+        add_series(blocks, m, jac, d_gain[..., None], s["targets"], s["weights"], b[COLS], COLS, [s["corr"]])
     return blocks
 
 

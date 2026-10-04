@@ -37,8 +37,7 @@ def test_each_measurement_keeps_its_own_target_and_momenta() -> None:
             ClosedOrbitMeasurement(_frame(1.0), pt=-1e-3, reference_pt=0.0),
             ClosedOrbitMeasurement(_frame(2.0), pt=2e-3, reference_pt=1e-3),
         ),
-        control_knob="kick",
-        control_delta=5e-5,
+        machine_state={"kick": 5e-5},
     )
     assert [item.orbit.iloc[0, 0] for item in series.measurements] == [1.0, 2.0]
     assert [item.pt for item in series.measurements] == [-1e-3, 2e-3]
@@ -118,10 +117,10 @@ def test_batched_measurements_keep_distinct_signal_orbits_and_share_only_referen
     worker = ClosedOrbitWorker.__new__(ClosedOrbitWorker)
     worker.n_knobs = 1
     worker.knob_name_set = set()
-    worker.control_nominal = 1.0
-    worker.control_delta = 2.0
-    worker.machine_state = {}
-    worker._baseline = {}
+    worker.machine_state = {"k": 3.0}
+    worker.reference_state = {"k": 1.0}
+    worker.trim = {}
+    worker._baseline = {"k": 1.0}
     worker._subtract = np.ones(1)
     worker.weight_scale = 1.0  # the alignment below uses weights == raw weights
     worker.shared_reference = False
@@ -137,9 +136,6 @@ def test_batched_measurements_keep_distinct_signal_orbits_and_share_only_referen
     states: list[tuple[float, float]] = []
     current = {"control": 0.0, "pt": 0.0}
 
-    def set_control(self, _mad, value):
-        current["control"] = value
-
     def set_pt(self, _mad, value):
         current["pt"] = value
 
@@ -149,7 +145,10 @@ def test_batched_measurements_keep_distinct_signal_orbits_and_share_only_referen
         value = state[0] + 10.0 * state[1]
         return np.array([[value]]), np.array([[[value]]])
 
-    worker._set_control = MethodType(set_control, worker)
+    def send_globals(self, _mad, values):
+        current["control"] = values["k"]
+
+    worker._assign_state = MethodType(send_globals, worker)
     worker._set_pt = MethodType(set_pt, worker)
     worker._model_and_jacobian = MethodType(model, worker)
 

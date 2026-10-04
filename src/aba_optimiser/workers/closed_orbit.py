@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
 
+from aba_optimiser.mad.machine_state import assign_state, read_state
+from aba_optimiser.mad.scripts import PYTHON_IN_MAD
 from aba_optimiser.workers.closed_twiss import (
     ORBIT_COORDS,
     ClosedTwissWorker,
@@ -16,7 +18,6 @@ from aba_optimiser.workers.closed_twiss import (
     _weighted_loss_gradient_hessian,
     read_orbit_only,
 )
-from aba_optimiser.mad.scripts import PYTHON_IN_MAD
 from aba_optimiser.workers.common import ClosedTwissData, Observable
 from aba_optimiser.workers.shared_reference import ReferencePublisher, ReferenceReader
 
@@ -43,13 +44,14 @@ class ClosedOrbitMeasurementData:
 
 @dataclass
 class ClosedOrbitSeriesData:
-    """Internal worker payload for measurements sharing a control setting."""
+    """Internal worker payload for measurements sharing a machine state."""
 
     bpm_names: list[str]
     measurements: list[ClosedOrbitMeasurementData]
-    control_knob: str | None = None
-    control_nominal: float = 0.0
-    control_delta: float = 0.0
+    #: MAD-X globals (quadrupole strengths, corrector kicks, ...) this series is measured at.
+    machine_state: dict[str, float] = field(default_factory=dict)
+    #: The state the reference orbit is solved at; a relative plane is the change from it to ``machine_state``.
+    reference_state: dict[str, float] = field(default_factory=dict)
     absolute_planes: tuple[str, ...] = ()
     weight_scale: float = 1.0
     total_points: int = 1
@@ -116,13 +118,11 @@ class ClosedOrbitWorker(ClosedTwissWorker):
                 )
 
         # Phase advance is BPM-to-BPM within a single twiss, never a delta
-        # against a reference state, so a phase-only series carries no control
-        # knob and exactly one measurement -- the degenerate-signal check below
-        # (built for x/y's absolute/relative distinction) does not apply to it.
+        # against a reference state, so a phase-only series takes exactly one
+        # measurement -- the degenerate-signal check below (built for x/y's
+        # absolute/relative distinction) does not apply to it.
         is_phase_only = all(name in PHASE_OBSERVABLES for name in names)
         if is_phase_only:
-            if data.control_knob is not None or data.control_delta != 0.0:
-                raise ValueError("A phase-only closed-orbit series cannot carry a control knob")
             if len(data.measurements) != 1:
                 raise ValueError(
                     "A phase-only closed-orbit series takes exactly one measurement"
@@ -138,14 +138,14 @@ class ClosedOrbitWorker(ClosedTwissWorker):
                 measurement.pt != measurement.reference_pt for measurement in data.measurements
             )
             if (
-                data.control_delta == 0.0
+                data.machine_state == data.reference_state
                 and not has_momentum_signal
                 and has_relative
                 and not absolute
             ):
                 raise ValueError(
-                    "A closed-orbit series needs a control delta, a momentum change, "
-                    "or an absolute plane"
+                    "A closed-orbit series needs a machine state that differs from the reference, "
+                    "a momentum change, or an absolute plane"
                 )
 
         proxy = ClosedTwissData(
@@ -157,23 +157,47 @@ class ClosedOrbitWorker(ClosedTwissWorker):
         )
         super().prepare_data(proxy)
         self.series_measurements = list(data.measurements)
-        self.control_knob = data.control_knob
-        self.control_nominal = float(data.control_nominal)
-        self.control_delta = float(data.control_delta)
+        self.machine_state = {name: float(value) for name, value in data.machine_state.items()}
+        self.reference_state = {name: float(value) for name, value in data.reference_state.items()}
+        self._states: dict[str, dict[str, float]] = {}  # "signal" / "reference" -> every global in that state, set on entering the series
+        self._baseline: dict[str, float] = {}
         self.absolute_planes = absolute
         self.calibration = data.calibration
         self.shared_reference = data.shared_reference
         self.reference_only = data.reference_only
         self._reference_message = _NO_MESSAGE
-        self._checked_controls: set[str] = set()
         self._subtract = np.array(
             [float(name not in absolute) for name in self.orbit_coords], dtype=float
         )
         self._measurement_alignment = None
 
-    def _set_control(self, mad: MAD, value: float) -> None:
-        if self.control_knob is not None:
-            mad.send(f"MADX['{self.control_knob}'] = {value:.15e}")
+    @staticmethod
+    def _assign_state(mad: MAD, state: dict[str, float]) -> None:
+        assign_state(mad, state)
+
+    def _enter_state(self, mad: MAD, role: str) -> None:
+        """Put the machine in the series' ``"signal"`` state or in the ``"reference"`` state."""
+        self._assign_state(mad, self._states[role])
+
+    @contextmanager
+    def _in_series(self, mad: MAD):
+        """Make the series' signal and reference states available; on exit restore every global touched.
+
+        The signal state is the model's own values under ``machine_state``, the reference state the same under ``reference_state``.
+
+        The restore is what stops one series of a batch leaking its settings into the next.
+        """
+        unread = [name for name in (*self.machine_state, *self.reference_state) if name not in self._baseline]
+        if unread:
+            self._baseline.update(read_state(mad, PYTHON_IN_MAD, unread))
+        self._states = {
+            "signal": {**self._baseline, **self.machine_state},
+            "reference": {**self._baseline, **self.reference_state},
+        }
+        try:
+            yield
+        finally:
+            self._assign_state(mad, self._baseline)
 
     @staticmethod
     def _set_pt(mad: MAD, value: float) -> None:
@@ -195,7 +219,12 @@ class ClosedOrbitWorker(ClosedTwissWorker):
 
     def _model_and_jacobian(self, mad: MAD, *, context: str = ""):
         mad.send(self.closed_solver)
-        if not mad.recv():
+        try:
+            found = mad.recv()
+        except RuntimeError as exc:  # MAD raised (e.g. at an unstable trial point): same as a lost orbit, the LM step is backtracked
+            LOGGER.warning("Worker %s: MAD error in the closed-orbit solve%s (%s); flagging step for backtrack", self.worker_id, context, exc)
+            return None
+        if not found:
             LOGGER.warning(
                 "Worker %s: closed orbit not found%s; flagging step for backtrack",
                 self.worker_id,
@@ -261,15 +290,20 @@ class ClosedOrbitWorker(ClosedTwissWorker):
         if self.optics_names:
             raise NotImplementedError("loss-only evaluation supports orbit observables only")
         mad.send("compute_orbit_plain()")
-        if not mad.recv():
+        try:
+            found = mad.recv()
+        except RuntimeError as exc:  # MAD raised: a failed trial step, like a lost orbit
+            LOGGER.warning("Worker %s: MAD error in the loss-only orbit%s (%s); flagging step for backtrack", self.worker_id, context, exc)
+            return None
+        if not found:
             LOGGER.warning("Worker %s: closed orbit not found%s; flagging step for backtrack", self.worker_id, context)
             return None
-        names = list(mad.recv())
-        values = np.empty((len(self.orbit_coords), len(names)))
+        if self._twiss_bpm_order is None:
+            raise RuntimeError("loss-only orbit needs the BPM order from a prior twiss evaluation")
+        n_bpms = len(self._twiss_bpm_order)
+        values = np.empty((len(self.orbit_coords), n_bpms))
         for index in range(len(self.orbit_coords)):
             values[index] = np.asarray(mad.recv(), dtype=float).ravel()
-        if self._twiss_bpm_order != names:
-            self._align_measurements(names)
         return values
 
     def _compare_to_reference(self, signal, reference):
@@ -311,7 +345,7 @@ class ClosedOrbitWorker(ClosedTwissWorker):
         """Reference ``(orbit, jacobian)`` of one measurement: solved here, or taken from the reference worker."""
         reference_pt = float(measurement.reference_pt)
         if not self.shared_reference:
-            return evaluate(self.control_nominal, reference_pt, "reference")
+            return evaluate("reference", reference_pt)
         if self._reference_message is _NO_MESSAGE:
             self._reference_message = self.conn.recv()
         message = self._reference_message
@@ -326,32 +360,20 @@ class ClosedOrbitWorker(ClosedTwissWorker):
             self._reference_reader = ReferenceReader()
         return self._reference_reader
 
-    def _check_control_at_nominal(self, mad: MAD) -> None:
-        """A shared reference holds every corrector at its starting value, so each must start at its nominal."""
-        if self.control_knob is None or self.control_knob in self._checked_controls:
-            return
-        mad.send(f"{PYTHON_IN_MAD}:send(MADX['{self.control_knob}'])")
-        start = float(mad.recv())
-        if start != self.control_nominal:
-            raise ValueError(
-                f"shared_reference needs {self.control_knob} to start at its nominal "
-                f"{self.control_nominal}, but it is {start}"
-            )
-        self._checked_controls.add(self.control_knob)
-
     def _publish_reference(self, mad: MAD):
         """Reference worker: solve the reference state of every distinct reference momentum and publish them."""
         if getattr(self, "_publisher", None) is None:
             self._publisher = ReferencePublisher()
         reference_pts = tuple(dict.fromkeys(float(m.reference_pt) for m in self.series_measurements))
         states = []
-        for reference_pt in reference_pts:
-            self._set_control(mad, self.control_nominal)
-            self._set_pt(mad, reference_pt)
-            state = self._model_and_jacobian(mad, context=f" (shared reference, pt={reference_pt:+.9g})")
-            if state is None:
-                return np.zeros(1), float("nan"), np.zeros((1, 1)), None
-            states.append(state)
+        with self._in_series(mad):
+            for reference_pt in reference_pts:
+                self._enter_state(mad, "reference")
+                self._set_pt(mad, reference_pt)
+                state = self._model_and_jacobian(mad, context=f" (shared reference, pt={reference_pt:+.9g})")
+                if state is None:
+                    return np.zeros(1), float("nan"), np.zeros((1, 1)), None
+                states.append(state)
         published = self._publisher.publish(states, reference_pts, tuple(self.orbit_coords))
         # same dummy-slot convention as the calibrated worker: the payload rides in the last slot
         return np.zeros(1), 0.0, np.zeros((1, 1)), published
@@ -368,7 +390,7 @@ class ClosedOrbitWorker(ClosedTwissWorker):
     def _evaluate_series(
         self, mad: MAD
     ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
-        """Loss, gradient and Hessians of the active series: trim, every momentum, restore."""
+        """Loss, gradient and Hessians of the active series: its state and the reference state, every momentum, restore."""
         failure = (
             np.zeros(self.n_knobs),
             float("nan"),
@@ -377,27 +399,21 @@ class ClosedOrbitWorker(ClosedTwissWorker):
         )
         cache = {}
 
-        def evaluate(control: float, pt: float, role: str):
-            key = (control, pt)
+        def evaluate(role: str, pt: float):
+            key = (role, pt)
             if key not in cache:
-                self._set_control(mad, control)
+                self._enter_state(mad, role)
                 self._set_pt(mad, pt)
-                cache[key] = self._model_and_jacobian(
-                    mad, context=f" ({role}, control={control:+.9g}, pt={pt:+.9g})"
-                )
+                cache[key] = self._model_and_jacobian(mad, context=f" ({role}, pt={pt:+.9g})")
             return cache[key]
 
         gradient = np.zeros(self.n_knobs)
         loss = 0.0
         hessian = np.zeros((self.n_knobs, self.n_knobs))
         normal_matrix = np.zeros((self.n_knobs, self.n_knobs))
-        signal_control = self.control_nominal + self.control_delta
-        if self.shared_reference:
-            self._check_control_at_nominal(mad)
-
-        try:
+        with self._in_series(mad):
             for index, measurement in enumerate(self.series_measurements):
-                signal = evaluate(signal_control, float(measurement.pt), "signal")
+                signal = evaluate("signal", float(measurement.pt))
                 if signal is None:
                     return failure
 
@@ -425,8 +441,6 @@ class ClosedOrbitWorker(ClosedTwissWorker):
                 loss += part_loss
                 hessian += part_hessian
                 normal_matrix += part_normal
-        finally:
-            self._set_control(mad, self.control_nominal)
 
         return gradient, loss, hessian, normal_matrix
 
@@ -441,7 +455,7 @@ class ClosedOrbitBatchData:
 class ClosedOrbitBatchWorker(ClosedOrbitWorker):
     """One MAD-NG process looping over a list of corrector settings.
 
-    Each setting is a :class:`ClosedOrbitSeriesData` (its trim and all its
+    Each setting is a :class:`ClosedOrbitSeriesData` (its machine state and all its
     momenta). The losses, gradients and Hessians are summed, so the fit is the
     one a process per setting would give.
     """
@@ -458,9 +472,8 @@ class ClosedOrbitBatchWorker(ClosedOrbitWorker):
         "weight_scale",
         "normalisation_points",
         "series_measurements",
-        "control_knob",
-        "control_nominal",
-        "control_delta",
+        "machine_state",
+        "reference_state",
         "absolute_planes",
         "calibration",
         "shared_reference",

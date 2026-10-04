@@ -67,8 +67,10 @@ pytestmark = pytest.mark.serial
 COORDS = ["x", "px", "y", "py"]
 
 
-def _send_init(mad: MAD, knobs: list[str], optics_columns: list[str], delta: float) -> None:
+def _send_init(iface: GradientDescentMadInterface, knobs: list[str], optics_columns: list[str], delta: float) -> None:
     """Install the closed-twiss init script exactly as a worker does."""
+    mad = iface.mad
+    mad["nbpms"] = iface.nbpms
     mad["knob_names"] = knobs
     mad["optics_columns"] = optics_columns
     mad["orbit_coords"] = COORDS
@@ -113,7 +115,7 @@ def test_orbit_only_path_matches_twiss(seq_psb: Path, family: str, delta: float)
     knobs = [k for k in iface.knob_names if k != "pt"][:6]
     # Ask twiss for one optical function so the map is order 2 and both solvers can run
     # on the very same damap definition; the orbit path ignores the optics column.
-    _send_init(iface.mad, knobs, ["beta11_"], delta)
+    _send_init(iface, knobs, ["beta11_"], delta)
 
     names_orbit, orbit_orbit, jac_orbit = _solve(iface.mad, "compute_closed_orbit", len(knobs))
     names_twiss, orbit_twiss, jac_twiss = _solve(iface.mad, "compute_closed_twiss", len(knobs))
@@ -147,7 +149,7 @@ def test_orbit_only_map_is_first_order(seq_psb: Path) -> None:
             PSB(ring=3, sequence_file=seq_psb, **kwargs), py_name=PYTHON_IN_MAD
         )
         knobs = [k for k in iface.knob_names if k != "pt"][:3]
-        _send_init(iface.mad, knobs, optics_columns, 0.0)
+        _send_init(iface, knobs, optics_columns, 0.0)
         assert _map_order(iface.mad) == expected, optics_columns
         del iface
 
@@ -245,7 +247,7 @@ def test_lost_closed_orbit_is_reported_and_recovered_from(seq_psb: Path) -> None
         PSB(ring=3, sequence_file=seq_psb, **kwargs), py_name=PYTHON_IN_MAD
     )
     mad = iface.mad
-    _send_init(mad, [next(k for k in iface.knob_names if k != "pt")], ["beta11_"], 0.0)
+    _send_init(iface, [next(k for k in iface.knob_names if k != "pt")], ["beta11_"], 0.0)
 
     for solver in ("compute_closed_orbit", "compute_closed_twiss"):
         mad.send("x0map.x:set0(10)")

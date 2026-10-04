@@ -255,8 +255,7 @@ def _reconstruct(*, root: Path, machine: LhcMachine, compensated_dir: Path) -> p
         # consumes this reconstruction is what solves for the quadrupole
         # errors, so the reconstruction itself must start from nominal.
         magnet_strengths={},
-        tune_knobs=None,
-        corrector_knobs=None,
+        machine_state=None,
     )
     acd_config = ACDipoleConfig(ac_dipole_marker=ACD_NAME, driven_tunes=machine.driven_tunes)
     resolved = resolve_ac_dipole_config(model_details, acd_config)

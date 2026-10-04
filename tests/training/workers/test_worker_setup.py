@@ -37,8 +37,8 @@ def _helper(tmp_path: Path, *, all_bpms: list[str], tracking_plan, accelerator=N
         "file_kick_planes": {0: "x", 1: "xy"},
         "magnet_range": "$start/$end",
         "interface_options_per_file": [
-            {"corrector_knobs": tmp_path / "corr0.tfs", "tune_knobs": tmp_path / "knobs0.txt"},
-            {"corrector_knobs": tmp_path / "corr1.tfs", "tune_knobs": tmp_path / "knobs1.txt"},
+            {"machine_state": tmp_path / "corr0_state.txt"},
+            {"machine_state": tmp_path / "corr1_state.txt"},
         ],
         "debug": False,
         "mad_logfile": None,
@@ -108,8 +108,7 @@ def test_worker_config_carries_its_own_files_measurement_artifacts(tmp_path: Pat
     config = helper.make_worker_config(plan)
 
     assert config.interface_options == {
-        "corrector_knobs": tmp_path / "corr1.tfs",
-        "tune_knobs": tmp_path / "knobs1.txt",
+        "machine_state": tmp_path / "corr1_state.txt",
     }
     assert config.kick_plane == "xy"
 

@@ -62,10 +62,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from aba_optimiser.mad import GradientDescentMadInterface
+from aba_optimiser.mad.machine_state import resolve_machine_state
 from aba_optimiser.training.config.models import SequenceConfig
 from aba_optimiser.training_closed_twiss import (
     ClosedTwissFitter,
@@ -74,6 +74,7 @@ from aba_optimiser.training_closed_twiss import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from pathlib import Path
 
     import pandas as pd
 
@@ -140,22 +141,12 @@ class MomentumReference:
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
-def _knobs_provenance(knobs: Any) -> dict[str, float] | str | None:
-    """Knob provenance for a saved fit: the values themselves where possible."""
-    if knobs is None:
-        return None
-    if isinstance(knobs, str | Path):
-        return str(knobs)
-    return {str(name): float(value) for name, value in sorted(dict(knobs).items())}
-
-
 def closed_orbit_at(
     accelerator: Accelerator,
     magnet_strengths: Mapping[str, float] | None,
     pt: float = 0.0,
     *,
-    corrector_knobs: Path | None = None,
-    tune_knobs: Path | None = None,
+    machine_state: Path | Mapping[str, float] | None = None,
 ) -> pd.DataFrame:
     """Closed orbit and its angles at the BPMs, for a model carrying *magnet_strengths*.
 
@@ -164,8 +155,7 @@ def closed_orbit_at(
     """
     iface = GradientDescentMadInterface(
         accelerator,
-        corrector_knobs=corrector_knobs,
-        tune_knobs=tune_knobs,
+        machine_state=machine_state,
     )
     try:
         if magnet_strengths:
@@ -213,8 +203,7 @@ def fit_momentum_reference(
     sequence_config: SequenceConfig | None = None,
     lm_config: LevenbergMarquardtConfig | None = None,
     initial_knob_strengths: Mapping[str, float] | None = None,
-    corrector_knobs: Path | None = None,
-    tune_knobs: Path | None = None,
+    machine_state: Path | Mapping[str, float] | None = None,
     output_config: OutputConfig | None = None,
 ) -> MomentumReference:
     """Fit magnet errors to measured optics, and return the closed-orbit reference.
@@ -279,8 +268,7 @@ def fit_momentum_reference(
             if prior_strength > 0.0
             else None
         ),
-        corrector_knobs=corrector_knobs,
-        tune_knobs=tune_knobs,
+        machine_state=machine_state,
         output_config=output_config,
     )
     try:
@@ -302,8 +290,7 @@ def fit_momentum_reference(
         accelerator,
         magnet_strengths,
         reference_pt,
-        corrector_knobs=corrector_knobs,
-        tune_knobs=tune_knobs,
+        machine_state=machine_state,
     )
     uncertainty_map = {
         str(name): float(value) for name, value in (uncertainties or {}).items()
@@ -326,8 +313,7 @@ def fit_momentum_reference(
             # The knobs themselves, not a path: they are tens of values, and a
             # path names a file that later runs rewrite -- which makes a saved
             # fit unreproducible from its own metadata.
-            "corrector_knobs": _knobs_provenance(corrector_knobs),
-            "tune_knobs": _knobs_provenance(tune_knobs),
+            "machine_state": None if machine_state is None else dict(sorted(resolve_machine_state(machine_state).items())),
             "lm_config": repr(lm_config or fitter.lm_config),
         },
         diagnostics={**fitter.diagnostics, "n_knobs": len(magnet_strengths)},

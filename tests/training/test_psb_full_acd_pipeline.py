@@ -32,7 +32,7 @@ from xtrack_tools.monitors import process_tracking_data
 
 from aba_optimiser.accelerators import PSB
 from aba_optimiser.config import OptimiserConfig, SimulationConfig
-from aba_optimiser.mad import GradientDescentMadInterface
+from aba_optimiser.mad import GradientDescentMadInterface, merge_machine_states
 from aba_optimiser.measurements.acd_pipeline import (
     ACDOpticsAnalysisConfig,
     build_mixed_closed_orbit_reference,
@@ -387,8 +387,7 @@ def _fitted_optics_quality(
     # would measure that missing rematch rather than the fit.
     iface = GradientDescentMadInterface(
         accelerator,
-        corrector_knobs=machine.corrector_file,
-        tune_knobs=machine.tune_knobs,
+        machine_state=merge_machine_states(machine.corrector_file, machine.tune_knobs),
     )
     if strengths:
         iface.update_knob_values(strengths)
@@ -939,8 +938,7 @@ def _fit_reference(
         sequence_config=SequenceConfig(magnet_range="$start/$end"),
         lm_config=LevenbergMarquardtConfig(max_iterations=50),
         reference_pt=_pt_by_dpp(machine.accelerator)[REFERENCE_DPP],
-        corrector_knobs=machine.corrector_file if scenario.use_correctors else None,
-        tune_knobs=machine.tune_knobs,
+        machine_state=merge_machine_states(machine.corrector_file if scenario.use_correctors else None, machine.tune_knobs),
         output_config=OutputConfig(
             write_tensorboard_logs=False,
             include_uncertainty=False,
@@ -1151,8 +1149,7 @@ def _reconstruct_one(
         ),
         pt=pt,
         magnet_strengths=fitted.magnet_strengths,
-        tune_knobs=machine.tune_knobs,
-        corrector_knobs=machine.corrector_file if scenario.use_correctors else None,
+        machine_state=merge_machine_states(machine.corrector_file if scenario.use_correctors else None, machine.tune_knobs),
     )
     LOGGER.info(
         "Reconstruction model strengths; dpp=%+.4e, count=%d, bends=%d, quads=%d, fingerprint=%s",
@@ -1947,9 +1944,11 @@ def _build_acd_marker_fitter(
         [str(files[dpp]) for dpp in selected],
         len(initial),
     )
-    interface_options: dict[str, Any] = {"tune_knobs": machine.tune_knobs}
-    if scenario.use_correctors:
-        interface_options["corrector_knobs"] = machine.corrector_file
+    interface_options: dict[str, Any] = {
+        "machine_state": merge_machine_states(
+            machine.corrector_file if scenario.use_correctors else None, machine.tune_knobs
+        )
+    }
     details = {
         files[dpp]: MeasurementDetails(
             interface_options=dict(interface_options),
@@ -2557,8 +2556,7 @@ def test_psb_kicker_measurement_and_optimisation(
             tracking.to_parquet(track_path, index=False)
         measurement_details[track_path] = MeasurementDetails(
             interface_options={
-                "corrector_knobs": corrector_file,
-                "tune_knobs": tune_knobs,
+                "machine_state": merge_machine_states(corrector_file, tune_knobs),
             },
             machine_deltap=dpp,
         )

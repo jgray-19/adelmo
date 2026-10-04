@@ -81,9 +81,7 @@ x0map = MAD.damap {
 ! monomial is kept in the string form that ``tpsa:get`` parses itself.
 knob_mono = {}
 for i, param in ipairs(knob_names) do
-    ! 'aba_trim' (calibrated fits with the corrector kick in the map) is a parameter of the map only: the worker adds it
-    ! to the control knob's MADX variable per evaluation, so there is no sequence variable to make a TPSA here.
-    if param ~= 'aba_trim' then loaded_sequence[param] = loaded_sequence[param] + x0map[param] end
+    loaded_sequence[param] = loaded_sequence[param] + x0map[param]
     knob_mono[i] = "000000" .. string.rep("0", i - 1) .. "1"
 end
 
@@ -221,11 +219,11 @@ if orbit_only then
 end
 
 function knobs_to_plain()
-    for _, p in ipairs(knob_names) do if p ~= 'aba_trim' then loaded_sequence[p] = loaded_sequence[p]:get0() end end
+    for _, p in ipairs(knob_names) do loaded_sequence[p] = loaded_sequence[p]:get0() end
 end
 
 function knobs_to_param()
-    for _, p in ipairs(knob_names) do if p ~= 'aba_trim' then loaded_sequence[p] = loaded_sequence[p] + x0map[p] end end
+    for _, p in ipairs(knob_names) do loaded_sequence[p] = loaded_sequence[p] + x0map[p] end
 end
 
 ! After knobs_to_plain(): sends success, then each orbit coordinate's values in BPM order.

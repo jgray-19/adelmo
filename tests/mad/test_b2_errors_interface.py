@@ -90,12 +90,12 @@ error("Could not find untouched LHC bend")
 
 
 @pytest.mark.slow
-def test_lhc_b2_errors_require_tune_knobs_file(seq_b2: Path, tmp_path: Path) -> None:
-    """b2 errors shift the tunes, so the MAD interface must receive a tune knobs file."""
+def test_lhc_b2_errors_require_a_machine_state(seq_b2: Path, tmp_path: Path) -> None:
+    """b2 errors shift the tunes, so the MAD interface must receive a machine state holding the tune knobs."""
     error_file = tmp_path / "b2.errors"
     _write_b2_error_table(error_file, ["MB.A12L1.B2"], {"MB.A12L1.B2": 14.3})
 
-    with pytest.raises(ValueError, match="tune knobs are designed to compensate"):
+    with pytest.raises(ValueError, match="designed to compensate"):
         GenericMadInterface(
             accelerator=LHC(beam=2, kinetic_energy=6800.0, sequence_file=seq_b2),
             b2_errors=error_file,
@@ -119,7 +119,7 @@ def test_lhc_b2_errors_route_to_dknl_and_keep_twiss_stable(
     with_errors = GenericMadInterface(
         accelerator=LHC(beam=2, kinetic_energy=6800.0, sequence_file=seq_b2),
         b2_errors=error_file,
-        tune_knobs=tune_knobs,
+        machine_state=tune_knobs,
     )
     # Each errored bend carries its K1L in the dknl[2] (quadrupole) slot.
     for name in names:

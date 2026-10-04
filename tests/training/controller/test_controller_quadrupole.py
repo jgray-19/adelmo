@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from aba_optimiser.accelerators import LHC
+from aba_optimiser.mad import merge_machine_states
 from aba_optimiser.training.config.helpers import create_arc_measurement_config
 from aba_optimiser.training.config.models import (
     OutputConfig,
@@ -68,7 +69,7 @@ def _build_lhc_quad_controller(
         _make_simulation_config_quad(),
         SequenceConfig(magnet_range=magnet_range),
         create_arc_measurement_config(
-            off_magnet_path, corrector_knobs=corrector_file, tune_knobs=tune_knobs
+            off_magnet_path, machine_state=merge_machine_states(corrector_file, tune_knobs)
         ),
         bpm_start_points,
         bpm_end_points,

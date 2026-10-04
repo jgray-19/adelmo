@@ -1,8 +1,9 @@
 """Measure map for BPM gain and corrector kick calibration in closed-orbit fits.
 
-A measured orbit change is the model's change scaled by ``(1 + b_bpm,plane) * (1 + g_corrector)``. The gains are
-linear scalings of the MAD-NG model, so they need no TPSA knob: the quad Jacobian is rescaled and the gain columns are
-analytic. BPM gain columns are one-hot (one column per BPM and plane), so the normal matrix is block-structured and the
+A measured orbit change is the model's change at the kick ``nominal + (1 + g_corrector) * delta`` (the corrector calibration acts on
+the kick put into the lattice), scaled per BPM and plane by ``(1 + b)`` (a readout error). The corrector kick is a parameter of the
+MAD-NG damap, so ``d(orbit)/d(kick)`` is exact and the orbit's nonlinearity in the kick is kept; the BPM gains are linear scalings
+and their columns are analytic. BPM gain columns are one-hot (one column per BPM and plane), so the normal matrix is block-structured and the
 BPM gains are eliminated by a Schur complement (:func:`schur_step`) instead of carrying a dense matrix.
 
 Parameter blocks: ``u = (q, g)`` (magnet knobs then corrector gains, dense) and ``b`` (BPM gains, diagonal Hessian).
@@ -24,6 +25,11 @@ def bpm_gain_name(plane: str, bpm: str) -> str:
 
 def corrector_gain_name(corrector: str) -> str:
     return f"corrgain.{corrector}"
+
+
+def corrector_gain_knob_name(corrector: str) -> str:
+    """Model knob (constant part 0) added to a corrector's ``1 + g``, so its Jacobian column is d(orbit)/d(g)."""
+    return f"dg.{corrector}"
 
 
 @dataclass(frozen=True)
@@ -64,7 +70,7 @@ class CalibrationBlocks:
         self.grad_b *= factor
 
     def to_payload(self) -> dict:
-        return {k: v for k, v in vars(self).items()}
+        return dict(vars(self))
 
     @classmethod
     def from_payload(cls, payload: dict) -> CalibrationBlocks:
@@ -77,48 +83,44 @@ def add_series(
     blocks: CalibrationBlocks,
     model: np.ndarray,
     jacobian: np.ndarray,
+    d_gain: np.ndarray,
     targets,
     weights,
     bpm_gain: np.ndarray,
     bpm_cols: np.ndarray,
-    corrector_gain: float,
-    corrector_index: int,
+    corrector_indices: list[int],
 ) -> None:
     """Add one series' contribution.
 
-    Args:
-        model, jacobian: ``(n_obs, n_bpms)`` and ``(n_obs, n_bpms, n_q)``, reference already subtracted.
-        targets, weights: per observable, ``(n_bpms,)`` (weights zero = ignored).
-        bpm_gain: ``(n_obs, n_bpms)`` current gain of each reading.
-        bpm_cols: ``(n_obs, n_bpms)`` index of each reading's gain in the ``b`` vector.
-        corrector_gain, corrector_index: this series' corrector gain and its position in the ``g`` block.
+    ``model`` is the orbit change with every corrector kick scaled by ``1 + g`` (reference subtracted) and ``jacobian`` its
+    quad derivatives; ``d_gain[..., j]`` is its derivative with respect to the gain of corrector ``corrector_indices[j]``.
+    Only the BPM gains scale the model: ``(1 + b) * model`` against the target.
     """
     n_q = blocks.n_q
-    kick = 1.0 + corrector_gain
-    g_row = n_q + corrector_index
+    g_rows = n_q + np.asarray(corrector_indices, dtype=int)
     for o in range(model.shape[0]):
-        scale = (1.0 + bpm_gain[o]) * kick
+        scale = 1.0 + bpm_gain[o]
         mp = scale * model[o]
         jac = scale[:, None] * jacobian[o]
+        d_g = scale[:, None] * d_gain[o]
         w = np.asarray(weights[o], dtype=float)
         r = np.where(w > 0.0, mp - np.asarray(targets[o], dtype=float), 0.0)
         wr = w * r
-        d_g = mp / kick
-        d_b = kick * model[o]
+        d_b = model[o]
         cols = bpm_cols[o]
 
         blocks.loss += float(np.sum(w * r * r))
         blocks.grad_u[:n_q] += 2.0 * wr @ jac
         blocks.hess_uu[:n_q, :n_q] += 2.0 * (jac.T * w) @ jac
-        blocks.grad_u[g_row] += 2.0 * float(wr @ d_g)
-        blocks.hess_uu[g_row, g_row] += 2.0 * float(np.sum(w * d_g * d_g))
-        cross = 2.0 * jac.T @ (w * d_g)
-        blocks.hess_uu[:n_q, g_row] += cross
-        blocks.hess_uu[g_row, :n_q] += cross
+        blocks.grad_u[g_rows] += 2.0 * wr @ d_g
+        blocks.hess_uu[np.ix_(g_rows, g_rows)] += 2.0 * (d_g.T * w) @ d_g
+        cross = 2.0 * jac.T @ (w[:, None] * d_g)
+        blocks.hess_uu[:n_q, g_rows] += cross
+        blocks.hess_uu[g_rows, :n_q] += cross.T
         blocks.grad_b[cols] += 2.0 * wr * d_b
         blocks.hess_bb[cols] += 2.0 * w * d_b * d_b
         blocks.hess_ub[:n_q, cols] += 2.0 * jac.T * (w * d_b)
-        blocks.hess_ub[g_row, cols] += 2.0 * w * d_g * d_b
+        blocks.hess_ub[np.ix_(g_rows, cols)] += 2.0 * (d_g * (w * d_b)[:, None]).T
 
 
 def apply_prior(

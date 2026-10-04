@@ -25,6 +25,7 @@ from xtrack_tools.monitors import (
 from xtrack_tools.tracking import run_tracking, run_tracking_without_ac_dipole
 
 from aba_optimiser.config import OptimiserConfig, SimulationConfig
+from aba_optimiser.mad import merge_machine_states
 from aba_optimiser.training.config.helpers import create_arc_measurement_config
 from aba_optimiser.training.config.models import (
     OutputConfig,
@@ -432,7 +433,7 @@ def _build_energy_optimisation_case(
     )
 
     sequence_config = SequenceConfig(magnet_range=magnet_range)
-    measurement_config = create_arc_measurement_config(off_dpp_path, corrector_knobs=corrector_file, tune_knobs=tune_knobs)
+    measurement_config = create_arc_measurement_config(off_dpp_path, machine_state=merge_machine_states(corrector_file, tune_knobs))
 
     accel = loaded_interface.accelerator.copy_with(optimise_energy=True)
     output_config = OutputConfig(

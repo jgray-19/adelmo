@@ -27,10 +27,9 @@ class EmptyKnobConfigurationManager(ConfigurationManager):
         self,
         debug: bool = False,
         mad_logfile=None,
-        corrector_knobs=None,
-        tune_knobs=None,
+        machine_state=None,
     ) -> None:
-        del debug, mad_logfile, corrector_knobs, tune_knobs
+        del debug, mad_logfile, machine_state
         self.mad_iface = SimpleNamespace(  # ty:ignore[invalid-assignment]
             dp2pt=lambda value: value,
             pt2dp=lambda value: value,
@@ -183,13 +182,12 @@ def test_measurement_config_preserves_per_file_interface_options(tmp_path) -> No
     config = MeasurementConfig(
         {
             tmp_path / "m0.parquet": MeasurementDetails(
-                interface_options={"corrector_knobs": tmp_path / "correctors0.tfs"},
+                interface_options={"machine_state": tmp_path / "state0.txt"},
                 machine_deltap=1e-4,
             ),
             tmp_path / "m1.parquet": MeasurementDetails(
                 interface_options={
-                    "corrector_knobs": tmp_path / "correctors1.tfs",
-                    "tune_knobs": tmp_path / "tunes1.txt",
+                    "machine_state": tmp_path / "correctors1_state.txt",
                 },
                 machine_deltap=2e-4,
             ),
@@ -199,13 +197,12 @@ def test_measurement_config_preserves_per_file_interface_options(tmp_path) -> No
     assert config.files == [tmp_path / "m0.parquet", tmp_path / "m1.parquet"]
     assert config.details == [
         MeasurementDetails(
-            interface_options={"corrector_knobs": tmp_path / "correctors0.tfs"},
+            interface_options={"machine_state": tmp_path / "state0.txt"},
             machine_deltap=1e-4,
         ),
         MeasurementDetails(
             interface_options={
-                "corrector_knobs": tmp_path / "correctors1.tfs",
-                "tune_knobs": tmp_path / "tunes1.txt",
+                "machine_state": tmp_path / "correctors1_state.txt",
             },
             machine_deltap=2e-4,
         ),

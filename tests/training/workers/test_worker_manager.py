@@ -101,8 +101,7 @@ def _make_manager(
         interface_options_per_file=interface_options_per_file
         or [
             {
-                "corrector_knobs": tmp_path / "correctors.tfs",
-                "tune_knobs": tmp_path / "tune_knobs.txt",
+                "machine_state": tmp_path / "correctors_state.txt",
             }
         ],
         all_bpms=bpms,
@@ -134,8 +133,8 @@ def test_create_worker_payloads_assigns_per_file_artifacts_from_file_turn_map(tm
         tmp_path,
         all_bpms=BPMS[:3],
         interface_options_per_file=[
-            {"corrector_knobs": tmp_path / "corr0.tfs", "tune_knobs": tmp_path / "knobs0.txt"},
-            {"corrector_knobs": tmp_path / "corr1.tfs", "tune_knobs": tmp_path / "knobs1.txt"},
+            {"machine_state": tmp_path / "corr0_state.txt"},
+            {"machine_state": tmp_path / "corr1_state.txt"},
         ],
     )
 
@@ -158,10 +157,10 @@ def test_create_worker_payloads_assigns_per_file_artifacts_from_file_turn_map(tm
 
     assert [file_idx for _, _, file_idx in payloads] == [0, 1, 0, 1]
     assert [config.interface_options for _, config, _ in payloads] == [
-        {"corrector_knobs": tmp_path / "corr0.tfs", "tune_knobs": tmp_path / "knobs0.txt"},
-        {"corrector_knobs": tmp_path / "corr1.tfs", "tune_knobs": tmp_path / "knobs1.txt"},
-        {"corrector_knobs": tmp_path / "corr0.tfs", "tune_knobs": tmp_path / "knobs0.txt"},
-        {"corrector_knobs": tmp_path / "corr1.tfs", "tune_knobs": tmp_path / "knobs1.txt"},
+        {"machine_state": tmp_path / "corr0_state.txt"},
+        {"machine_state": tmp_path / "corr1_state.txt"},
+        {"machine_state": tmp_path / "corr0_state.txt"},
+        {"machine_state": tmp_path / "corr1_state.txt"},
     ]
 
     init_pts = [float(data.init_pts[0]) for data, _, _ in payloads]

@@ -13,6 +13,7 @@ import pytest
 from pymadng_utils.io.utils import read_knobs
 
 from aba_optimiser.accelerators import LHC, PSB
+from aba_optimiser.mad import merge_machine_states
 from aba_optimiser.mad.optimising_mad_interface import (
     GenericMadInterface,
     GradientDescentMadInterface,
@@ -399,8 +400,7 @@ class TestOptimisationMadInterfaceInit:
         )
         interface = interface_cls(
             accelerator=accelerator,
-            corrector_knobs=corrector_file if apply_correctors else None,
-            tune_knobs=None,
+            machine_state=corrector_file if apply_correctors else None,
         )
         if apply_correctors:
             check_corrector_strengths(interface, corrector_table)
@@ -423,15 +423,13 @@ class TestOptimisationMadInterfaceInit:
         )
         no_knob_interface = GenericMadInterface(
             accelerator=accelerator,
-            corrector_knobs=None,
-            tune_knobs=None,
+            machine_state=None,
         )
         original_mqt_strength = no_knob_interface.mad["loaded_sequence['MQT.14R3.B1'].k1"]
 
         knob_interface = GenericMadInterface(
             accelerator=accelerator,
-            corrector_knobs=corrector_knob_file,
-            tune_knobs=tune_knob_file,
+            machine_state=merge_machine_states(corrector_knob_file, tune_knob_file),
         )
         corrector_knobs = read_knobs(corrector_knob_file)
         tune_knobs = read_knobs(tune_knob_file)
@@ -461,13 +459,11 @@ class TestOptimisationMadInterfaceInit:
 
         file_interface = GenericMadInterface(
             accelerator=accelerator,
-            corrector_knobs=corrector_knobs,
-            tune_knobs=tune_knobs,
+            machine_state=merge_machine_states(corrector_knobs, tune_knobs),
         )
         mapping_interface = GenericMadInterface(
             accelerator=accelerator,
-            corrector_knobs=corrector_mapping,
-            tune_knobs=tune_mapping,
+            machine_state=merge_machine_states(corrector_mapping, tune_mapping),
         )
 
         all_knobs = {**corrector_mapping, **tune_mapping}
@@ -499,8 +495,7 @@ class TestOptimisationMadInterfaceInit:
         )
         interface = GenericMadInterface(
             accelerator=accelerator,
-            corrector_knobs=None,
-            tune_knobs=None,
+            machine_state=None,
             bad_bpms=bad_bpms,
         )
 

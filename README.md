@@ -13,17 +13,33 @@ High-level modules (concise):
 
 - `accelerators` / `config` — LHC, PSB and SPS optimiser accelerators and configuration dataclasses
 - `training` — tracking fitters (`ArcByArcFitter`, `ACDMarkerFitter`, `KickerFitter`), data manager and worker orchestration
-- `training_closed_twiss` — Levenberg–Marquardt closed-orbit / optics fitting
-- `workers` / `mad` / `simulation` — MAD-NG tracking workers, interfaces and simulation helpers
+- `training_closed_twiss` — Levenberg–Marquardt closed-orbit / optics fitting (`ClosedOrbitFitter`, `ClosedTwissFitter`)
+- `workers` / `mad` — MAD-NG tracking and closed-orbit workers and interfaces
 - `measurements` / `noise` — measurement preparation shared by the PSB and LHC workflows (reconstruction, ACD marker rows, variances)
 - `optimisers` — Adam / AMSGrad / L-BFGS implementations
-- `analysis` / `dispersion` / `dataframes` / `io` — helpers and utilities
+- `analysis` / `calibration` — degeneracy checks and BPM-gain / corrector calibration
 
 dp/p ↔ pt conversion comes from `pymadng_utils.physics` (or `accelerator.dp2pt`).
 The LHC measurement workflows live in `lhc_measurements`; the PSB campaign
 entry points live in `psb_md/scripts/optimisation/`.
 
 Use the tests in `tests/training/` as compact examples of real workflows.
+
+### Closed-orbit fits at different machine states
+
+A `ClosedOrbitSeries` can carry a `machine_state`: MAD-X globals (quadrupole
+strengths such as `kbrqf`, corrector kicks such as `kbr3dhz2l4`, tune knobs; a dict or a
+knobs file) at which its
+orbits were measured. They are known inputs, not fitted, and differ freely between
+series, so quadrupole beam-based alignment (fitting `dx`/`dy`) works by changing the
+quadrupole strengths between measurements. Series are fitted either as absolute
+orbits (`absolute_planes=("x", "y")`) or as changes from the fitter's own `machine_state`
+(the reference) to the series' state, e.g. a changed corrector kick, in any mix. `ClosedOrbitFitter(machine_state=...)` sets a
+default every series inherits; it replaces the old `tune_knobs`/`corrector_knobs` arguments.
+`machine_state` is the one name for this everywhere (`GenericMadInterface`, `MeasurementDetails.interface_options`,
+the fitters): a dict, a knobs file, or a TFS corrector table; `aba_optimiser.mad.merge_machine_states` combines several.
+The fitter records its accepted iterations in `fitter.history` and `fitter.close()` shuts down its MAD process. See
+`tests/training/test_closed_orbit_machine_state.py`.
 
 ## Dependencies (external projects)
 

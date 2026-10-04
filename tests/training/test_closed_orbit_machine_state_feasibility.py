@@ -83,7 +83,7 @@ def test_jacobian_is_exact_after_a_state_change(seq_psb: Path) -> None:
     iface = _interface(seq_psb)
     mad = iface.mad
     knobs = [k for k in iface.knob_names if k != "pt"][:4]
-    _send_init(mad, knobs, [], 0.0)
+    _send_init(iface, knobs, [], 0.0)
     base = _global(mad, QUAD_GLOBAL)
 
     jacobians = []

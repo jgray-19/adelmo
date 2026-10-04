@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from aba_optimiser.mad import merge_machine_states
 from aba_optimiser.training.config.models import OutputConfig
 from aba_optimiser.training.tracking_fitter import (
     ArcByArcFitter,
@@ -226,7 +227,7 @@ def test_controller_worker_hessian_matches_finite_difference_on_reduced_knob_sub
         simulation_config,
         SequenceConfig(magnet_range=magnet_range),
         create_arc_measurement_config(
-            measurement_file, corrector_knobs=corrector_file, tune_knobs=tune_knobs
+            measurement_file, machine_state=merge_machine_states(corrector_file, tune_knobs)
         ),
         bpm_start_points,
         bpm_end_points,
@@ -358,7 +359,7 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
         simulation_config,
         SequenceConfig("$start/$end"),
         create_arc_measurement_config(
-            measurement_file, corrector_knobs=corrector_file, tune_knobs=tune_knobs
+            measurement_file, machine_state=merge_machine_states(corrector_file, tune_knobs)
         ),
         bpm_start_points,
         bpm_end_points,
