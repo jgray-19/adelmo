@@ -24,7 +24,7 @@ def test_grouping_changes_48_gradient_knobs_to_32(seq_psb: Path) -> None:
             PSB(
                 ring=3,
                 sequence_file=seq_psb,
-                optimise_quadrupoles=True,
+                errors={"quad": {"k1"}},
                 group_quadrupoles_by_cell=grouped,
             )
         )
@@ -45,7 +45,7 @@ def test_one_grouped_gradient_knob_moves_both_qfo_members(seq_psb: Path) -> None
         PSB(
             ring=3,
             sequence_file=seq_psb,
-            optimise_quadrupoles=True,
+            errors={"quad": {"k1"}},
             group_quadrupoles_by_cell=True,
         )
     )
@@ -65,7 +65,7 @@ def test_one_grouped_gradient_knob_moves_both_qfo_members(seq_psb: Path) -> None
 def test_direct_quadrupole_families_are_grouped_independently(
     seq_psb: Path, attribute: str
 ) -> None:
-    kwargs = {f"optimise_quad_{attribute}": True}
+    kwargs = {"misalignments": {"quad": {attribute}}}
     interface = GradientDescentMadInterface(
         PSB(
             ring=3,

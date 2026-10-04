@@ -11,11 +11,10 @@ from aba_optimiser.config import SimulationConfig
 from aba_optimiser.training.config.models import KickerConfig
 from aba_optimiser.training.config.tracking import (
     ACDArcByArcTrackingPlan,
-    ArcByArcTrackingPlan,
     RangeContext,
+    TrackingPlan,
     acd_marker_setup,
     arc_by_arc_setup,
-    full_ring_setup,
     kicker_setup,
 )
 
@@ -47,7 +46,6 @@ class TestACDArcByArcReroute:
             start_bpms=start_bpms,
             end_bpms=end_bpms,
             all_bpms=all_bpms,
-            run_arc_by_arc=True,
             use_fixed_bpm=False,
             fixed_start=all_bpms[0],
             fixed_end=all_bpms[-1],
@@ -93,15 +91,14 @@ class TestACDArcByArcReroute:
         assert "ACD_after" not in observed
 
 
-class TestArcByArcTrackingPlanNoReroute:
+class TestPlainArcByArcPlan:
     def test_plain_arc_by_arc_ranges_are_untouched(self) -> None:
-        plan = ArcByArcTrackingPlan()
+        plan = TrackingPlan()
         all_bpms = RING
         ctx = RangeContext(
             start_bpms=["BPM.2"],
             end_bpms=["BPM.5"],
             all_bpms=all_bpms,
-            run_arc_by_arc=True,
             use_fixed_bpm=False,
             fixed_start=all_bpms[0],
             fixed_end=all_bpms[-1],
@@ -111,6 +108,32 @@ class TestArcByArcTrackingPlanNoReroute:
 
         forward_specs = [s for s in specs if s.sdir == 1]
         assert all((s.start_bpm, s.end_bpm) == ("BPM.2", "BPM.5") for s in forward_specs)
+
+    @pytest.mark.parametrize(
+        ("use_fixed_bpm", "start_bpms", "end_bpms"),
+        [
+            # Cartesian product pairs BPM.5 with itself.
+            (False, ["BPM.2", "BPM.5"], ["BPM.5", "BPM.6"]),
+            # Fixed pairs: a start equal to the fixed end (the first end point).
+            (True, ["BPM.2", "BPM.5"], ["BPM.5", "BPM.6"]),
+            # Fixed pairs: an end equal to the fixed start (the first start point).
+            (True, ["BPM.2", "BPM.3"], ["BPM.6", "BPM.2"]),
+        ],
+    )
+    def test_range_starting_and_ending_at_the_same_bpm_is_rejected(
+        self, use_fixed_bpm: bool, start_bpms: list[str], end_bpms: list[str]
+    ) -> None:
+        ctx = RangeContext(
+            start_bpms=start_bpms,
+            end_bpms=end_bpms,
+            all_bpms=RING,
+            use_fixed_bpm=use_fixed_bpm,
+            fixed_start=start_bpms[0],
+            fixed_end=end_bpms[0],
+        )
+
+        with pytest.raises(ValueError, match="same BPM"):
+            TrackingPlan().build_range_specs(ctx)
 
 
 class TestArcByArcSetup:
@@ -143,9 +166,8 @@ class TestArcByArcSetup:
             acd_excited=False,
         )
 
-        assert isinstance(setup.plan, ArcByArcTrackingPlan)
-        assert not isinstance(setup.plan, ACDArcByArcTrackingPlan)
-        assert setup.simulation_config.run_arc_by_arc is True
+        assert type(setup.plan) is TrackingPlan
+        assert setup.simulation_config.n_run_turns == 1
 
     def test_acd_excited_produces_acd_arc_by_arc_plan(self, psb_accelerator: PSB) -> None:
         setup = arc_by_arc_setup(
@@ -159,32 +181,17 @@ class TestArcByArcSetup:
         assert isinstance(setup.plan, ACDArcByArcTrackingPlan)
         assert setup.plan.acd_name == psb_accelerator.ac_dipole_name
         assert setup.simulation_config.n_run_turns == 1
-        assert setup.simulation_config.different_turns_per_range is False
-
-
-class TestFullRingSetup:
-    def test_requires_bpm_start_points(self) -> None:
-        with pytest.raises(ValueError, match="Full-ring mode requires"):
-            full_ring_setup(simulation_config=_base_simulation_config(), bpm_start_points=[])
-
-    def test_produces_full_ring_plan_without_arc_by_arc(self) -> None:
-        setup = full_ring_setup(
-            simulation_config=_base_simulation_config(), bpm_start_points=["BPM.1"]
-        )
-
-        assert setup.simulation_config.run_arc_by_arc is False
-        assert setup.bpm_end_points == []
 
 
 class TestKickerSetup:
-    def test_produces_single_worker_forward_only_config(self) -> None:
+    def test_produces_forward_only_config_with_one_worker_per_file(self) -> None:
         kicker_config = KickerConfig(kicker_name="KICKER1", turns_after_kicker=5)
 
         setup = kicker_setup(kicker_config, _base_simulation_config())
 
-        assert setup.simulation_config.num_workers == 1
+        # num_workers passes through: one worker per measurement file (momentum).
+        assert setup.simulation_config.num_workers == 2
         assert setup.simulation_config.num_batches == 1
-        assert setup.simulation_config.run_arc_by_arc is False
         assert setup.simulation_config.n_run_turns == 5
         assert setup.bpm_start_points == ["KICKER1"]
         assert setup.first_bpm_fallback == "KICKER1"
@@ -198,7 +205,6 @@ class TestAcdMarkerSetup:
     def test_produces_bidirectional_acd_plan(self, psb_accelerator: PSB) -> None:
         setup = acd_marker_setup(psb_accelerator, _base_simulation_config())
 
-        assert setup.simulation_config.run_arc_by_arc is False
         assert setup.simulation_config.n_run_turns == 1
         assert setup.bpm_start_points == [
             psb_accelerator.acd_marker_name("after"),

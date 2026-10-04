@@ -51,8 +51,8 @@ def test_effective_strength_matches_base_when_dknl_not_created(
 
 
 def test_perturbation_records_integrated_dknl_matching_readback(
-    loaded_sps_interface: AbaMadInterface,
-    seq_sps: Path,
+    loaded_psb_interface: AbaMadInterface,
+    seq_psb: Path,
 ) -> None:
     """The dict returned by apply_magnet_perturbations must be self-consistent.
 
@@ -61,15 +61,15 @@ def test_perturbation_records_integrated_dknl_matching_readback(
     returns the integrated ``dknl`` component directly). A regression here means
     the returned "true" strengths are off by the element length.
     """
-    del seq_sps
-    magnet_strengths, _ = loaded_sps_interface.apply_magnet_perturbations(
+    del seq_psb
+    magnet_strengths, _ = loaded_psb_interface.apply_magnet_perturbations(
         rel_error=None,
         seed=42,
         magnet_type="q",
     )
     assert magnet_strengths, "expected at least one perturbed quadrupole"
 
-    readback = loaded_sps_interface.get_magnet_strengths(list(magnet_strengths))
+    readback = loaded_psb_interface.get_magnet_strengths(list(magnet_strengths))
     for name, recorded in magnet_strengths.items():
         assert np.isclose(recorded, readback[name]), (
             f"{name}: apply recorded {recorded} but get_magnet_strengths "
@@ -113,37 +113,6 @@ def test_lhc_quadrupole_perturbation_modes(
     assert f"{table_family_quad}.dk1l" in magnet_strengths
     if expect_non_table_changed:
         assert f"{non_table_quad}.dk1l" in magnet_strengths
-
-
-def test_sps_quadrupole_only_perturbation(
-    loaded_sps_interface: AbaMadInterface,
-    seq_sps: Path,
-) -> None:
-    """SPS magnet_type='q' should perturb quadrupoles but leave sextupoles/dipoles unchanged."""
-    quad_name = "QF.13010"
-    sext_name = "LSF.13205"
-    dip_name = "MBA.13030"
-
-    quad_before = _get_effective_strength(loaded_sps_interface, quad_name, "k1")
-    sext_before = _get_element_attr(loaded_sps_interface, sext_name, "k2")
-    dip_before = _get_element_attr(loaded_sps_interface, dip_name, "k0")
-
-    magnet_strengths, _ = loaded_sps_interface.apply_magnet_perturbations(
-        rel_error=None,
-        seed=42,
-        magnet_type="q",
-    )
-
-    quad_after = _get_effective_strength(loaded_sps_interface, quad_name, "k1")
-    sext_after = _get_element_attr(loaded_sps_interface, sext_name, "k2")
-    dip_after = _get_element_attr(loaded_sps_interface, dip_name, "k0")
-
-    assert not np.isclose(quad_after, quad_before)
-    assert np.isclose(sext_after, sext_before)
-    assert np.isclose(dip_after, dip_before)
-    assert f"{quad_name}.dk1l" in magnet_strengths
-    assert f"{sext_name}.dk2l" not in magnet_strengths
-    assert f"{dip_name}.dk0l" not in magnet_strengths
 
 
 def test_zero_strength_selected_magnet_is_not_perturbed(
@@ -196,8 +165,7 @@ def test_perturbation_preserves_deferred_optimisation_knob_link(seq_psb: Path) -
         accelerator=PSB(
             ring=3,
             sequence_file=seq_psb,
-            optimise_bends=True,
-            optimise_quadrupoles=True,
+            errors={"bend": {"k0"}, "quad": {"k1"}},
         ),
         discard_mad_output=True,
     )
@@ -219,58 +187,3 @@ def test_perturbation_preserves_deferred_optimisation_knob_link(seq_psb: Path) -
         iface.close()
 
 
-def test_sps_perturbation_sets_dknl(
-    loaded_sps_interface: AbaMadInterface,
-    seq_sps: Path,
-) -> None:
-    """SPS perturbation should set dknl and keep base sextupole strength."""
-    sext_name = "LSF.13205"
-
-    k2_before = _get_element_attr(loaded_sps_interface, sext_name, "k2")
-    dknl_before = _get_element_dknl(loaded_sps_interface, sext_name, 2)
-
-    magnet_strengths, true_strengths = loaded_sps_interface.apply_magnet_perturbations(
-        rel_error=None,
-        seed=77,
-        magnet_type="s",
-    )
-
-    k2_after = _get_element_attr(loaded_sps_interface, sext_name, "k2")
-    dknl_after = _get_element_dknl(loaded_sps_interface, sext_name, 2)
-
-    assert np.isclose(k2_after, k2_before)
-    assert dknl_before is None or np.isclose(dknl_before, 0.0)
-    assert dknl_after is not None and not np.isclose(dknl_after, 0.0)
-    assert f"{sext_name}.dk2l" in magnet_strengths
-    assert sext_name in true_strengths
-
-
-def test_sps_perturbations_preserve_previous_dknl_components(
-    loaded_sps_interface: AbaMadInterface,
-    seq_sps: Path,
-) -> None:
-    """SPS perturbations should preserve previously written dknl components."""
-    quad_name = "QF.13010"
-    sext_name = "LSF.13205"
-
-    quad_dknl1_before = _get_element_dknl(loaded_sps_interface, quad_name, 1)
-
-    loaded_sps_interface.apply_magnet_perturbations(
-        rel_error=None,
-        seed=42,
-        magnet_type="q",
-    )
-    quad_dknl1_after_q = _get_element_dknl(loaded_sps_interface, quad_name, 1)
-    assert not np.isclose(quad_dknl1_after_q, quad_dknl1_before)
-
-    loaded_sps_interface.apply_magnet_perturbations(
-        rel_error=None,
-        seed=77,
-        magnet_type="s",
-    )
-
-    quad_dknl1_after_q_then_s = _get_element_dknl(loaded_sps_interface, quad_name, 1)
-    sext_dknl2_after_q_then_s = _get_element_dknl(loaded_sps_interface, sext_name, 2)
-
-    assert np.isclose(quad_dknl1_after_q_then_s, quad_dknl1_after_q)
-    assert not np.isclose(sext_dknl2_after_q_then_s, 0.0)

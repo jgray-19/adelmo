@@ -15,7 +15,7 @@ from aba_optimiser.training.config.models import (
     OutputConfig,
     SequenceConfig,
 )
-from aba_optimiser.training.tracking_fitter import FullRingFitter
+from aba_optimiser.training.tracking_fitter import ArcByArcFitter
 from tests.training.controller_test_utils import (
     _generate_nonoise_track,
     _make_simulation_config_quad,
@@ -31,23 +31,19 @@ if TYPE_CHECKING:
 PSB_TARGET_QX = 0.17
 PSB_TARGET_QY = 0.225
 PSB_TRACK_BPM_PATTERN = r"br3\.bpm.*"
-PSB_BPM_START_POINTS = [
-    "BR3.BPM1L3",
-    "BR3.BPM5L3",
-    "BR3.BPM9L3",
-    "BR3.BPM13L3",
-]
+PSB_BPM_START_POINTS = ["BR3.BPM1L3", "BR3.BPM5L3", "BR3.BPM9L3"]
+PSB_BPM_END_POINTS = ["BR3.BPM13L3", "BR3.BPM15L3", "BR3.BPM16L3"]
 pytestmark = pytest.mark.serial
 
 
-def _build_psb_fullring_quad_controller(
+def _build_psb_arc_quad_controller(
     *,
     tmp_path: Path,
     seq_psb: Path,
     loaded_psb_interface: AbaMadInterface,
     flattop_turns: int = 64,
-) -> tuple[FullRingFitter, dict[str, float]]:
-    """Build a PSB ring-3 full-ring quadrupole fitter and its true strengths."""
+) -> tuple[ArcByArcFitter, dict[str, float]]:
+    """Build a PSB ring-3 arc-by-arc quadrupole fitter and its true strengths."""
     off_magnet_path = tmp_path / "track_off_magnet_psb_val.parquet"
     corrector_file, magnet_strengths, tune_knobs = _generate_nonoise_track(
         loaded_psb_interface,
@@ -64,17 +60,15 @@ def _build_psb_fullring_quad_controller(
         _make_simulation_config_quad(),
         num_workers=4,
         num_batches=1,
-        run_arc_by_arc=False,
-        n_run_turns=1,
         bpm_loss_outlier_sigma=20,
         worker_loss_outlier_sigma=20,
     )
-    ctrl = FullRingFitter(
+    ctrl = ArcByArcFitter(
         PSB(
             ring=3,
             kinetic_energy=loaded_psb_interface.accelerator.kinetic_energy,
             sequence_file=seq_psb,
-            optimise_quadrupoles=True,
+            errors={"quad": {"k1"}},
         ),
         OptimiserConfig(
             max_epochs=300,
@@ -91,6 +85,7 @@ def _build_psb_fullring_quad_controller(
             off_magnet_path, corrector_knobs=corrector_file, tune_knobs=tune_knobs
         ),
         bpm_start_points=PSB_BPM_START_POINTS,
+        bpm_end_points=PSB_BPM_END_POINTS,
         output_config=OutputConfig(
             mad_logfile=tmp_path / "controller_quad_opt_psb_val.log",
             write_tensorboard_logs=False,
@@ -106,16 +101,16 @@ def test_controller_quad_psb_validation_loss_is_real_out_of_sample(
     seq_psb: Path,
     loaded_psb_interface: AbaMadInterface,
 ) -> None:
-    """Full-ring PSB fit yields a genuine held-out validation loss (not None).
+    """Arc-by-arc PSB fit yields a genuine held-out validation loss (not None).
 
-    FullRingTrackingPlan enables validation, so DataManager reserves a disjoint
+    The arc-by-arc plan enables validation, so DataManager reserves a disjoint
     set of turns. compute_validation_loss evaluates the validation workers, which
     track ONLY those held-out turns, and must return a real number. Because the
     held-out turns are noise-free samples of the same machine, the out-of-sample
     loss must strongly prefer the true quadrupole strengths over the perturbed
     initial guess.
     """
-    ctrl, true_values = _build_psb_fullring_quad_controller(
+    ctrl, true_values = _build_psb_arc_quad_controller(
         tmp_path=tmp_path,
         seq_psb=seq_psb,
         loaded_psb_interface=loaded_psb_interface,
@@ -130,7 +125,7 @@ def test_controller_quad_psb_validation_loss_is_real_out_of_sample(
     assert training_turns.isdisjoint(validation_turns)
 
     ctrl.worker_manager.start_workers(
-        ctrl.data_manager.track_data,
+        ctrl.data_manager.tracks,
         ctrl.data_manager.turn_batches,
         ctrl.data_manager.validation_turn_batches,
         ctrl.data_manager.file_map,
@@ -184,8 +179,6 @@ def test_controller_quad_opt_psb_ring3(
         base_sim,
         num_workers=4,
         num_batches=4,
-        run_arc_by_arc=False,
-        n_run_turns=1,
         bpm_loss_outlier_sigma=20,
         worker_loss_outlier_sigma=20,
     )
@@ -193,10 +186,13 @@ def test_controller_quad_opt_psb_ring3(
         max_epochs=300,
         warmup_epochs=40,
         warmup_lr_start=1e-6,
-        max_lr=3e-4,
-        min_lr=3e-4,
+        max_lr=1e-3,
+        min_lr=1e-4,
         gradient_converged_value=1e-13,
         optimiser_type="adam",
+        # Gradients are ~1e-10, far below Adam's default eps (1e-8), which would
+        # otherwise set the step size and stall the fit.
+        adam_eps=1e-16,
     )
 
     sequence_config = SequenceConfig("$start/$end")
@@ -205,16 +201,17 @@ def test_controller_quad_opt_psb_ring3(
         ring=3,
         kinetic_energy=loaded_psb_interface.accelerator.kinetic_energy,
         sequence_file=seq_psb,
-        optimise_quadrupoles=True,
+        errors={"quad": {"k1"}},
     )
 
-    ctrl = FullRingFitter(
+    ctrl = ArcByArcFitter(
         accelerator,
         optimiser_config,
         simulation_config,
         sequence_config,
         measurement_config,
         bpm_start_points=PSB_BPM_START_POINTS,
+        bpm_end_points=PSB_BPM_END_POINTS,
         output_config=OutputConfig(
             mad_logfile=tmp_path / "controller_quad_opt_psb.log",
             write_tensorboard_logs=False,

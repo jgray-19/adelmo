@@ -11,10 +11,16 @@ import pytest
 from aba_optimiser.training.config.models import OutputConfig
 from aba_optimiser.training.tracking_fitter import (
     ArcByArcFitter,
-    FullRingFitter,
     TrackingFitter,
 )
-from aba_optimiser.workers.common import HESSIAN_MIN_EIGENVALUE, WeightProcessor
+from aba_optimiser.workers.common import (
+    HESSIAN_MIN_EIGENVALUE,
+    UncertaintyPart,
+    WeightProcessor,
+    merge_uncertainty_parts,
+    noise_matrix,
+    sandwich_uncertainties,
+)
 
 
 def test_finalise_results_uses_finite_non_negative_uncertainties_for_indefinite_hessian() -> None:
@@ -36,7 +42,10 @@ def test_finalise_results_uses_finite_non_negative_uncertainties_for_indefinite_
 
     ctrl.final_knobs = {"kq1": 0.9, "kq2": 1.9}
     uncertainties = ctrl._finalise_results(
-        np.array([[4.0, 0.0], [0.0, -1e-12]], dtype=np.float64),
+        (
+            np.array([[4.0, 0.0], [0.0, -1e-12]], dtype=np.float64),
+            np.diag([4.0, HESSIAN_MIN_EIGENVALUE]),
+        ),
         writer=None,
     )
 
@@ -46,17 +55,85 @@ def test_finalise_results_uses_finite_non_negative_uncertainties_for_indefinite_
     assert np.isclose(uncertainties[1], 1.0 / np.sqrt(HESSIAN_MIN_EIGENVALUE))
 
 
+def test_shared_reading_noise_is_summed_before_squaring() -> None:
+    # Two workers observe reading 7; worker b also starts from reading 9.
+    g_a, g_b, g_start = np.array([1.0, 2.0]), np.array([3.0, -1.0]), np.array([0.5, 0.5])
+    part_a = UncertaintyPart(np.eye(2), np.array([7]), g_a[None, :], np.array([0.1]))
+    part_b = UncertaintyPart(
+        2.0 * np.eye(2), np.array([7, 9, 11]), np.stack([g_b, g_start, g_start]),
+        np.array([0.1, 0.2, np.inf]),
+    )
+
+    merged = merge_uncertainty_parts([part_a, part_b], n_knobs=2)
+
+    shared = g_a + g_b
+    np.testing.assert_allclose(merged.normal, 3.0 * np.eye(2))
+    # The unobserved reading 11 (infinite variance) carries no noise.
+    np.testing.assert_allclose(
+        noise_matrix(merged), 0.1 * np.outer(shared, shared) + 0.2 * np.outer(g_start, g_start)
+    )
+
+
+def test_incremental_merge_matches_one_shot_merge() -> None:
+    # The manager folds workers into a running merge chunk by chunk.
+    rng = np.random.default_rng(1)
+    parts = [
+        UncertaintyPart(
+            np.eye(3) * (i + 1),
+            rng.integers(0, 30, size=50),
+            rng.normal(size=(50, 3)),
+            np.full(50, 0.3),
+        )
+        for i in range(5)
+    ]
+
+    one_shot = merge_uncertainty_parts(parts, n_knobs=3)
+    running = merge_uncertainty_parts(parts[:2], n_knobs=3)
+    running = merge_uncertainty_parts([*parts[2:4], running], n_knobs=3)
+    running = merge_uncertainty_parts([running, parts[4]], n_knobs=3)
+
+    np.testing.assert_array_equal(running.reading_ids, one_shot.reading_ids)
+    np.testing.assert_allclose(running.normal, one_shot.normal, rtol=1e-14)
+    np.testing.assert_allclose(noise_matrix(running), noise_matrix(one_shot), rtol=1e-12)
+
+
+def test_sandwich_reduces_to_inverse_normal_matrix_for_independent_readings() -> None:
+    rng = np.random.default_rng(0)
+    jacobian = rng.normal(size=(40, 3))
+    variances = rng.uniform(0.5, 2.0, size=40)
+    # Each reading is used once with w = 1/σ²: B = A, so Cov = A⁻¹.
+    part = UncertaintyPart(
+        jacobian.T @ (jacobian / variances[:, None]),
+        np.arange(40),
+        -jacobian / variances[:, None],
+        variances,
+    )
+
+    merged = merge_uncertainty_parts([part], n_knobs=3)
+    sigmas = sandwich_uncertainties(merged.normal, noise_matrix(merged))
+
+    np.testing.assert_allclose(sigmas, np.sqrt(np.diag(np.linalg.inv(part.normal))))
+
+
 def _collect_epoch_gradient(ctrl: TrackingFitter, knob_updates: dict[str, float]) -> np.ndarray:
-    """Return the raw aggregated training gradient summed over all workers and batches."""
+    """Return the raw training gradient summed over all workers and batches.
+
+    Workers divide their gradient by their own point count, which differs between
+    ranges; multiplying it back makes the sum comparable with the Hessian parts.
+    """
     gradient = np.zeros(len(ctrl.config_manager.knob_names), dtype=np.float64)
+    points = {
+        meta.worker_id: len(meta.bpm_names) * meta.n_run_turns
+        for meta in ctrl.worker_manager.worker_metadata
+    }
     channels = ctrl.worker_manager._channels()
     for batch in range(ctrl.simulation_config.num_batches):
         channels.send_all((knob_updates, batch))
         for result in channels.recv_all():
             if not isinstance(result, tuple) or len(result) != 3:
                 raise RuntimeError(f"Unexpected worker result payload: {result!r}")
-            _worker_id, grad, _loss = result
-            gradient += np.asarray(grad, dtype=np.float64).reshape(-1)
+            worker_id, grad, _loss = result
+            gradient += points[worker_id] * np.asarray(grad, dtype=np.float64).reshape(-1)
     return gradient
 
 
@@ -69,7 +146,7 @@ def _compute_training_weight_normaliser(ctrl: TrackingFitter) -> float:
     """
     build = partial(
         ctrl.worker_manager.create_worker_payloads,
-        ctrl.data_manager.track_data,
+        ctrl.data_manager.tracks,
         file_turn_map=ctrl.data_manager.file_map,
         start_bpms=ctrl.config_manager.start_bpms,
         end_bpms=ctrl.config_manager.end_bpms,
@@ -82,38 +159,21 @@ def _compute_training_weight_normaliser(ctrl: TrackingFitter) -> float:
     if not payloads:
         raise AssertionError("Expected at least one worker payload")
 
-    payload_data: list[list[np.ndarray]] = []
-    for data, _config, _file_idx in payloads:
-        n_init = len(data.init_coords)
-        payload_data.append(
-            [
-                data.position_variances[:n_init, :, 0],
-                data.position_variances[:n_init, :, 1],
-                data.momentum_variances[:n_init, :, 0],
-                data.momentum_variances[:n_init, :, 1],
-            ]
-        )
-
-    all_variances = [[var_slices[i] for var_slices in payload_data] for i in range(4)]
-    floors = [
-        WeightProcessor.compute_variance_floor(
-            np.concatenate([values.reshape(-1) for values in dim_vars])
-        )
-        for dim_vars in all_variances
-    ]
-
+    optimise_momenta = ctrl.simulation_config.optimise_momenta
     global_max = 0.0
-    for var_slices in payload_data:
-        raw_weights = [
-            WeightProcessor.variance_to_weight(
-                WeightProcessor.floor_variances(var_slice, floor_value=floor)
-            )
-            for var_slice, floor in zip(var_slices, floors, strict=True)
-        ]
-        global_max = max(
-            global_max,
-            max((float(np.max(weights)) if weights.size else 0.0) for weights in raw_weights),
-        )
+    for data, config, _file_idx in payloads:
+        planes = {"x": ("x"), "y": ("y")}.get(config.kick_plane, ("x", "y"))
+        active = planes + tuple(f"p{plane}" for plane in planes) * optimise_momenta
+        variances = {
+            "x": data.position_variances[:, :, 0],
+            "y": data.position_variances[:, :, 1],
+            "px": data.momentum_variances[:, :, 0],
+            "py": data.momentum_variances[:, :, 1],
+        }
+        for observable in active:
+            weights = WeightProcessor.variance_to_weight(variances[observable])
+            if weights.size:
+                global_max = max(global_max, float(np.max(weights)))
 
     return global_max if global_max > 0.0 else 1.0
 
@@ -160,8 +220,7 @@ def test_controller_worker_hessian_matches_finite_difference_on_reduced_knob_sub
             beam=1,
             kinetic_energy=6800,
             sequence_file=seq_b1,
-            optimise_quadrupoles=True,
-            optimise_other_quadrupoles=False,
+            errors={"quad": {"k1"}},
         ),
         _make_optimiser_config_quad(),
         simulation_config,
@@ -182,7 +241,7 @@ def test_controller_worker_hessian_matches_finite_difference_on_reduced_knob_sub
     terminated = False
     try:
         ctrl.worker_manager.start_workers(
-            ctrl.data_manager.track_data,
+            ctrl.data_manager.tracks,
             ctrl.data_manager.turn_batches,
             ctrl.data_manager.validation_turn_batches,
             ctrl.data_manager.file_map,
@@ -192,12 +251,6 @@ def test_controller_worker_hessian_matches_finite_difference_on_reduced_knob_sub
             ctrl.machine_deltaps,
             ctrl.initial_knobs,
         )
-        normalisation_points = {
-            len(meta.bpm_names) * meta.n_run_turns for meta in ctrl.worker_manager.worker_metadata
-        }
-        assert len(normalisation_points) == 1
-        gradient_normalisation = float(normalisation_points.pop())
-
         base_knobs = ctrl.filtered_true_strengths.copy()
         base_vec = np.array(
             [base_knobs[name] for name in ctrl.config_manager.knob_names],
@@ -221,7 +274,9 @@ def test_controller_worker_hessian_matches_finite_difference_on_reduced_knob_sub
             grad_minus = _collect_epoch_gradient(ctrl, minus_knobs)
             fd_matrix[:, col] = (grad_plus[subset] - grad_minus[subset]) / (2.0 * step)
 
-        total_hessian = ctrl.worker_manager.termination_and_hessian(n_knobs, estimate_hessian=True)
+        total_hessian, _ = ctrl.worker_manager.termination_and_hessian(
+            n_knobs, estimate_hessian=True
+        )
         terminated = True
     finally:
         if not terminated:
@@ -230,9 +285,7 @@ def test_controller_worker_hessian_matches_finite_difference_on_reduced_knob_sub
     assert total_hessian.shape == (n_knobs, n_knobs)
     assert np.all(np.isfinite(total_hessian))
     sym_hessian = 0.5 * (total_hessian + total_hessian.T)
-    predicted = 2.0 * (
-        sym_hessian[np.ix_(subset, subset)] / (weight_normaliser * gradient_normalisation)
-    )
+    predicted = 2.0 * sym_hessian[np.ix_(subset, subset)] / weight_normaliser
     difference = fd_matrix - predicted
     reference_scale = max(np.linalg.norm(predicted), 1.0)
 
@@ -259,12 +312,8 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
 
     flattop_turns = 256
     measurement_file = tmp_path / "track_off_magnet_psb.parquet"
-    bpm_start_points = [
-        "BR3.BPM1L3",
-        "BR3.BPM5L3",
-        "BR3.BPM9L3",
-        "BR3.BPM13L3",
-    ]
+    bpm_start_points = ["BR3.BPM1L3", "BR3.BPM5L3", "BR3.BPM9L3"]
+    bpm_end_points = ["BR3.BPM13L3", "BR3.BPM15L3", "BR3.BPM16L3"]
 
     corrector_file, magnet_strengths, tune_knobs = _generate_nonoise_track(
         loaded_psb_interface,
@@ -286,8 +335,6 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
         _make_simulation_config_quad(),
         num_workers=4,
         num_batches=4,
-        run_arc_by_arc=False,
-        n_run_turns=1,
         bpm_loss_outlier_sigma=20,
         worker_loss_outlier_sigma=20,
     )
@@ -300,12 +347,12 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
         gradient_converged_value=5e-15,
         optimiser_type="adam",
     )
-    ctrl = FullRingFitter(
+    ctrl = ArcByArcFitter(
         PSB(
             ring=3,
             kinetic_energy=loaded_psb_interface.accelerator.kinetic_energy,
             sequence_file=seq_psb,
-            optimise_quadrupoles=True,
+            errors={"quad": {"k1"}},
         ),
         optimiser_config,
         simulation_config,
@@ -314,6 +361,7 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
             measurement_file, corrector_knobs=corrector_file, tune_knobs=tune_knobs
         ),
         bpm_start_points,
+        bpm_end_points,
         output_config=OutputConfig(
             mad_logfile=tmp_path / "controller_psb_hessian.log",
             write_tensorboard_logs=False,
@@ -325,7 +373,7 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
     terminated = False
     try:
         ctrl.worker_manager.start_workers(
-            ctrl.data_manager.track_data,
+            ctrl.data_manager.tracks,
             ctrl.data_manager.turn_batches,
             ctrl.data_manager.validation_turn_batches,
             ctrl.data_manager.file_map,
@@ -335,12 +383,6 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
             ctrl.machine_deltaps,
             ctrl.initial_knobs,
         )
-        normalisation_points = {
-            len(meta.bpm_names) * meta.n_run_turns for meta in ctrl.worker_manager.worker_metadata
-        }
-        assert len(normalisation_points) == 1
-        gradient_normalisation = float(normalisation_points.pop())
-
         base_knobs = ctrl.filtered_true_strengths.copy()
         base_vec = np.array(
             [base_knobs[name] for name in ctrl.config_manager.knob_names],
@@ -364,7 +406,9 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
             grad_minus = _collect_epoch_gradient(ctrl, minus_knobs)
             fd_matrix[:, col] = (grad_plus[subset] - grad_minus[subset]) / (2.0 * step)
 
-        total_hessian = ctrl.worker_manager.termination_and_hessian(n_knobs, estimate_hessian=True)
+        total_hessian, _ = ctrl.worker_manager.termination_and_hessian(
+            n_knobs, estimate_hessian=True
+        )
         terminated = True
     finally:
         if not terminated:
@@ -376,6 +420,8 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
     eigenvalues = np.linalg.eigvalsh(sym_hessian)
     assert np.min(eigenvalues) >= -1e-9
 
+    # No range crosses s = 0, so the quadrupoles outside BPM1L3..BPM16L3 (QFO11 before
+    # the first BPM, QDE16 and QFO162 after the last) are never observed.
     row_norms = np.linalg.norm(sym_hessian, axis=1)
     zero_row_knobs = {
         ctrl.config_manager.knob_names[idx] for idx in np.where(row_norms == 0.0)[0]
@@ -388,9 +434,7 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
     positive_modes = eigenvalues[eigenvalues > 1e-9]
     assert positive_modes.size == n_knobs - len(zero_row_knobs)
 
-    predicted = 2.0 * (
-        sym_hessian[np.ix_(subset, subset)] / (weight_normaliser * gradient_normalisation)
-    )
+    predicted = 2.0 * sym_hessian[np.ix_(subset, subset)] / weight_normaliser
     difference = fd_matrix - predicted
     reference_scale = max(np.linalg.norm(predicted), 1.0)
 

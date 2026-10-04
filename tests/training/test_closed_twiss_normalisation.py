@@ -96,7 +96,7 @@ def test_worker_applies_the_stamped_normalisation(seq_psb: Path) -> None:
     data.total_points = 99
 
     config = WorkerConfig(
-        accelerator=PSB(ring=3, sequence_file=seq_psb, optimise_quadrupoles=True),
+        accelerator=PSB(ring=3, sequence_file=seq_psb, errors={"quad": {"k1"}}),
         tracking_start_bpm="$start",
         tracking_end_bpm="$end",
         magnet_range="$start/$end",
@@ -120,7 +120,7 @@ def test_worker_rejects_a_nonsensical_weight_scale(seq_psb: Path) -> None:
     data.weight_scale = 0.0
 
     config = WorkerConfig(
-        accelerator=PSB(ring=3, sequence_file=seq_psb, optimise_quadrupoles=True),
+        accelerator=PSB(ring=3, sequence_file=seq_psb, errors={"quad": {"k1"}}),
         tracking_start_bpm="$start",
         tracking_end_bpm="$end",
         magnet_range="$start/$end",

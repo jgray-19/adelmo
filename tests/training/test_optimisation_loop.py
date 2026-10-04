@@ -9,8 +9,8 @@ import pytest
 
 from aba_optimiser.config import OptimiserConfig, SimulationConfig
 from aba_optimiser.optimisers.adam import AdamOptimiser
-from aba_optimiser.training.optimisation.checkpointing import OptimisationCheckpointer
 from aba_optimiser.training.config.models import CheckpointConfig
+from aba_optimiser.training.optimisation.checkpointing import OptimisationCheckpointer
 from aba_optimiser.training.optimisation.loop import OptimisationLoop
 from aba_optimiser.workers.protocol import WorkerChannels
 
@@ -204,7 +204,6 @@ def _make_real_channels(n_knobs: int, n_epochs: int, n_batches: int) -> WorkerCh
     channels.parent_conns = (parent,)
     channels.workers = (proc,)
     channels._count = 1
-    channels._conn_index = {parent: 0}
     return channels
 
 
@@ -226,7 +225,6 @@ def _make_real_channels_nonzero_grad(n_knobs: int, n_epochs: int, n_batches: int
     channels.parent_conns = (parent,)
     channels.workers = (proc,)
     channels._count = 1
-    channels._conn_index = {parent: 0}
     return channels
 
 

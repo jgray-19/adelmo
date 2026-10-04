@@ -21,6 +21,7 @@ from tests.training.controller_test_utils import (
     _load_mad_twiss_for_tracking,
     _make_simulation_config_quad,
     evaluate_controller_worker_loss,
+    strip_inline_flags,
 )
 
 if TYPE_CHECKING:
@@ -32,7 +33,6 @@ pytest.importorskip("tmom_recon")
 pytest.importorskip("xtrack_tools")
 
 from pymadng_utils.io.utils import save_knobs
-from tmom_recon.kicker.test_utils import strip_inline_flags
 from xtrack_tools.monitors import get_monitor_names_at_pattern, process_tracking_data
 from xtrack_tools.tracking import run_tracking
 
@@ -92,7 +92,9 @@ def _generate_acd_track(
     acd_line = line.copy()
 
     elem_name_lower = acd_elem.lower()
-    elem_length = float(acd_line.element_dict[elem_name_lower].length)
+    # The PSB AC dipole loads as a zero-length xsuite Marker, which carries no
+    # `length` attribute at all; only the LHC element is a real thin kicker.
+    elem_length = float(getattr(acd_line.element_dict[elem_name_lower], "length", 0.0))
     acd_line.env.elements[elem_name_lower + "_drift"] = xt.Drift(length=elem_length)
     acd_line.replace(elem_name_lower, elem_name_lower + "_drift")
 
@@ -225,7 +227,7 @@ def _build_acd_controller(
             ring=3,
             kinetic_energy=loaded_psb_interface.accelerator.kinetic_energy,
             sequence_file=seq_psb,
-            optimise_quadrupoles=True,
+            errors={"quad": {"k1"}},
         ),
         optimiser_config,
         _make_simulation_config_quad(),

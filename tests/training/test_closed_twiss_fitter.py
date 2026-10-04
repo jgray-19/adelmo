@@ -66,6 +66,7 @@ from aba_optimiser.training_closed_twiss import (
     LevenbergMarquardtConfig,
 )
 from aba_optimiser.workers import ClosedTwissWorker
+from aba_optimiser.workers.closed_twiss import read_orbit_only
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -78,10 +79,10 @@ DELTAS = (-3e-3, 0.0, 3e-3)
 MEASURED_FROM_TWISS = {
     "X": "x",
     "Y": "y",
-    "BETX": "beta11",
-    "BETY": "beta22",
-    "ALFX": "alfa11",
-    "ALFY": "alfa22",
+    "BETX": "betx",
+    "BETY": "bety",
+    "ALFX": "alfx",
+    "ALFY": "alfy",
     "DX": "dx",
     "DY": "dy",
     "MUX": "mu1",
@@ -108,7 +109,8 @@ def _fake_measurement(
     iface = GradientDescentMadInterface(accel)
     iface.update_knob_values(knob_values)
     iface.mad.send(
-        f"motws = twiss{{sequence=loaded_sequence, observe=1, X0={{pt={delta:.15e}}}, coupling=true}}"
+        f"motws = twiss{{sequence=loaded_sequence, observe=1, "
+        f"X0={{pt={delta:.15e}}}, coupling=true, method=6}}"
     )
     twiss = iface.mad.motws.to_df(
         columns=["name", *sorted(set(MEASURED_FROM_TWISS.values()))]
@@ -154,14 +156,14 @@ def _fit(
     """Run the real ``ClosedTwissFitter`` and return the recovered knobs."""
     families = {
         family
-        for flag, family in (
-            ("optimise_quadrupoles", "dk1l"),
-            ("optimise_bends", "dk0l"),
-            ("optimise_quad_dx", "dx"),
-            ("optimise_quad_dy", "dy"),
-            ("optimise_quad_tilt", "tilt"),
+        for selection, magnets, attr, family in (
+            ("errors", "quad", "k1", "dk1l"),
+            ("errors", "bend", "k0", "dk0l"),
+            ("misalignments", "quad", "dx", "dx"),
+            ("misalignments", "quad", "dy", "dy"),
+            ("misalignments", "quad", "tilt", "tilt"),
         )
-        if accelerator_kwargs.get(flag)
+        if attr in accelerator_kwargs.get(selection, {}).get(magnets, ())
     }
     fitter = ClosedTwissFitter(
         accelerator=PSB(ring=3, sequence_file=seq_psb, **accelerator_kwargs),
@@ -183,11 +185,11 @@ def test_quadrupole_gradients_recovered_from_beta_and_phase(seq_psb: Path) -> No
 
     A gradient error on a centred orbit produces no deflection, so the closed
     orbit is blind to it while the optics are not. Recovering the perturbation
-    from ``beta11/beta22/mu1/mu2`` therefore proves the optical-function
+    from ``betx/bety/mu1/mu2`` therefore proves the optical-function
     observables carry real, independent information - and the orbit-only control
     fit proves it was information the previous fitter did not have.
     """
-    kwargs = {"optimise_quadrupoles": True}
+    kwargs = {"errors": {"quad": {"k1"}}}
     quads = _knob_names(seq_psb, kwargs)
     assert len(quads) > 2
 
@@ -203,7 +205,7 @@ def test_quadrupole_gradients_recovered_from_beta_and_phase(seq_psb: Path) -> No
     beta_beating = float(np.max(np.abs(measurements[0.0]["BETX"] / nominal["BETX"] - 1.0)))
     assert beta_beating > 0.01, f"perturbation only produced {beta_beating:.1%} beta beating"
 
-    optics = _fit(seq_psb, measurements, ("beta11", "beta22", "mu1", "mu2"), kwargs)
+    optics = _fit(seq_psb, measurements, ("betx", "bety", "mu1", "mu2"), kwargs)
     optics_err = float(np.linalg.norm(np.array([optics[k] for k in quads]) - truth_vec))
     assert optics_err < 0.05 * truth_norm, (
         f"beta+phase recovery error {optics_err:.3e} is not small against |k_true|={truth_norm:.3e}"
@@ -236,7 +238,7 @@ def test_vertical_dispersion_requires_a_vertical_source(seq_psb: Path) -> None:
     under-determined - the null space is large, and which member of it the solver
     lands on is a property of the regularisation rather than of the physics.
     """
-    dy_kwargs = {"optimise_quad_dy": True}
+    dy_kwargs = {"misalignments": {"quad": {"dy"}}}
     dy_knobs = _knob_names(seq_psb, dy_kwargs)
     assert len(dy_knobs) > 2
 
@@ -282,7 +284,7 @@ def test_vertical_dispersion_requires_a_vertical_source(seq_psb: Path) -> None:
 
     # Quadrupole gradients cannot produce vertical dispersion at all: whatever the
     # fit does with them, the model's Dy stays at exactly zero.
-    k1_kwargs = {"optimise_quadrupoles": True}
+    k1_kwargs = {"errors": {"quad": {"k1"}}}
     k1_fit = _fit(seq_psb, measurements, ("dy",), k1_kwargs, prior_strength=1e-6)
     k1_refit = _fake_measurement(seq_psb, k1_fit, 0.0, k1_kwargs)
     assert np.allclose(k1_refit["DY"], 0.0, atol=1e-12), (
@@ -300,7 +302,7 @@ def test_observables_are_consistent_with_an_independent_twiss(seq_psb: Path) -> 
     Checking against central differences of an ordinary twiss pins the encoding
     down independently of the fit.
     """
-    kwargs = {"optimise_quadrupoles": True}
+    kwargs = {"errors": {"quad": {"k1"}}}
     knobs = _knob_names(seq_psb, kwargs)[:3]
 
     # The init script talks to the MAD-side object under the name the workers
@@ -325,7 +327,7 @@ def test_observables_are_consistent_with_an_independent_twiss(seq_psb: Path) -> 
     )
     mad.send("compute_closed_twiss()")
     assert mad.recv(), "parametric closed twiss failed on the nominal machine"
-    frame = mad.twiss_tbl.to_df(columns=["name", *columns])
+    frame = mad.closed_tbl.to_df(columns=["name", *columns])
 
     # Values must equal an ordinary twiss of the same machine.
     reference = _fake_measurement(seq_psb, dict.fromkeys(knobs, 0.0), 0.0, kwargs)
@@ -399,7 +401,7 @@ def test_second_momentum_removes_the_null_space(seq_psb: Path) -> None:
     number in the 1e12 range the number of eigenvalues above any fixed relative
     threshold wobbles, so counting them is not a stable thing to test.
     """
-    kwargs = {"optimise_quad_dy": True}
+    kwargs = {"misalignments": {"quad": {"dy"}}}
     knobs = _knob_names(seq_psb, kwargs)
 
     rng = np.random.default_rng(1)
@@ -442,7 +444,7 @@ def test_all_observables_fitted_simultaneously(seq_psb: Path) -> None:
     families are in different units; that ratio is also exactly what the
     inverse-variance weighting is balancing internally.
     """
-    kwargs = {"optimise_quadrupoles": True, "optimise_quad_dy": True}
+    kwargs = {"errors": {"quad": {"k1"}}, "misalignments": {"quad": {"dy"}}}
     knobs = _knob_names(seq_psb, kwargs)
 
     rng = np.random.default_rng(3)
@@ -496,7 +498,11 @@ def test_all_observables_fitted_simultaneously(seq_psb: Path) -> None:
 def _analytic_orbit_jacobian(
     seq_psb: Path, kwargs: dict, delta: float, n_knobs: int = 3
 ) -> tuple[list[str], dict[str, np.ndarray]]:
-    """Return the first ``n_knobs`` knobs and d(orbit)/d(knob) from the saved map."""
+    """Return the first ``n_knobs`` knobs and d(orbit)/d(knob) from ``compute_closed_orbit``.
+
+    No optics columns are requested, so this is the orbit-only path: ``cofind`` and one
+    parametric ``track`` on a first-order map, not ``twiss``.
+    """
     iface = GradientDescentMadInterface(
         PSB(ring=3, sequence_file=seq_psb, **kwargs), py_name=PYTHON_IN_MAD
     )
@@ -514,15 +520,10 @@ def _analytic_orbit_jacobian(
     )
     # Momentum is a pinned input on the parametric map, as in the worker; never a knob.
     mad.send(f"x0map.pt:set0({delta:.15e})")
-    mad.send("compute_closed_twiss()")
-    assert mad.recv(), "parametric closed twiss failed on the nominal machine"
-    n_bpms = len(mad.twiss_tbl.to_df(columns=["name"]))
-
-    mad.send("send_orbit_jacobian()")
-    jacobian = {
-        plane: np.asarray(mad.recv(), dtype=float).reshape(n_bpms, len(knobs))
-        for plane in ("X", "Y")
-    }
+    mad.send("compute_closed_orbit()")
+    assert mad.recv(), "parametric closed orbit failed on the nominal machine"
+    _, _, jac = read_orbit_only(mad, 2, len(knobs))
+    jacobian = {"X": jac[0], "Y": jac[1]}
     del iface
     return knobs, jacobian
 
@@ -531,9 +532,9 @@ def _analytic_orbit_jacobian(
 @pytest.mark.parametrize(
     ("family", "driven", "delta", "step", "rtol", "null_is_exact"),
     [
-        ("optimise_quad_dx", "X", 0.0, 1e-7, 1e-6, True),
-        ("optimise_quad_dy", "Y", 0.0, 1e-7, 1e-6, True),
-        ("optimise_quad_tilt", "Y", 3e-3, 1e-6, 1e-5, False),
+        ("dx", "X", 0.0, 1e-7, 1e-6, True),
+        ("dy", "Y", 0.0, 1e-7, 1e-6, True),
+        ("tilt", "Y", 3e-3, 1e-6, 1e-5, False),
     ],
     ids=["dx", "dy", "tilt"],
 )
@@ -553,7 +554,7 @@ def test_orbit_jacobian_matches_finite_differences(
     column is checked too - exactly zero for a misalignment, second order in the
     angle for a tilt, which is why it needs ``pt != 0`` to steer at all.
     """
-    kwargs = {family: True}
+    kwargs = {"misalignments": {"quad": {family}}}
     null = "Y" if driven == "X" else "X"
     knobs, analytic = _analytic_orbit_jacobian(seq_psb, kwargs, delta)
 
@@ -595,7 +596,7 @@ def test_energy_knob_is_rejected(seq_psb: Path) -> None:
     aggregates over the unstripped list, so allowing this would silently
     mis-shape every Jacobian reshape by one column.
     """
-    accel = PSB(ring=3, sequence_file=seq_psb, optimise_quadrupoles=True, optimise_energy=True)
+    accel = PSB(ring=3, sequence_file=seq_psb, errors={"quad": {"k1"}}, optimise_energy=True)
     with pytest.raises(ValueError, match="optimise_energy"):
         ClosedTwissFitter(
             accelerator=accel, sequence_config=None, measurements={0.0: pd.DataFrame()}
@@ -613,7 +614,7 @@ def test_quadrupole_tilts_recovered_from_vertical_dispersion(seq_psb: Path) -> N
     shrinkage. Every observable is needed: ``y`` and ``dy`` alone recover the
     pattern at only 0.66 correlation.
     """
-    kwargs = {"optimise_quad_tilt": True}
+    kwargs = {"misalignments": {"quad": {"tilt"}}}
     knobs = _knob_names(seq_psb, kwargs)
     assert len(knobs) > 2
 
@@ -647,3 +648,8 @@ def test_quadrupole_tilts_recovered_from_vertical_dispersion(seq_psb: Path) -> N
     assert residual_dy < 1e-2 * measured_dy_rms, (
         f"fitted Dy residual {residual_dy:.3e} m against a measured rms of {measured_dy_rms:.3e} m"
     )
+
+def test_closed_twiss_worker_uses_method_6():
+    """The worker bypasses ``run_twiss`` and must pin the integrator itself."""
+    script = CLOSED_TWISS_INIT.read_text()
+    assert "method   = 6" in script

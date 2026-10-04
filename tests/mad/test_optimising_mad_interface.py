@@ -42,60 +42,62 @@ def _spec_key(spec: tuple[str, str, str, str | None]) -> str:
     return f"{kind}:{attr}:{pattern}:{nonzero_attr or ''}"
 
 
+_LHC_SPEC_KEYS = {
+    ("bend", "k0"): [
+        _spec_key(("sbend", "k0", LHC.PATTERN_MAIN_BEND, "k0")),
+        _spec_key(("rbend", "k0", LHC.PATTERN_RBEND, "k0")),
+    ],
+    ("quad", "k1"): [_spec_key(("quadrupole", "k1", LHC.PATTERN_MAIN_QUAD, "k1"))],
+    ("other_quad", "k1"): [_spec_key(("quadrupole", "k1", LHC.PATTERN_QUAD_NON_TUNE, "k1"))],
+    ("sextupole", "k2"): [_spec_key(("sextupole", "k2", LHC.PATTERN_SEXTUPOLE, "k2"))],
+    ("corrector", "kick"): [
+        _spec_key(("hkicker", "kick", LHC.PATTERN_CORRECTOR, None)),
+        _spec_key(("vkicker", "kick", LHC.PATTERN_CORRECTOR, None)),
+    ],
+    ("other_quad", "dx"): [
+        _spec_key(("quadrupole", "dx", LHC.PATTERN_QUAD_DISPLACEMENT_X, "k1"))
+    ],
+    ("quad", "dy"): [_spec_key(("quadrupole", "dy", LHC.PATTERN_MAIN_QUAD, "k1"))],
+    ("other_quad", "dy"): [
+        _spec_key(("quadrupole", "dy", LHC.PATTERN_QUAD_DISPLACEMENT_Y_OTHER, "k1"))
+    ],
+}
+
+_ALL_LHC_ERRORS = {
+    "bend": {"k0"},
+    "quad": {"k1"},
+    "other_quad": {"k1"},
+    "sextupole": {"k2"},
+    "corrector": {"kick"},
+}
+_ALL_LHC_MISALIGNMENTS = {"quad": {"dy"}, "other_quad": {"dx", "dy"}}
+
+
 def _expected_lhc_knob_spec_keys(
-    *,
-    optimise_quadrupoles: bool,
-    optimise_sextupoles: bool,
-    optimise_correctors: bool,
-    optimise_bends: bool,
-    optimise_other_quadrupoles: bool,
-    optimise_quad_dx: bool,
-    optimise_quad_dy: bool,
+    errors: dict[str, set[str]], misalignments: dict[str, set[str]]
 ) -> list[str]:
-    """Return expected ordered knob-spec keys for LHC optimisation flags."""
+    """Return expected ordered knob-spec keys for an LHC selection."""
     expected: list[str] = []
-    if optimise_bends:
-        expected.append(_spec_key(("sbend", "k0", LHC.PATTERN_MAIN_BEND, "k0")))
-        expected.append(_spec_key(("rbend", "k0", LHC.PATTERN_RBEND, "k0")))
-    if optimise_quadrupoles:
-        expected.append(_spec_key(("quadrupole", "k1", LHC.PATTERN_MAIN_QUAD, "k1")))
-    if optimise_other_quadrupoles:
-        expected.append(_spec_key(("quadrupole", "k1", LHC.PATTERN_QUAD_NON_TUNE, "k1")))
-    if optimise_sextupoles:
-        expected.append(_spec_key(("sextupole", "k2", LHC.PATTERN_SEXTUPOLE, "k2")))
-    if optimise_correctors:
-        expected.append(_spec_key(("hkicker", "kick", LHC.PATTERN_CORRECTOR, None)))
-        expected.append(_spec_key(("vkicker", "kick", LHC.PATTERN_CORRECTOR, None)))
-    if optimise_quad_dx:
-        expected.append(_spec_key(("quadrupole", "dx", LHC.PATTERN_QUAD_DISPLACEMENT_X, "k1")))
-    if optimise_quad_dy:
-        expected.append(_spec_key(("quadrupole", "dy", LHC.PATTERN_QUAD_DISPLACEMENT_Y, "k1")))
+    for selection in (errors, misalignments):
+        for family, attrs in selection.items():
+            for attr in sorted(attrs):
+                expected.extend(_LHC_SPEC_KEYS[(family, attr)])
     return expected
 
 
 @pytest.mark.parametrize(
-    (
-        "optimise_quadrupoles",
-        "optimise_sextupoles",
-        "optimise_energy",
-        "optimise_correctors",
-        "optimise_bends",
-        "normalise_bends",
-        "optimise_other_quadrupoles",
-        "optimise_quad_dx",
-        "optimise_quad_dy",
-    ),
+    ("errors", "misalignments", "optimise_energy"),
     [
-        (False, False, False, False, False, None, False, False, False),
-        (True, False, False, False, False, None, False, False, False),
-        (False, True, False, False, False, None, False, False, False),
-        (False, False, True, False, False, None, False, False, False),
-        (False, False, False, True, False, None, False, False, False),
-        (False, False, False, False, True, None, False, False, False),
-        (False, False, False, False, False, None, True, False, False),
-        (False, False, False, False, False, None, False, True, False),
-        (False, False, False, False, False, None, False, False, True),
-        (True, True, True, True, True, None, True, True, True),
+        ({}, {}, False),
+        ({"quad": {"k1"}}, {}, False),
+        ({"sextupole": {"k2"}}, {}, False),
+        ({}, {}, True),
+        ({"corrector": {"kick"}}, {}, False),
+        ({"bend": {"k0"}}, {}, False),
+        ({"other_quad": {"k1"}}, {}, False),
+        ({}, {"other_quad": {"dx"}}, False),
+        ({}, {"quad": {"dy"}, "other_quad": {"dy"}}, False),
+        (_ALL_LHC_ERRORS, _ALL_LHC_MISALIGNMENTS, True),
     ],
     ids=[
         "all-off",
@@ -112,52 +114,31 @@ def _expected_lhc_knob_spec_keys(
 )
 def test_lhc_all_optimisation_combinations_select_expected_knob_list(
     seq_b1: Path,
-    optimise_quadrupoles: bool,
-    optimise_sextupoles: bool,
+    errors: dict[str, set[str]],
+    misalignments: dict[str, set[str]],
     optimise_energy: bool,
-    optimise_correctors: bool,
-    optimise_bends: bool,
-    normalise_bends: bool | None,
-    optimise_other_quadrupoles: bool,
-    optimise_quad_dx: bool,
-    optimise_quad_dy: bool,
 ) -> None:
-    """All LHC optimisation-flag combinations should map to the right knob list."""
+    """All LHC optimisation selections should map to the right knob list."""
     accelerator = LHC(
         beam=1,
         kinetic_energy=KE,
         sequence_file=str(seq_b1),
-        optimise_quadrupoles=optimise_quadrupoles,
-        optimise_sextupoles=optimise_sextupoles,
+        errors=errors,
+        misalignments=misalignments,
         optimise_energy=optimise_energy,
-        optimise_correctors=optimise_correctors,
-        optimise_bends=optimise_bends,
-        normalise_bends=normalise_bends,
-        optimise_other_quadrupoles=optimise_other_quadrupoles,
-        optimise_quad_dx=optimise_quad_dx,
-        optimise_quad_dy=optimise_quad_dy,
     )
 
     # Exercise the knob-selection path from GradientDescentMadInterface without
     # creating a full MAD session (faster exhaustive combinatorial test).
     interface = GradientDescentMadInterface.__new__(GradientDescentMadInterface)
     interface.accelerator = accelerator
-    all_specs = interface.get_knob_specs()
-    selected_specs = interface._filter_knob_specs(all_specs)
+    selected_specs = interface.get_knob_specs()
 
-    actual_knob_list = [_spec_key(spec) for spec in selected_specs]
+    actual_knob_list = [_spec_key(spec[:4]) for spec in selected_specs]
     if optimise_energy:
         actual_knob_list.append("pt")
 
-    expected_knob_list = _expected_lhc_knob_spec_keys(
-        optimise_quadrupoles=optimise_quadrupoles,
-        optimise_sextupoles=optimise_sextupoles,
-        optimise_correctors=optimise_correctors,
-        optimise_bends=optimise_bends,
-        optimise_other_quadrupoles=optimise_other_quadrupoles,
-        optimise_quad_dx=optimise_quad_dx,
-        optimise_quad_dy=optimise_quad_dy,
-    )
+    expected_knob_list = _expected_lhc_knob_spec_keys(errors, misalignments)
     if optimise_energy:
         expected_knob_list.append("pt")
 
@@ -348,16 +329,15 @@ class TestOptimisationMadInterfaceInit:
         cleanup_interface(interface)
 
     @pytest.mark.parametrize(
-        "optimise_energy, optimise_quadrupoles, optimise_bends",
-        [(True, False, False), (False, True, False), (False, False, True), (True, True, False)],
+        "optimise_energy, errors",
+        [(True, {}), (False, {"quad": {"k1"}}), (False, {"bend": {"k0"}}), (True, {"quad": {"k1"}})],
         ids=["opt-energy_only", "opt-quad_only", "opt-bend_only", "opt-energy_quad"],
     )
     def test_with_knob_config(
         self,
         seq_b1: Path,
         optimise_energy: bool,
-        optimise_quadrupoles: bool,
-        optimise_bends: bool,
+        errors: dict[str, set[str]],
     ) -> None:
         """Test initialisation with knob configuration."""
         accelerator = LHC(
@@ -365,8 +345,7 @@ class TestOptimisationMadInterfaceInit:
             kinetic_energy=KE,
             sequence_file=str(seq_b1),
             optimise_energy=optimise_energy,
-            optimise_quadrupoles=optimise_quadrupoles,
-            optimise_bends=optimise_bends,
+            errors=errors,
         )
         interface = GradientDescentMadInterface(
             accelerator=accelerator,
@@ -379,14 +358,14 @@ class TestOptimisationMadInterfaceInit:
         allowed_substrings = []
         if optimise_energy:
             allowed_substrings.append("pt")
-        if optimise_quadrupoles:
+        if "quad" in errors:
             allowed_substrings.append("MQ")
-        if optimise_bends:
+        if "bend" in errors:
             allowed_substrings.append("MB")
 
         assert all(any(sub in name for sub in allowed_substrings) for name in interface.knob_names)
 
-        if optimise_energy and not (optimise_quadrupoles or optimise_bends):
+        if optimise_energy and not errors:
             assert len(interface.knob_names) == 1
             assert len(interface.elem_spos) == 0
         else:
@@ -606,7 +585,7 @@ def test_quadrupole_knob_updates_use_dknl(seq_b1: Path) -> None:
         beam=1,
         kinetic_energy=KE,
         sequence_file=str(seq_b1),
-        optimise_quadrupoles=True,
+        errors={"quad": {"k1"}},
     )
     interface = GradientDescentMadInterface(
         accelerator=accelerator,
@@ -655,7 +634,7 @@ def test_initial_model_value_is_preserved_when_quadrupole_knob_is_created(seq_b1
         beam=1,
         kinetic_energy=KE,
         sequence_file=str(seq_b1),
-        optimise_quadrupoles=True,
+        errors={"quad": {"k1"}},
     )
     probe_interface = GradientDescentMadInterface(
         accelerator=accelerator,
@@ -683,7 +662,7 @@ def test_observed_tracking_anchor_markers_overrides_default_anchor_observation(
     seq_psb: Path,
 ) -> None:
     """``observed_tracking_anchor_markers`` replaces, rather than adds to, the default set."""
-    accelerator = PSB(ring=3, sequence_file=seq_psb, optimise_quadrupoles=True)
+    accelerator = PSB(ring=3, sequence_file=seq_psb, errors={"quad": {"k1"}})
     acd_after = accelerator.acd_marker_name("after")
     acd_before = accelerator.acd_marker_name("before")
 

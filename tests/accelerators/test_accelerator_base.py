@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 from pymadng_utils.physics import PROTON_MASS_GEV
 
-from aba_optimiser.accelerators.base import Accelerator, KnobSpec
+from aba_optimiser.accelerators.base import Accelerator, KnobSpec, MagnetFamily
 
 if TYPE_CHECKING:
     from aba_optimiser.mad.aba_mad_interface import AbaMadInterface
@@ -26,27 +26,15 @@ class ConcreteAccelerator(Accelerator):
         """Return a test sequence name."""
         return "test_seq"
 
-    def get_supported_knob_specs(self) -> list[KnobSpec]:
-        """Return a simple knob specification for testing."""
-        """Return a list of supported knob specifications."""
-        return [
-            KnobSpec(
-                "quadrupole",
-                "k1",
-                "MQ",
-                "k1",
-                enabled=self.optimise_quadrupoles,
-                label="quadrupoles",
-            ),
-            KnobSpec(
-                "sextupole",
-                "k2",
-                "MS",
-                "k2",
-                enabled=self.optimise_sextupoles,
-                label="sextupoles",
-            ),
-        ]
+    FAMILIES = {
+        "quad": MagnetFamily(
+            {"quadrupole": "MQ"},
+            errors=frozenset({"k1"}),
+            misalignments=frozenset({"dx", "dy"}),
+            nonzero_attr="k1",
+        ),
+        "sextupole": MagnetFamily({"sextupole": "MS"}, errors=frozenset({"k2"}), nonzero_attr="k2"),
+    }
 
     def ac_dipole_location(self) -> str | None:
         """Return None for ac dipole location in base class."""
@@ -56,12 +44,7 @@ class ConcreteAccelerator(Accelerator):
         params = {
             "sequence_file": self.sequence_file,
             "kinetic_energy": self.kinetic_energy,
-            "optimise_energy": self.optimise_energy,
-            "optimise_quadrupoles": self.optimise_quadrupoles,
-            "optimise_sextupoles": self.optimise_sextupoles,
-            "optimise_quad_dx": self.optimise_quad_dx,
-            "optimise_quad_dy": self.optimise_quad_dy,
-            "custom_knobs_to_optimise": self.custom_knobs_to_optimise,
+            **self.selection_kwargs(),
         }
         params.update(overrides)
         return type(self)(**params)
@@ -109,8 +92,8 @@ class TestAcceleratorBase:
         assert acc.energy == pytest.approx(6800.0 + PROTON_MASS_GEV)
         assert acc.seq_name == "test_seq"
         assert acc.optimise_energy is False
-        assert acc.optimise_quadrupoles is False
-        assert acc.optimise_sextupoles is False
+        assert acc.errors == {}
+        assert acc.misalignments == {}
         assert acc.custom_knobs_to_optimise is None
 
     def test_init_with_seq_name(self, test_sequence_file: Path) -> None:
@@ -136,13 +119,12 @@ class TestAcceleratorBase:
             sequence_file=test_sequence_file,
             kinetic_energy=6800.0,
             optimise_energy=True,
-            optimise_quadrupoles=True,
-            optimise_sextupoles=True,
+            errors={"quad": {"k1"}, "sextupole": {"k2"}},
             custom_knobs_to_optimise=["K1", "K2"],
         )
         assert acc.optimise_energy is True
-        assert acc.optimise_quadrupoles is True
-        assert acc.optimise_sextupoles is True
+        assert acc.optimises("quad", "k1")
+        assert acc.optimises("sextupole", "k2")
         assert acc.custom_knobs_to_optimise == ["K1", "K2"]
 
     def test_sequence_file_as_string(self, test_sequence_file: Path) -> None:
@@ -176,7 +158,7 @@ class TestAcceleratorBase:
         acc = ConcreteAccelerator(
             sequence_file=test_sequence_file,
             kinetic_energy=6800.0,
-            optimise_quadrupoles=True,
+            errors={"quad": {"k1"}},
         )
         assert acc.has_any_optimisation() is True
 
@@ -185,7 +167,7 @@ class TestAcceleratorBase:
         acc = ConcreteAccelerator(
             sequence_file=test_sequence_file,
             kinetic_energy=6800.0,
-            optimise_sextupoles=True,
+            errors={"sextupole": {"k2"}},
         )
         assert acc.has_any_optimisation() is True
 
@@ -197,15 +179,6 @@ class TestAcceleratorBase:
             custom_knobs_to_optimise=["K1"],
         )
         assert acc.has_any_optimisation() is True
-
-    def test_rejects_legacy_dknl_custom_knob_names(self, test_sequence_file: Path) -> None:
-        """Legacy dknl knob names without the trailing length suffix are rejected."""
-        with pytest.raises(ValueError, match=r"\.dk1l"):
-            ConcreteAccelerator(
-                sequence_file=test_sequence_file,
-                kinetic_energy=6800.0,
-                custom_knobs_to_optimise=["MQ.1L1.B1.dk1"],
-            )
 
     def test_get_bend_lengths_returns_none(self, test_sequence_file: Path) -> None:
         """Test that base get_bend_lengths returns None."""
@@ -338,11 +311,73 @@ class TestAcceleratorBase:
             sequence_file=test_sequence_file,
             kinetic_energy=6800.0,
             optimise_energy=True,
-            optimise_quadrupoles=True,
+            errors={"quad": {"k1"}},
             custom_knobs_to_optimise=["K1"],
         )
         with caplog.at_level(logging.INFO):
             acc.log_optimisation_targets()
         assert "beam energy" in caplog.text
-        assert "quadrupoles" in caplog.text
+        assert "quad k1" in caplog.text
         assert "custom knobs" in caplog.text
+
+
+class TestSelectionValidation:
+    """Tests for the ``errors`` / ``misalignments`` selection mappings."""
+
+    @pytest.fixture
+    def seq(self, tmp_path: Path) -> Path:
+        seq_file = tmp_path / "test.seq"
+        seq_file.write_text("! Dummy sequence file\n")
+        return seq_file
+
+    def test_unknown_family_raises(self, seq: Path) -> None:
+        with pytest.raises(ValueError, match="Unknown magnet family"):
+            ConcreteAccelerator(sequence_file=seq, kinetic_energy=1.0, errors={"bend": {"k0"}})
+
+    def test_unknown_misalignment_family_raises(self, seq: Path) -> None:
+        with pytest.raises(ValueError, match="Unknown magnet family"):
+            ConcreteAccelerator(sequence_file=seq, kinetic_energy=1.0, misalignments={"bend": {"dx"}})
+
+    @pytest.mark.parametrize(
+        ("kwarg", "selection"),
+        [
+            ("errors", {"quad": {"k2"}}),
+            ("errors", {"quad": {"dx"}}),
+            ("misalignments", {"quad": {"tilt"}}),
+            ("misalignments", {"sextupole": {"dx"}}),
+            ("misalignments", {"quad": {"k1"}}),
+        ],
+    )
+    def test_invalid_attribute_raises(self, seq: Path, kwarg: str, selection: dict) -> None:
+        with pytest.raises(ValueError, match="valid"):
+            ConcreteAccelerator(sequence_file=seq, kinetic_energy=1.0, **{kwarg: selection})
+
+    @pytest.mark.parametrize("kwarg", ["errors", "misalignments"])
+    def test_string_instead_of_set_raises(self, seq: Path, kwarg: str) -> None:
+        attr = "k1" if kwarg == "errors" else "dx"
+        with pytest.raises(TypeError, match="not a string"):
+            ConcreteAccelerator(sequence_file=seq, kinetic_energy=1.0, **{kwarg: {"quad": attr}})
+
+    def test_empty_selection_is_dropped(self, seq: Path) -> None:
+        acc = ConcreteAccelerator(
+            sequence_file=seq, kinetic_energy=1.0, errors={"quad": set()}, misalignments={}
+        )
+        assert acc.errors == {}
+        assert acc.has_any_optimisation() is False
+
+    def test_get_knob_specs_and_optimises(self, seq: Path) -> None:
+        acc = ConcreteAccelerator(
+            sequence_file=seq,
+            kinetic_energy=1.0,
+            errors={"quad": ["k1"]},
+            misalignments={"quad": ("dy",)},
+        )
+        assert acc.errors == {"quad": frozenset({"k1"})}
+        assert acc.optimises("quad", "k1")
+        assert acc.optimises("quad", "dy")
+        assert not acc.optimises("quad", "dx")
+        assert not acc.optimises("sextupole", "k2")
+        assert acc.get_knob_specs() == [
+            KnobSpec("quadrupole", "k1", "MQ", "k1", "quad k1"),
+            KnobSpec("quadrupole", "dy", "MQ", "k1", "quad dy"),
+        ]

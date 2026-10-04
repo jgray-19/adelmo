@@ -15,11 +15,6 @@ import xtrack as xt
 pytest.importorskip("tmom_recon")
 pytest.importorskip("xtrack_tools")
 from pymadng_utils.io.utils import save_knobs
-from tmom_recon.kicker.test_utils import (
-    realign_kicker_turns,
-    select_kicker_element,
-    strip_inline_flags,
-)
 from xtrack_tools.coordinates import create_initial_conditions
 from xtrack_tools.kicker import _insert_exciter_at, _knl_ksl
 from xtrack_tools.monitors import (
@@ -30,8 +25,6 @@ from xtrack_tools.monitors import (
 from xtrack_tools.tracking import run_tracking, run_tracking_without_ac_dipole
 
 from aba_optimiser.config import OptimiserConfig, SimulationConfig
-from aba_optimiser.physics.deltap import dp2pt
-from aba_optimiser.simulation.data_processing import prepare_track_dataframe
 from aba_optimiser.training.config.helpers import create_arc_measurement_config
 from aba_optimiser.training.config.models import (
     OutputConfig,
@@ -39,11 +32,69 @@ from aba_optimiser.training.config.models import (
 )
 from aba_optimiser.training.tracking_fitter import (
     ArcByArcFitter,
-    FullRingFitter,
     TrackingFitter,
 )
 from aba_optimiser.training.workers.screening import OutlierScreener
 from tests.training.helpers import TRACK_COLUMNS, generate_xsuite_env_with_errors
+
+# Measurement noise assigned to the synthetic tracks' variance columns.
+POSITION_STD_DEV = 1e-4
+MOMENTUM_STD_DEV = 3e-6
+
+KICKER_PATTERNS = (
+    r"^mk",
+    r"kick",
+    r"^mcb",
+    r"^mke",
+    r"^mki",
+    r"\.ksw",
+    r"\.dhz",
+    r"\.dvt",
+)
+
+
+def select_kicker_element(line) -> str | None:
+    """Return the first element name that looks like a kicker/corrector."""
+    for pattern in KICKER_PATTERNS:
+        for name in line.element_names:
+            if re.search(pattern, name, flags=re.IGNORECASE):
+                return name
+    return None
+
+
+def strip_inline_flags(pattern: str) -> str:
+    """Remove a leading inline case-insensitive flag for safe embedding."""
+    if pattern.startswith("(?i)"):
+        return pattern[4:]
+    return pattern
+
+
+def realign_kicker_turns(
+    tracking_df: pd.DataFrame,
+    *,
+    kicker_name: str,
+    logical_turns: int,
+) -> pd.DataFrame:
+    """Realign turns so each logical turn starts immediately after the kicker."""
+    parts: list[pd.DataFrame] = []
+    marker_name = kicker_name.upper()
+
+    for _turn, turn_df in tracking_df.groupby("turn", sort=False):
+        turn_names = turn_df["name"].str.upper().to_numpy()
+        marker_rows = np.flatnonzero(turn_names == marker_name)
+        if marker_rows.size == 0:
+            parts.append(turn_df)
+            continue
+
+        marker_idx = int(marker_rows[0])
+        if marker_idx > 0:
+            before = turn_df.iloc[:marker_idx].copy()
+            before["turn"] = before["turn"] - 1
+            parts.append(before)
+        parts.append(turn_df.iloc[marker_idx:].copy())
+
+    realigned = pd.concat(parts, ignore_index=True)
+    return realigned.loc[(realigned["turn"] >= 1) & (realigned["turn"] <= logical_turns)].copy()
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -107,12 +158,11 @@ def _run_track_with_model(
     true_dfs = line_to_dataframes(monitored_line)
     processed_dfs = []
     for true_df in true_dfs:
-        df = prepare_track_dataframe(
-            true_df,
-            0,
-            flattop_turns,
-        )
+        df = true_df
+        df["turn"] = df["turn"].astype(np.int32)
         df["bunch_number"] = 0
+        df["var_x"] = df["var_y"] = POSITION_STD_DEV**2
+        df["var_px"] = df["var_py"] = MOMENTUM_STD_DEV**2
         df = df.loc[:, TRACK_COLUMNS].copy()
         df["name"] = df["name"].astype(str)
         processed_dfs.append(df)
@@ -389,34 +439,18 @@ def _build_energy_optimisation_case(
         mad_logfile=tmp_path / mad_log_name,
         write_tensorboard_logs=False,
     )
-    ctrl: TrackingFitter
-    if simulation_config.run_arc_by_arc:
-        ctrl = ArcByArcFitter(
-            accel,
-            optimiser_config,
-            simulation_config,
-            sequence_config,
-            measurement_config,
-            bpm_start_points,
-            bpm_end_points,
-            output_config=output_config,
-        )
-    else:
-        ctrl = FullRingFitter(
-            accel,
-            optimiser_config,
-            simulation_config,
-            sequence_config,
-            measurement_config,
-            bpm_start_points,
-            output_config=output_config,
-        )
+    ctrl = ArcByArcFitter(
+        accel,
+        optimiser_config,
+        simulation_config,
+        sequence_config,
+        measurement_config,
+        bpm_start_points,
+        bpm_end_points,
+        output_config=output_config,
+    )
     true_knobs = {
-        "pt": dp2pt(
-            dpp_value,
-            mass=loaded_interface.accelerator.energy - loaded_interface.accelerator.kinetic_energy,
-            energy=loaded_interface.accelerator.energy,
-        )
+        "pt": loaded_interface.accelerator.dp2pt(dpp_value)
     }
     return ctrl, true_knobs
 
@@ -505,7 +539,7 @@ def evaluate_controller_worker_losses(
         **ctrl.initial_knobs,
     }
     ctrl.worker_manager.start_workers(
-        ctrl.data_manager.track_data,
+        ctrl.data_manager.tracks,
         ctrl.data_manager.turn_batches,
         ctrl.data_manager.validation_turn_batches,
         ctrl.data_manager.file_map,
@@ -538,7 +572,7 @@ def run_madng_tracking(
 ):
     if isinstance(start_marker, str):
         interface.cycle_sequence(start_marker)
-        interface.observe_elements(start_marker)
+        interface.observe_elements([start_marker])
 
     tws = interface.run_twiss(observe=0)
     tws = tws[tws["s"] == 0]

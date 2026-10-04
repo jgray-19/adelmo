@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +45,7 @@ from aba_optimiser.measurements.acd_pipeline import (
     ACDOpticsAnalysisConfig,
     run_driven_and_compensated_optics,
 )
+from aba_optimiser.measurements.reference import reconstruction_frame
 from aba_optimiser.training.config.models import (
     MeasurementConfig,
     MeasurementDetails,
@@ -55,7 +56,13 @@ from aba_optimiser.training.tracking_fitter import ACDMarkerFitter
 
 pytest.importorskip("tmom_recon")
 
-from tmom_recon import ACDipoleConfig, ModelDetails, ReconstructionFrame, calculate_pz  # noqa: E402
+from tmom_recon import (  # noqa: E402
+    ACDipoleConfig,
+    ModelDetails,
+    OpticsInput,
+    calculate_acd_pz,
+    calculate_pz,
+)
 from tmom_recon.acd.integration import (  # noqa: E402
     apply_precomputed_ac_dipole_bpm_overrides,
     resolve_ac_dipole_config,
@@ -125,12 +132,13 @@ def _build_machine(root: Path) -> LhcMachine:
         beam=1,
         sequence_file=SEQ_B1,
         kinetic_energy=6800.0,
-        optimise_bends=False,
-        optimise_quadrupoles=True,
+        errors={"quad": {"k1"}},
     )
     iface = GradientDescentMadInterface(accelerator)
     try:
-        truth, _ = iface.apply_magnet_perturbations(rel_error=QUAD_REL_RMS, seed=24, magnet_type="q")
+        truth, _ = iface.apply_magnet_perturbations(
+            rel_error=QUAD_REL_RMS, seed=24, magnet_type="q"
+        )
         free_twiss = iface.run_twiss(observe=1, deltap=REFERENCE_DPP, coupling=True, method=6)
     finally:
         iface.close()
@@ -200,8 +208,7 @@ def _run_phase_analysis(*, root: Path, machine: LhcMachine) -> Path:
     q1_nat = float(machine.free_twiss.headers["q1"]) % 1.0
     q2_nat = float(machine.free_twiss.headers["q2"]) % 1.0
     _driven_dir, compensated_dir = run_driven_and_compensated_optics(
-        bpm_rows,
-        source_file=Path("lhc_acd.sdds"),
+        [(Path("lhc_acd.sdds"), bpm_rows)],
         output_dir=root,
         config=ACDOpticsAnalysisConfig(
             model_dir=MODEL_DIR,
@@ -228,7 +235,9 @@ def _run_phase_analysis(*, root: Path, machine: LhcMachine) -> Path:
             },
         ),
     )
-    LOGGER.info("Driven/compensated optics done in %.1fs: %s", time.perf_counter() - start, compensated_dir)
+    LOGGER.info(
+        "Driven/compensated optics done in %.1fs: %s", time.perf_counter() - start, compensated_dir
+    )
     return compensated_dir
 
 
@@ -239,8 +248,7 @@ def _reconstruct(*, root: Path, machine: LhcMachine, compensated_dir: Path) -> p
             beam=1,
             sequence_file=SEQ_B1,
             kinetic_energy=6800.0,
-            optimise_bends=False,
-            optimise_quadrupoles=True,
+            errors={"quad": {"k1"}},
         ),
         pt=0.0,
         # The reference model carries no strengths: the ACD marker fitter that
@@ -254,36 +262,59 @@ def _reconstruct(*, root: Path, machine: LhcMachine, compensated_dir: Path) -> p
     resolved = resolve_ac_dipole_config(model_details, acd_config)
     model_closed_orbit = _twiss_by_lower_name(resolved.closed_orbit_tws)
     marker_key = ACD_NAME.lower()
-    assert marker_key in model_closed_orbit.index, f"AC-dipole marker {ACD_NAME} missing from closed-orbit twiss"
-    acd_config = replace(acd_config, barrier_s=float(model_closed_orbit.loc[marker_key, "s"]))
+    assert marker_key in model_closed_orbit.index, (
+        f"AC-dipole marker {ACD_NAME} missing from closed-orbit twiss"
+    )
+    # The barrier belongs to the reconstruction call, not to the AC-dipole model.
+    barrier_s = float(model_closed_orbit.loc[marker_key, "s"])
 
     model_twiss = model_closed_orbit.loc[:, ~model_closed_orbit.columns.duplicated()].copy()
     model_twiss.index = model_twiss.index.astype(str).str.upper()
     bpm_rows = machine.tracking[machine.tracking["name"].str.match(r"(?i)^BPM.*$")]
     prepared = bpm_rows[bpm_rows["name"].isin(model_twiss.index)]
-    frame = ReconstructionFrame(
-        orbit_zero=machine.reference_co[["x", "y"]],
-        fitted_momenta=machine.reference_co[["px", "py"]],
-    )
+    frame = reconstruction_frame(machine.reference_co)
 
+    # ``acd=`` puts the all-BPM reconstruction on the driven optics; the kick fit
+    # is now its own call rather than an attrs side effect.
+    #
+    # Dispersion stays on the model, as it does in production
+    # (aba_optimiser/measurements/reconstruction.py): a single AC-dipole
+    # acquisition measures no dispersion, so the compensated omc3 directory has
+    # none. OpticsInput refuses to substitute the model silently, so requesting
+    # "dispersion": "measurement" here raises rather than warning.
     result = calculate_pz(
         prepared,
         model_details,
-        frame=frame,
-        measurement_dir=compensated_dir,
-        model_optics=("alpha", "beta"),
-        measurement_pt_offset=0.0,
+        closed_orbit_at_zero=frame.closed_orbit_at_zero,
+        orbit_mode=frame.orbit_mode,
+        optics=OpticsInput(
+            measurement_dir=compensated_dir,
+            sources={"phase": "measurement"},
+        ),
         acd=acd_config,
         info=False,
-        barrier_s=acd_config.barrier_s,
+        barrier_s=barrier_s,
     )
-    acd_result = result.attrs["acd_result"]
+    acd_result = calculate_acd_pz(
+        prepared,
+        model_details,
+        acd_config,
+        closed_orbit_at_zero=frame.closed_orbit_at_zero,
+        orbit_mode=frame.orbit_mode,
+        optics=OpticsInput(
+            measurement_dir=compensated_dir,
+            sources={"phase": "measurement"},
+        ),
+    )
+    result.attrs["acd_result"] = acd_result
 
     # Compare against the real xsuite truth before packaging the fitter input:
     # a noise-free reconstruction has to track the actual momenta it was
     # generated from, not merely "look reasonable".
     truth_indexed = machine.tracking.set_index(["name", "turn"])
-    recon_indexed = result.assign(name=result["name"].astype(str).str.upper()).set_index(["name", "turn"])
+    recon_indexed = result.assign(name=result["name"].astype(str).str.upper()).set_index(
+        ["name", "turn"]
+    )
     common = recon_indexed.index.intersection(truth_indexed.index)
     for plane in ("px", "py"):
         recon_vals = recon_indexed.loc[common, plane].to_numpy(dtype=float)
@@ -310,7 +341,9 @@ def _reconstruct(*, root: Path, machine: LhcMachine, compensated_dir: Path) -> p
             reconstructed[column] = 1e-30
         reconstructed[column] = reconstructed[column].fillna(1e-30)
 
-    LOGGER.info("Reconstruction done in %.1fs: %d rows", time.perf_counter() - start, len(reconstructed))
+    LOGGER.info(
+        "Reconstruction done in %.1fs: %d rows", time.perf_counter() - start, len(reconstructed)
+    )
     return reconstructed
 
 
@@ -341,8 +374,7 @@ def test_lhc_acd_reconstruction_and_fitter_setup(
             beam=1,
             sequence_file=SEQ_B1,
             kinetic_energy=6800.0,
-            optimise_bends=False,
-            optimise_quadrupoles=True,
+            errors={"quad": {"k1"}},
         ),
         optimiser_config=OptimiserConfig(
             max_epochs=15,
@@ -357,7 +389,6 @@ def test_lhc_acd_reconstruction_and_fitter_setup(
             num_batches=4,
             data_fraction=1.0,
             validation_fraction=0.1,
-            run_arc_by_arc=True,
             use_fixed_bpm=True,
             enable_preloop_outlier_screening=False,
         ),

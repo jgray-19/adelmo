@@ -59,7 +59,7 @@ def test_configuration_manager_preserves_model_defaults_for_missing_initial_knob
         beam=1,
         kinetic_energy=6800,
         sequence_file=seq_b1,
-        optimise_quadrupoles=True,
+        errors={"quad": {"k1"}},
     )
     simulation_config = SimulationConfig(
         num_workers=1,
@@ -106,7 +106,7 @@ def _initial_model_values_manager(seq_b1):
         beam=1,
         kinetic_energy=6800,
         sequence_file=seq_b1,
-        optimise_quadrupoles=True,
+        errors={"quad": {"k1"}},
     )
     manager = ConfigurationManager(
         accelerator=accelerator,
@@ -222,7 +222,7 @@ def test_base_fitter_raises_when_no_knobs_created(seq_b1) -> None:
         beam=1,
         kinetic_energy=6800,
         sequence_file=seq_b1,
-        optimise_quadrupoles=True,
+        errors={"quad": {"k1"}},
     )
     optimiser_config = OptimiserConfig(
         max_epochs=1,

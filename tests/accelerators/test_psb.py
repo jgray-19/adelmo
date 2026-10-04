@@ -29,8 +29,8 @@ class TestPSBAccelerator:
         assert psb.kinetic_energy == pytest.approx(0.160)
         assert psb.energy == pytest.approx(0.160 + 0.9382720813)
         assert psb.bpm_pattern == "^BR3%.BPM%d+L3$"
-        assert psb.optimise_quadrupoles is False
-        assert psb.optimise_correctors is False
+        assert psb.errors == {}
+        assert psb.misalignments == {}
         assert psb.optimise_energy is False
         assert psb.group_quadrupoles_by_cell is False
 
@@ -80,35 +80,36 @@ class TestPSBAccelerator:
         )
         assert psb.bpm_pattern == "^CUSTOM%.BPM"
 
-    def test_get_supported_knob_specs(self, test_sequence_file: Path) -> None:
+    def test_get_knob_specs(self, test_sequence_file: Path) -> None:
         """Test PSB exposes quadrupole knob specs."""
         psb = PSB(
             ring=1,
             sequence_file=test_sequence_file,
-            optimise_quadrupoles=True,
+            errors={"quad": {"k1"}},
         )
 
-        assert ("quadrupole", "k1", "^BR%.Q[FD][OE]%d+$", "k1", True, "quadrupoles") in psb.get_supported_knob_specs()
+        assert psb.get_knob_specs() == [("quadrupole", "k1", "^BR%.Q[FD][OE]%d+$", "k1", "quad k1")]
 
-    def test_init_with_optimise_correctors(self, test_sequence_file: Path) -> None:
+    def test_init_with_corrector_errors(self, test_sequence_file: Path) -> None:
         """Test initialization with corrector optimization."""
         psb = PSB(
             ring=1,
             sequence_file=test_sequence_file,
-            optimise_correctors=True,
+            errors={"corrector": {"kick"}},
         )
-        assert psb.optimise_correctors is True
+        assert psb.optimises("corrector", "kick")
 
-    def test_get_supported_knob_specs_with_correctors(self, test_sequence_file: Path) -> None:
+    def test_get_knob_specs_with_correctors(self, test_sequence_file: Path) -> None:
         """Test PSB exposes sequence-name patterns for horizontal and vertical correctors."""
         psb = PSB(
             ring=1,
             sequence_file=test_sequence_file,
-            optimise_correctors=True,
+            errors={"corrector": {"kick"}},
         )
 
-        assert ("hkicker", "kick", "^B[RE]%d+%.DHZ%d+L%d+$", None, True, "correctors") in psb.get_supported_knob_specs()
-        assert ("vkicker", "kick", "^B[RE]%d+%.DVT%d+L%d+$", None, True, "correctors") in psb.get_supported_knob_specs()
+        specs = psb.get_knob_specs()
+        assert ("hkicker", "kick", "^B[RE]%d+%.DHZ%d+L%d+$", None, "corrector kick") in specs
+        assert ("vkicker", "kick", "^B[RE]%d+%.DVT%d+L%d+$", None, "corrector kick") in specs
 
     def test_get_perturbation_families(self, test_sequence_file: Path) -> None:
         """Test PSB perturbation metadata is available for bends and quadrupoles."""
@@ -153,7 +154,7 @@ class TestPSBAccelerator:
         psb = PSB(
             ring=3,
             sequence_file=test_sequence_file,
-            optimise_quadrupoles=True,
+            errors={"quad": {"k1"}},
             optimise_energy=True,
             custom_knobs_to_optimise=["BR.QFO11.dk1l"],
         )
@@ -164,7 +165,7 @@ class TestPSBAccelerator:
         psb = PSB(
             ring=3,
             sequence_file=test_sequence_file,
-            optimise_correctors=True,
+            errors={"corrector": {"kick"}},
         )
         assert psb.has_any_optimisation() is True
 
@@ -174,79 +175,47 @@ class TestPSBAccelerator:
         assert psb.format_result_knob_names(["br3.xnoh0.4l1.knl[3]"]) == ["br3.xnoh0.4l1.dk2l"]
         assert psb.format_result_knob_names(["br3.osk4l1.ksl[3]"]) == ["br3.osk4l1.dk2sl"]
 
-    def test_init_with_optimise_bpm_dx(self, test_sequence_file: Path) -> None:
-        """Test initialization with BPM horizontal displacement optimization."""
-        psb = PSB(ring=3, sequence_file=test_sequence_file, optimise_bpm_dx=True)
-        assert psb.optimise_bpm_dx is True
-        assert psb.optimise_bpm_dy is False
-
-    def test_init_with_optimise_bpm_dy(self, test_sequence_file: Path) -> None:
-        """Test initialization with BPM vertical displacement optimization."""
-        psb = PSB(ring=3, sequence_file=test_sequence_file, optimise_bpm_dy=True)
-        assert psb.optimise_bpm_dy is True
-        assert psb.optimise_bpm_dx is False
-
-    def test_init_bpm_flags_default_false(self, test_sequence_file: Path) -> None:
-        """Test BPM displacement flags default to False."""
+    def test_init_quad_k0s_k1s_default_off(self, test_sequence_file: Path) -> None:
+        """Test the skew-multipole quadrupole errors are not fitted by default."""
         psb = PSB(ring=3, sequence_file=test_sequence_file)
-        assert psb.optimise_bpm_dx is False
-        assert psb.optimise_bpm_dy is False
+        assert not psb.optimises("quad", "k0s")
+        assert not psb.optimises("quad", "k1s")
 
-    def test_bpm_misalignment_patterns_ring3(self, test_sequence_file: Path) -> None:
-        """Test PSB returns the correct BPM pattern for ring 3."""
-        psb = PSB(ring=3, sequence_file=test_sequence_file)
-        patterns = psb.bpm_misalignment_patterns
-        assert patterns["dx"] == ("^BR3%.BPM%d+L3$",)
-        assert patterns["dy"] == ("^BR3%.BPM%d+L3$",)
+    def test_get_knob_specs_quad_k0s(self, test_sequence_file: Path) -> None:
+        """Test PSB exposes a quadrupole skew dipole error knob spec when enabled."""
+        psb = PSB(ring=1, sequence_file=test_sequence_file, errors={"quad": {"k0s"}})
+        assert psb.get_knob_specs() == [
+            ("quadrupole", "k0s", "^BR%.Q[FD][OE]%d+$", "k1", "quad k0s")
+        ]
 
-    @pytest.mark.parametrize("ring", [1, 2, 4])
-    def test_bpm_misalignment_patterns_other_rings(self, test_sequence_file: Path, ring: int) -> None:
-        """Test PSB returns ring-specific BPM patterns."""
-        psb = PSB(ring=ring, sequence_file=test_sequence_file)
-        patterns = psb.bpm_misalignment_patterns
-        assert patterns["dx"] == (f"^BR{ring}%.BPM%d+L{ring}$",)
-        assert patterns["dy"] == (f"^BR{ring}%.BPM%d+L{ring}$",)
+    def test_get_knob_specs_quad_k1s(self, test_sequence_file: Path) -> None:
+        """Test PSB exposes a quadrupole skew gradient error knob spec when enabled."""
+        psb = PSB(ring=1, sequence_file=test_sequence_file, errors={"quad": {"k1s"}})
+        assert psb.get_knob_specs() == [
+            ("quadrupole", "k1s", "^BR%.Q[FD][OE]%d+$", "k1", "quad k1s")
+        ]
 
-    def test_get_supported_knob_specs_bpm_dx(self, test_sequence_file: Path) -> None:
-        """Test BPM horizontal displacement spec is included when enabled."""
-        psb = PSB(ring=3, sequence_file=test_sequence_file, optimise_bpm_dx=True)
-        specs = psb.get_supported_knob_specs()
-        assert ("monitor", "dx", "^BR3%.BPM%d+L3$", None, True, "BPM horizontal offsets") in specs
+    def test_get_knob_specs_empty_by_default(self, test_sequence_file: Path) -> None:
+        """Test no knob specs are produced when nothing is selected."""
+        psb = PSB(ring=1, sequence_file=test_sequence_file)
+        assert psb.get_knob_specs() == []
 
-    def test_get_supported_knob_specs_bpm_dy(self, test_sequence_file: Path) -> None:
-        """Test BPM vertical displacement spec is included when enabled."""
-        psb = PSB(ring=3, sequence_file=test_sequence_file, optimise_bpm_dy=True)
-        specs = psb.get_supported_knob_specs()
-        assert ("monitor", "dy", "^BR3%.BPM%d+L3$", None, True, "BPM vertical offsets") in specs
+    def test_copy_with_overrides_errors(self, test_sequence_file: Path) -> None:
+        """Test copy_with replaces the error selection wholesale."""
+        psb = PSB(ring=3, sequence_file=test_sequence_file, errors={"quad": {"k0s"}})
+        copy = psb.copy_with(errors={"quad": {"k1s"}})
+        assert copy.errors == {"quad": frozenset({"k1s"})}
+        assert psb.errors == {"quad": frozenset({"k0s"})}
 
-    def test_get_supported_knob_specs_bpm_disabled(self, test_sequence_file: Path) -> None:
-        """Test BPM displacement specs are present but disabled when flags are off."""
-        psb = PSB(ring=3, sequence_file=test_sequence_file)
-        specs = psb.get_supported_knob_specs()
-        assert ("monitor", "dx", "^BR3%.BPM%d+L3$", None, False, "BPM horizontal offsets") in specs
-        assert ("monitor", "dy", "^BR3%.BPM%d+L3$", None, False, "BPM vertical offsets") in specs
-
-    def test_has_any_optimisation_bpm_dx(self, test_sequence_file: Path) -> None:
-        """Test BPM horizontal displacement contributes to has_any_optimisation."""
-        psb = PSB(ring=3, sequence_file=test_sequence_file, optimise_bpm_dx=True)
-        assert psb.has_any_optimisation() is True
-
-    def test_has_any_optimisation_bpm_dy(self, test_sequence_file: Path) -> None:
-        """Test BPM vertical displacement contributes to has_any_optimisation."""
-        psb = PSB(ring=3, sequence_file=test_sequence_file, optimise_bpm_dy=True)
-        assert psb.has_any_optimisation() is True
-
-    def test_copy_with_bpm_flags(self, test_sequence_file: Path) -> None:
-        """Test copy_with correctly copies and overrides BPM displacement flags."""
-        psb = PSB(ring=3, sequence_file=test_sequence_file, optimise_bpm_dx=True, optimise_bpm_dy=False)
-        copy = psb.copy_with(optimise_bpm_dy=True)
-        assert copy.optimise_bpm_dx is True
-        assert copy.optimise_bpm_dy is True
-
-    def test_copy_with_preserves_bpm_flags(self, test_sequence_file: Path) -> None:
-        """Test copy_with preserves BPM displacement flags when not overridden."""
-        psb = PSB(ring=3, sequence_file=test_sequence_file, optimise_bpm_dx=True, optimise_bpm_dy=True)
-        copy = psb.copy_with(optimise_quadrupoles=True)
-        assert copy.optimise_bpm_dx is True
-        assert copy.optimise_bpm_dy is True
-        assert copy.optimise_quadrupoles is True
+    def test_copy_with_preserves_selection(self, test_sequence_file: Path) -> None:
+        """Test copy_with preserves errors/misalignments when not overridden."""
+        psb = PSB(
+            ring=3,
+            sequence_file=test_sequence_file,
+            errors={"quad": {"k0s", "k1s"}},
+            misalignments={"quad": {"ds"}},
+        )
+        copy = psb.copy_with(optimise_energy=True)
+        assert copy.errors == {"quad": frozenset({"k0s", "k1s"})}
+        assert copy.misalignments == {"quad": frozenset({"ds"})}
+        assert copy.optimise_energy is True

@@ -16,7 +16,7 @@ import tfs
 from omc3.model_creator import create_instance_and_model
 from pymadng_utils.madx.make_sequence import make_madx_sequence
 
-from aba_optimiser.accelerators import LHC, PSB, SPS
+from aba_optimiser.accelerators import LHC, PSB
 from aba_optimiser.mad.aba_mad_interface import AbaMadInterface
 
 if TYPE_CHECKING:
@@ -33,6 +33,19 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
         and getattr(item.config, "workerinput", None) is not None
     ):
         pytest.fail(f"{item.nodeid} is marked serial and cannot run under pytest-xdist")
+
+
+@pytest.fixture(autouse=True)
+def _serial_harpy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force Harpy's per-bunch analysis to run in-process.
+
+    Harpy forks worker processes after BLAS/OpenMP thread pools have already
+    been initialised, which aborts in ``threadpoolctl._load_libraries`` inside
+    pytest. Tests do not need the wall-clock benefit of that parallelism, so
+    it is disabled for the whole suite instead of threading ``n_jobs=1``
+    through every ``harpy_options``/``harpy_kwargs`` call site.
+    """
+    monkeypatch.setattr("omc3.harpy._parallel.decide_n_workers", lambda *a, **k: 1)
 
 
 @pytest.fixture(scope="session")
@@ -57,12 +70,6 @@ def seq_b1_crossing(data_dir: Path) -> Path:
 def seq_b2(data_dir: Path) -> Path:
     """Path to the example sequence file for beam 2 used by a test."""
     return data_dir / "sequences" / "lhcb2.seq"
-
-
-@pytest.fixture(scope="session")
-def seq_sps(data_dir: Path) -> Path:
-    """Path to an SPS sequence file for integration tests."""
-    return data_dir / "sequences" / "sps.seq"
 
 
 def _create_psb_nominal_model(output_dir: Path, acc_models_dir: Path) -> None:
@@ -151,15 +158,6 @@ def corrector_table(corrector_file: Path) -> tfs.TfsDataFrame:
 def loaded_interface(seq_b1: Path) -> Generator[AbaMadInterface, None, None]:
     """Create a fresh AbaMadInterface for each test."""
     iface = AbaMadInterface(accelerator=LHC(beam=1, sequence_file=seq_b1, kinetic_energy=6800.0))
-    yield iface
-    with contextlib.suppress(Exception):
-        del iface
-
-
-@pytest.fixture(scope="function")
-def loaded_sps_interface(seq_sps: Path) -> Generator[AbaMadInterface, None, None]:
-    """Fixture that returns an interface with SPS sequence loaded and beam set up."""
-    iface = AbaMadInterface(accelerator=SPS(sequence_file=seq_sps, kinetic_energy=450.0))
     yield iface
     with contextlib.suppress(Exception):
         del iface

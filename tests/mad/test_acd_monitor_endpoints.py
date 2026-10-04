@@ -39,7 +39,7 @@ MAD.track{{
 
 
 def test_acd_endpoints_are_monitors_and_visible_to_slc_minus_4(seq_psb: Path) -> None:
-    accelerator = PSB(ring=3, sequence_file=seq_psb, optimise_quadrupoles=True)
+    accelerator = PSB(ring=3, sequence_file=seq_psb, errors={"quad": {"k1"}})
     acd_after = accelerator.acd_marker_name("after")
     acd_before = accelerator.acd_marker_name("before")
 

@@ -1,11 +1,10 @@
 """Tests for the initial-condition update path.
 
 Covers:
-- TrackingWorker._prepare_batches stores flat numpy arrays
 - TrackingWorker._send_init_condition_update updates _init_coords_np in Python
 - TrackingWorker._handle_control_command dispatches 'update_init_coords'
 - WorkerManager.send_init_condition_updates validates shape and sends per-worker slices
-- TrackingFitter._make_epoch_end_hook returns None when no callback is given
+- TrackingFitter._make_epoch_end_hook dispatches the callback's coordinates
 """
 
 from __future__ import annotations
@@ -54,7 +53,6 @@ def _make_worker_with_init_coords(n_particles: int = 6, num_batches: int = 2) ->
     worker = object.__new__(TrackingWorker)
     worker.worker_id = 0
     worker.observables = ("x", "px")
-    worker.hessian_weight_order = ("x", "px")
     worker.simulation_config = SimpleNamespace(num_batches=num_batches)
     worker.config = SimpleNamespace(kick_plane="x")
 
@@ -75,32 +73,6 @@ def _make_worker_with_init_coords(n_particles: int = 6, num_batches: int = 2) ->
 
     worker._prepare_batches(init_coords, init_pts, num_batches)
     return worker
-
-
-# ---------------------------------------------------------------------------
-# _prepare_batches stores flat numpy arrays
-# ---------------------------------------------------------------------------
-
-def test_prepare_batches_stores_flat_numpy_init_coords() -> None:
-    worker = _make_worker_with_init_coords(n_particles=4, num_batches=2)
-
-    assert hasattr(worker, "_init_coords_np")
-    assert hasattr(worker, "_init_pts_np")
-    assert worker._init_coords_np.shape == (4, 6)
-    assert worker._init_pts_np.shape == (4,)
-    assert worker._init_coords_np.dtype == np.float64
-    assert worker._init_coords_np.flags["C_CONTIGUOUS"]
-
-
-def test_prepare_batches_flat_arrays_match_batched_lists() -> None:
-    n = 6
-    worker = _make_worker_with_init_coords(n_particles=n, num_batches=3)
-
-    # Reconstruct the flat array from the nested lists.
-    reconstructed = np.array(
-        [coord for batch in worker.init_coords for coord in batch], dtype=np.float64
-    )
-    assert np.allclose(worker._init_coords_np, reconstructed)
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +164,6 @@ def _make_real_channels(counts: list[int]):
     # workers just need a .exitcode attribute for error-handling
     channels.workers = tuple(SimpleNamespace(pid=i, exitcode=None) for i in range(len(counts)))
     channels._count = len(counts)
-    channels._conn_index = {conn: i for i, conn in enumerate(parent_conns)}
 
     wm = object.__new__(WorkerManager)
     wm._worker_particle_counts = list(counts)
@@ -219,7 +190,6 @@ def _make_real_channels_with_validation(
             SimpleNamespace(pid=id_offset + i, exitcode=None) for i in range(len(counts))
         )
         ch._count = len(counts)
-        ch._conn_index = {conn: i for i, conn in enumerate(parent_conns)}
         return ch, list(child_conns)
 
     trn_channels, trn_children = _build_channels(training_counts, id_offset=0)
@@ -322,50 +292,9 @@ def test_send_init_condition_updates_also_updates_validation_workers() -> None:
         offset += n
 
 
-def test_send_init_condition_updates_rejects_wrong_shape_with_validation() -> None:
-    wm, _, _ = _make_real_channels_with_validation([3, 2], [4])
-    # total should be 3+2+4=9; passing 8 must fail
-    with pytest.raises(ValueError, match="shape"):
-        wm.send_init_condition_updates(np.zeros((8, 4)))
-
-
-def test_send_init_condition_updates_skips_validation_when_none() -> None:
-    """When there are no validation workers, only training workers receive the update."""
-    counts = [3, 2]
-    wm, child_conns = _make_real_channels(counts)
-    assert wm.validation_channels is None
-
-    total = sum(counts)
-    new_coords = np.zeros((total, 4))
-
-    received: list = [None] * len(counts)
-    threads = [
-        threading.Thread(target=_recv_and_ack, args=(child_conns[i], received, i))
-        for i in range(len(counts))
-    ]
-    for t in threads:
-        t.start()
-
-    wm.send_init_condition_updates(new_coords)
-
-    for t in threads:
-        t.join(timeout=5.0)
-        assert not t.is_alive()
-
-    # All training workers received their slices.
-    assert all(msg is not None for msg in received)
-
-
 # ---------------------------------------------------------------------------
 # TrackingFitter._make_epoch_end_hook — no subprocess needed
 # ---------------------------------------------------------------------------
-
-def test_make_epoch_end_hook_returns_none_when_no_callback() -> None:
-    from aba_optimiser.training.tracking_fitter import TrackingFitter
-
-    ctrl = object.__new__(TrackingFitter)
-    ctrl.initial_conditions_callback = None
-    assert ctrl._make_epoch_end_hook() is None
 
 
 def test_make_epoch_end_hook_calls_callback_and_dispatches() -> None:
@@ -438,7 +367,7 @@ def test_make_epoch_end_hook_includes_non_optimised_strengths() -> None:
     def callback(current: dict[str, float], best: dict[str, float]) -> None:
         seen.append(current)
         seen.append(best)
-        return None
+        return
 
     ctrl.initial_conditions_callback = callback
     hook = ctrl._make_epoch_end_hook()

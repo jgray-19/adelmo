@@ -39,6 +39,7 @@ from aba_optimiser.measurements.acd_pipeline import (
     run_driven_and_compensated_optics,
 )
 from aba_optimiser.measurements.reconstruction import _scale_position_variances_after_svd
+from aba_optimiser.measurements.reference import reconstruction_frame
 from aba_optimiser.measurements.variances import assign_known_noise_variances
 from aba_optimiser.momentum_reference import ORBIT_AND_PHASE, fit_momentum_reference
 from aba_optimiser.noise.noise import load_bpm_noise_table
@@ -49,6 +50,7 @@ from aba_optimiser.training.config.models import (
     OutputConfig,
     SequenceConfig,
 )
+from aba_optimiser.training.data_manager import FileTracks
 from aba_optimiser.training.tracking_fitter import ACDMarkerFitter, KickerFitter
 from aba_optimiser.training_closed_twiss import LevenbergMarquardtConfig
 from tests.training.controller_test_utils import (
@@ -62,7 +64,8 @@ pytest.importorskip("tmom_recon")
 from tmom_recon import (  # noqa: E402
     ACDipoleConfig,
     ModelDetails,
-    ReconstructionFrame,
+    OpticsInput,
+    calculate_acd_pz,
     calculate_pz,
 )
 from tmom_recon.acd.integration import (  # noqa: E402
@@ -73,6 +76,7 @@ from tmom_recon.acd.reconstruction import ACDipoleStateConsistencyError  # noqa:
 from tmom_recon.measurements.twiss_from_measurement import (  # noqa: E402
     build_twiss_from_measurements,
 )
+from tmom_recon.reconstruction import ACDipolePzGenerator  # noqa: E402
 from tmom_recon.svd import weighted_svd_clean_measurements  # noqa: E402
 
 LOGGER = logging.getLogger(__name__)
@@ -92,6 +96,12 @@ MAIN_STRENGTHS = {
 }
 RAMP_TURNS = 1_000
 FLATTOP_TURNS = 10_000
+
+#: Consecutive turn windows the flat-top is cut into before Harpy sees it.
+#: omc3 needs more than one acquisition to estimate any measurement error at
+#: all; three keeps a usable spread without shortening the windows to the
+#: point where the tune resolution suffers.
+ACQUISITIONS = 3
 OPTIMISATION_DATA_FRACTION = 0.250
 BPM_PATTERN = r"(?i)^br3\.bpm\d+l3$"
 BEND_REL_RMS = 8e-4
@@ -200,25 +210,38 @@ class MeasurementScenario:
     dynamic_planes: tuple[str, ...]
     #: Reference-fit observables. Phase alone cannot constrain bends.
     observables: tuple[str, ...]
-    optimise_bends: bool
+    fit_bends: bool
     #: Whether the analysis models the orbit correctors at all.
     use_correctors: bool
 
+
+#: Declared PSB BPM position resolution (m). The fixture's closed orbits are
+#: exact model truth, so this is not their scatter -- it is the uncertainty a
+#: real measurement of the same orbit would carry, and it is what sets the
+#: orbit family's weight against phase in the reference fit.
+PSB_BPM_RESOLUTION: float = 1e-4
 
 FULL_ORBIT = MeasurementScenario(
     name="full-orbit",
     dynamic_planes=(),
     observables=ORBIT_AND_PHASE,
-    optimise_bends=True,
+    fit_bends=True,
     use_correctors=True,
 )
 DYNAMIC_PART = MeasurementScenario(
     name="dynamic-part",
     dynamic_planes=("x", "y"),
     observables=("mu1", "mu2"),
-    optimise_bends=False,
+    fit_bends=False,
     use_correctors=False,
 )
+
+
+def _reference_fit_errors(scenario: MeasurementScenario) -> dict[str, set[str]]:
+    """Return the reference fit's error selection: quad k1, plus bend k0 if fitted."""
+    return {"bend": {"k0"}, "quad": {"k1"}} if scenario.fit_bends else {"quad": {"k1"}}
+
+
 SCENARIOS = [
     pytest.param(FULL_ORBIT, id="full-orbit"),
     pytest.param(DYNAMIC_PART, id="dynamic-part"),
@@ -339,12 +362,58 @@ def _driven_tunes_from_natural(qx: float, qy: float) -> tuple[float, float]:
     return ((qx + DRIVEN_TUNE_OFFSETS[0]) % 1.0, (qy + DRIVEN_TUNE_OFFSETS[1]) % 1.0)
 
 
+def _fitted_optics_quality(
+    machine: MachineArtifacts, strengths: dict[str, float]
+) -> tuple[float, float]:
+    """Return (phase-advance RMS, beta-beating RMS) of a knob set against the machine.
+
+    Individual quadrupole strengths are not separately observable here: 16 BPMs
+    constrain far fewer degrees of freedom than there are gradient knobs, and phase
+    advance fixes only the integrated gradient between pickups. A fit is therefore
+    free to move along the degenerate directions without changing anything it can
+    see, which makes a per-magnet comparison against truth a poor measure of whether
+    the fit worked. What the reconstruction actually consumes is the *optics* the
+    combination of quads produces, so measure that.
+    """
+    accelerator = machine.case.accelerator_factory(
+        ring=machine.case.ring,
+        kinetic_energy=machine.case.kinetic_energy,
+        sequence_file=machine.accelerator.sequence_file,
+        errors={"bend": {"k0"}, "quad": {"k1"}},
+    )
+    # The reference fit is given the machine's correctors and tune knobs, and the
+    # tune knobs in particular move the phase directly (kbrqf/kbrqd rematch the
+    # model onto the measured tunes). Comparing its output against a bare lattice
+    # would measure that missing rematch rather than the fit.
+    iface = GradientDescentMadInterface(
+        accelerator,
+        corrector_knobs=machine.corrector_file,
+        tune_knobs=machine.tune_knobs,
+    )
+    if strengths:
+        iface.update_knob_values(strengths)
+    twiss = _twiss_by_lower_name(_direct_twiss(iface, REFERENCE_DPP))
+    del iface
+    truth = _twiss_by_lower_name(machine.free_twiss[REFERENCE_DPP])
+    phase = _twiss_phase_advance_rms(twiss, truth)
+    common = twiss.index.intersection(truth.index)
+    beating = []
+    for column in ("beta11", "beta22"):
+        if column in twiss and column in truth:
+            model = twiss.loc[common, column].to_numpy(dtype=float)
+            true = truth.loc[common, column].to_numpy(dtype=float)
+            beating.append((model - true) / true)
+    return phase, (_rms(np.concatenate(beating)) if beating else float("nan"))
+
+
 def _relative_error_rms(estimate: dict[str, float], truth: dict[str, float], suffix: str) -> float:
     keys = [name for name in truth if name.lower().endswith(suffix)]
     return _rms([estimate.get(name, 0.0) - truth[name] for name in keys])
 
 
-def _twiss_orbit_rms(twiss: pd.DataFrame, reference: pd.DataFrame, columns: tuple[str, ...]) -> float:
+def _twiss_orbit_rms(
+    twiss: pd.DataFrame, reference: pd.DataFrame, columns: tuple[str, ...]
+) -> float:
     common = twiss.index.intersection(reference.index)
     residuals = []
     for column in columns:
@@ -359,7 +428,11 @@ def _twiss_orbit_rms(twiss: pd.DataFrame, reference: pd.DataFrame, columns: tupl
 
 
 def _twiss_phase_advance_rms(model: pd.DataFrame, truth: pd.DataFrame) -> float:
-    common = [name.lower() for name in PSB_ORBIT_BPM_NAMES if name.lower() in model.index and name.lower() in truth.index]
+    common = [
+        name.lower()
+        for name in PSB_ORBIT_BPM_NAMES
+        if name.lower() in model.index and name.lower() in truth.index
+    ]
     residuals = []
     for column in ("mu1", "mu2"):
         if column not in model or column not in truth:
@@ -466,9 +539,7 @@ def _track_one_momentum(
     assert bpm_rows["name"].nunique() == 16
     assert bpm_rows.groupby("name", observed=True)["turn"].nunique().eq(FLATTOP_TURNS).all()
     peak_to_peak = bpm_rows.groupby("name", observed=True)[["x", "y"]].agg(np.ptp)
-    max_peak_to_peak = {
-        plane: float(peak_to_peak[plane].max()) for plane in ("x", "y")
-    }
+    max_peak_to_peak = {plane: float(peak_to_peak[plane].max()) for plane in ("x", "y")}
     LOGGER.info(
         "ACD tracking amplitude; dpp=%+.4e, max_p2p_x=%.3e m, max_p2p_y=%.3e m",
         dpp,
@@ -661,6 +732,57 @@ def _create_psb_omc3_model(
     return model_dir
 
 
+def _split_into_acquisitions(
+    bpm_data: pd.DataFrame, label: str, count: int
+) -> list[tuple[Path, pd.DataFrame]]:
+    """Cut one long acquisition into ``count`` consecutive ones.
+
+    omc3 takes its measurement errors from the spread *between* acquisitions --
+    ``optics_measurements.phase._get_phases`` writes a matrix of exact zeros when
+    handed a single file -- so a one-file analysis reports no phase error at all,
+    and the reference fit, which weights by ``1/variance``, cannot use the phase.
+
+    Splitting the flat-top into consecutive turn windows is how the same estimate
+    is obtained from one real acquisition: each window is an independent sample of
+    the same driven motion, and their scatter measures everything that actually
+    limits the phase -- BPM noise, decoherence, tune drift and spectral leakage --
+    rather than a resolution figure asserted up front. Turns are renumbered from
+    zero in each window so Harpy sees them as separate acquisitions.
+
+    Args:
+        bpm_data: Long-form ``name/turn/x/y`` turn-by-turn data.
+        label: Stem for the per-acquisition source file names.
+        count: Number of windows to cut.
+
+    Returns:
+        ``(source_file, frame)`` pairs, one per window.
+
+    Raises:
+        ValueError: If ``count`` is below two, or the windows would be empty.
+    """
+    if count < 2:
+        raise ValueError(f"At least two acquisitions are needed for a spread, got {count}")
+    turns = np.sort(bpm_data["turn"].unique())
+    window = len(turns) // count
+    if window < 1:
+        raise ValueError(f"{len(turns)} turns cannot be split into {count} acquisitions")
+
+    acquisitions: list[tuple[Path, pd.DataFrame]] = []
+    for index in range(count):
+        wanted = turns[index * window : (index + 1) * window]
+        frame = bpm_data[bpm_data["turn"].isin(wanted)].copy()
+        frame["turn"] = frame["turn"] - wanted[0]
+        acquisitions.append((Path(f"{label}_acq{index}.sdds"), frame))
+    LOGGER.info(
+        "Split %d turns into %d acquisitions of %d turns each for %s",
+        len(turns),
+        count,
+        window,
+        label,
+    )
+    return acquisitions
+
+
 def _run_phase_analysis(
     *,
     root: Path,
@@ -685,16 +807,15 @@ def _run_phase_analysis(
         dpp=dpp,
         machine=machine,
     )
-    source = Path(f"{label}.sdds")
+    acquisitions = _split_into_acquisitions(bpm_data, label, ACQUISITIONS)
     driven, compensated = run_driven_and_compensated_optics(
-        bpm_data,
-        source_file=source,
+        acquisitions,
         output_dir=stage_root,
         config=ACDOpticsAnalysisConfig(
             model_dir=model_dir,
             harpy_options={
                 "unit": "m",
-                "turns": [0, FLATTOP_TURNS],
+                "turns": [0, FLATTOP_TURNS // ACQUISITIONS],
                 "clean": clean,
                 "keep_exact_zeros": True,
                 "peak_to_peak": 1e-10,
@@ -752,6 +873,7 @@ def _fit_reference(
     compensated_dirs: dict[float, Path],
     root: Path,
     scenario: MeasurementScenario = FULL_ORBIT,
+    noise_factor: float | None = None,
 ):
     start = time.perf_counter()
     LOGGER.info(
@@ -759,7 +881,7 @@ def _fit_reference(
         "correctors=%s, pt_values=%s, compensated_dirs=%s",
         scenario.name,
         scenario.observables,
-        scenario.optimise_bends,
+        scenario.fit_bends,
         scenario.use_correctors,
         [f"{pt:+.6e}" for pt in compensated_dirs],
         [str(path) for path in compensated_dirs.values()],
@@ -777,6 +899,21 @@ def _fit_reference(
         optics, _ = build_twiss_from_measurements(
             compensated_dirs[pt], include_errors=True, use_amplitude_beta=True
         )
+        if noise_factor == 0.0:
+            # No noise to scatter, so use the declared error like orbit does.
+            expected_phase_error = _phase_rms(compensated_dirs[pt], machine.free_twiss[dpp])
+            if np.isfinite(expected_phase_error) and expected_phase_error > 0.0:
+                LOGGER.info(
+                    "Overriding phase variance for dpp=%+.4e (noise_factor=0) with "
+                    "expected error %.3e turns (was scatter-derived)",
+                    dpp,
+                    expected_phase_error,
+                )
+                # mu1_var/mu2_var are cumulative (diffed downstream), so a flat
+                # value would zero out every per-interval variance.
+                cumulative = np.arange(1, len(optics) + 1, dtype=float) * expected_phase_error**2
+                optics["mu1_var"] = cumulative
+                optics["mu2_var"] = cumulative
         common = optics.index.intersection(orbit.index)
         frame = optics.loc[common].copy()
         for column in ("X", "Y", "ERRX", "ERRY"):
@@ -793,9 +930,7 @@ def _fit_reference(
         ring=machine.case.ring,
         kinetic_energy=machine.case.kinetic_energy,
         sequence_file=machine.accelerator.sequence_file,
-        optimise_bends=scenario.optimise_bends,
-        optimise_quadrupoles=True,
-        optimise_quad_dy=False,
+        errors=_reference_fit_errors(scenario),
     )
     reference = fit_momentum_reference(
         accelerator,
@@ -803,7 +938,6 @@ def _fit_reference(
         observables=scenario.observables,
         sequence_config=SequenceConfig(magnet_range="$start/$end"),
         lm_config=LevenbergMarquardtConfig(max_iterations=50),
-        prior_strength=1e-1,
         reference_pt=_pt_by_dpp(machine.accelerator)[REFERENCE_DPP],
         corrector_knobs=machine.corrector_file if scenario.use_correctors else None,
         tune_knobs=machine.tune_knobs,
@@ -892,6 +1026,7 @@ def _bpm_momentum_bias(
     truth: pd.DataFrame,
     dpp: float,
     scenario: MeasurementScenario = FULL_ORBIT,
+    closed_orbit: pd.DataFrame | None = None,
 ) -> float:
     """Return the per-BPM constant momentum offset, as a fraction of the px signal.
 
@@ -902,40 +1037,85 @@ def _bpm_momentum_bias(
     the signal itself.
 
     What *is* frame-dependent is the truth it is compared against. A dynamic-part
-    reconstruction deliberately carries no closed-orbit momentum, so the tracked
-    truth has its own per-BPM mean momentum removed first, putting both sides in the
-    same frame. The residual is still compared without mean subtraction afterwards,
-    so a genuine constant offset is still caught.
+    reconstruction subtracts the measured closed orbit at *zero momentum*, so it
+    carries no on-momentum closed-orbit angle -- but off momentum it does still
+    carry the dispersive part, ``D'x.delta``, because that is real machine motion
+    and the zero-momentum orbit does not contain it. So the frame match is to
+    remove the machine's on-momentum closed-orbit angle from the truth and nothing
+    else.
+
+    Removing the truth's per-BPM *mean* instead is wrong: that also strips the
+    dispersive angle, which the estimate legitimately keeps, and then reports the
+    difference as bias. Measured on the PSB fixture at dpp=-1.2e-3, the estimate's
+    constant px is 5.104e-4 and the machine's is 5.292e-4, and their difference is
+    4.228e-4 -- matching the on-momentum closed-orbit angle of 4.222e-4 to 0.14%.
+    The reconstruction is right; only the comparison frame was wrong.
     """
     estimate = estimate.assign(name=estimate["name"].astype(str).str.upper())
     truth = truth.assign(name=truth["name"].astype(str).str.upper())
+    # The machine's own per-BPM constant px, before any frame subtraction. Off
+    # momentum this is the dispersive closed-orbit angle D'x.delta, which is real
+    # motion the machine has -- so it is the number the reconstruction's own
+    # constant px has to be compared against to tell a dispersion mismatch from a
+    # frame error.
+    raw_true_mean = truth.groupby("name", observed=True)["px"].mean()
     if scenario.dynamic_planes:
+        if closed_orbit is None:
+            raise ValueError(
+                "A dynamic-part comparison needs the machine's on-momentum closed "
+                "orbit to put the truth in the reconstruction's frame"
+            )
+        orbit = closed_orbit.copy()
+        orbit.index = orbit.index.astype(str).str.upper()
         truth = truth.copy()
+        # The truth table also carries the AC-dipole marker rows, which have no
+        # entry in the 16-BPM closed orbit and are filtered out below anyway. Only
+        # the rows that actually reach the comparison need the frame shift.
+        is_bpm = truth["name"].str.match(BPM_PATTERN)
         for column in ("px", "py"):
-            truth[column] = truth[column] - truth.groupby("name", observed=True)[
-                column
-            ].transform("mean")
+            offsets = truth["name"].map(orbit[column])
+            missing = sorted(set(truth.loc[is_bpm & offsets.isna(), "name"]))
+            if missing:
+                raise ValueError(f"closed orbit is missing {column} for BPM(s) {missing}")
+            truth[column] = truth[column] - offsets.fillna(0.0).to_numpy(dtype=float)
     merged = estimate.merge(
         truth[["name", "turn", "px", "py"]], on=["name", "turn"], suffixes=("_fit", "_true")
     )
     merged = merged[merged["name"].str.match(BPM_PATTERN)]
     assert merged["name"].nunique() == 16, f"dpp={dpp:+.4e}: {merged['name'].nunique()} BPMs"
-    per_bpm = merged.assign(
-        px_res=merged["px_fit"] - merged["px_true"],
-        py_res=merged["py_fit"] - merged["py_true"],
-    ).groupby("name", observed=True)[["px_res", "py_res"]].mean()
+    per_bpm = (
+        merged.assign(
+            px_res=merged["px_fit"] - merged["px_true"],
+            py_res=merged["py_fit"] - merged["py_true"],
+        )
+        .groupby("name", observed=True)[["px_res", "py_res"]]
+        .mean()
+    )
     px_bias, py_bias = _rms(per_bpm["px_res"]), _rms(per_bpm["py_res"])
     signal = float(merged["px_true"].std())
     fraction = px_bias / signal
+    # Split the residual across its two possible sources. In a dynamic-part
+    # frame both sides are supposed to carry no closed-orbit momentum, so a
+    # large ``fit`` mean means the reconstruction kept an orbit it should have
+    # dropped, whereas a large ``true`` mean means the subtraction above did not
+    # put the truth in the frame the estimate is actually in.
+    fit_mean = merged.groupby("name", observed=True)["px_fit"].mean()
+    true_mean = merged.groupby("name", observed=True)["px_true"].mean()
     LOGGER.info(
         "BPM momentum bias; dpp=%+.4e, px_bias_rms=%.3e, py_bias_rms=%.3e, "
-        "px_signal_std=%.3e, bias/signal=%.3f, worst_bpm=%.3e",
+        "px_signal_std=%.3e, bias/signal=%.3f, worst_bpm=%.3e, "
+        "px_fit_mean_rms=%.3e, px_true_mean_rms=%.3e, "
+        "px_true_raw_mean_rms=%.3e, px_fit_minus_raw_true_rms=%.3e",
         dpp,
         px_bias,
         py_bias,
         signal,
         fraction,
         per_bpm["px_res"].abs().max(),
+        _rms(fit_mean),
+        _rms(true_mean),
+        _rms(raw_true_mean),
+        _rms(fit_mean.subtract(raw_true_mean, fill_value=np.nan).dropna()),
     )
     return fraction
 
@@ -967,9 +1147,7 @@ def _reconstruct_one(
             ring=machine.case.ring,
             kinetic_energy=machine.case.kinetic_energy,
             sequence_file=machine.accelerator.sequence_file,
-            optimise_bends=scenario.optimise_bends,
-            optimise_quadrupoles=True,
-            optimise_quad_dy=False,
+            errors=_reference_fit_errors(scenario),
         ),
         pt=pt,
         magnet_strengths=fitted.magnet_strengths,
@@ -1035,12 +1213,13 @@ def _reconstruct_one(
     # the two window pickups, and BR3.BPM2L3 is where the state guard then fails.
     # Production always supplies this (psb_md passes barrier_s=acdipole_window.ac_s);
     # it defaults to None, so omitting it fails silently.
-    acd_config = replace(acd_config, barrier_s=float(model_closed_orbit.loc[marker_key, "s"]))
+    # The barrier belongs to the reconstruction call, not to the AC-dipole model.
+    barrier_s = float(model_closed_orbit.loc[marker_key, "s"])
     LOGGER.info(
         "AC-dipole barrier set; dpp=%+.4e, marker=%s, barrier_s=%.6f m",
         dpp,
         machine.case.acd_name,
-        acd_config.barrier_s,
+        barrier_s,
     )
     assert np.isfinite(model_closed_orbit[["x", "px", "y", "py"]].to_numpy(dtype=float)).all()
     assert np.isfinite(
@@ -1052,33 +1231,49 @@ def _reconstruct_one(
     model_twiss = model_closed_orbit.loc[:, ~model_closed_orbit.columns.duplicated()].copy()
     model_twiss.index = model_twiss.index.astype(str).str.upper()
     prepared = bpm_data[bpm_data["name"].isin(model_twiss.index)]
-    frame = ReconstructionFrame(
-        orbit_zero=reference_co[["x", "y"]],
-        dynamic_planes=scenario.dynamic_planes,
-        fitted_momenta=None if scenario.dynamic_planes else reference_co[["px", "py"]],
-    )
+    frame = reconstruction_frame(reference_co, dynamic_planes=scenario.dynamic_planes)
     LOGGER.info(
-        "Measurement framed; dpp=%+.4e, scenario=%s, dynamic_planes=%s, "
-        "rows=%d -> %d",
+        "Measurement framed; dpp=%+.4e, scenario=%s, dynamic_planes=%s, rows=%d -> %d",
         dpp,
         scenario.name,
         scenario.dynamic_planes,
         len(bpm_data),
         len(prepared),
     )
+    # ``acd=`` puts the all-BPM reconstruction on the driven optics; the kick fit
+    # is now its own call rather than an attrs side effect.
+    #
+    # Dispersion stays on the model, as it does in production
+    # (aba_optimiser/measurements/reconstruction.py): a single AC-dipole
+    # acquisition measures no dispersion, so the compensated omc3 directory has
+    # none. OpticsInput refuses to substitute the model silently, so requesting
+    # "dispersion": "measurement" here raises rather than warning.
     result = calculate_pz(
         prepared,
         model_details,
-        frame=frame,
-        measurement_dir=compensated_dir,
-        model_optics=("alpha", "beta"),
-        measurement_pt_offset=pt,
+        closed_orbit_at_zero=frame.closed_orbit_at_zero,
+        orbit_mode=frame.orbit_mode,
+        optics=OpticsInput(
+            measurement_dir=compensated_dir,
+            sources={"phase": "measurement"},
+        ),
         acd=acd_config,
         info=False,
-        barrier_s=acd_config.barrier_s,
+        barrier_s=barrier_s,
     )
     assert isinstance(result, pd.DataFrame)
-    acd_result = result.attrs["acd_result"]
+    acd_result = calculate_acd_pz(
+        prepared,
+        model_details,
+        acd_config,
+        closed_orbit_at_zero=frame.closed_orbit_at_zero,
+        orbit_mode=frame.orbit_mode,
+        optics=OpticsInput(
+            measurement_dir=compensated_dir,
+            sources={"phase": "measurement"},
+        ),
+    )
+    result.attrs["acd_result"] = acd_result
     acd_result.attrs["marker_optics"] = marker_optics
     requested_driven = _driven_tunes(machine, dpp)
     LOGGER.info(
@@ -1128,8 +1323,7 @@ def _reconstruct_one(
     ].reindex(columns=reconstructed.columns)
     marker_rows["name"] = marker_rows["name"].map(
         lambda name: (
-            f"{str(name).rsplit('_', 1)[0].upper()}_"
-            f"{str(name).rsplit('_', 1)[1].lower()}"
+            f"{str(name).rsplit('_', 1)[0].upper()}_{str(name).rsplit('_', 1)[1].lower()}"
         )
     )
     reconstructed = pd.concat([reconstructed, marker_rows], ignore_index=True)
@@ -1139,7 +1333,9 @@ def _reconstruct_one(
             reconstructed[column] = 1e-30
         reconstructed[column] = reconstructed[column].fillna(1e-30)
 
-    bias_fraction = _bpm_momentum_bias(reconstructed, machine.tracking[dpp], dpp, scenario)
+    bias_fraction = _bpm_momentum_bias(
+        reconstructed, machine.tracking[dpp], dpp, scenario, closed_orbit=reference_co
+    )
     assert bias_fraction < MAX_BPM_PX_BIAS_FRACTION, (
         f"dpp={dpp:+.4e}: per-BPM constant px offset is {bias_fraction:.3f} of the px "
         f"signal (limit {MAX_BPM_PX_BIAS_FRACTION}); the reconstruction closed orbit is wrong"
@@ -1159,18 +1355,16 @@ def _reconstruct_one(
         len(reconstructed),
         len(bpm_rows),
     )
-    generator = calculate_pz(
-        prepared,
-        model_details,
-        frame=frame,
-        measurement_dir=compensated_dir,
-        model_optics=("alpha", "beta"),
-        measurement_pt_offset=pt,
-        acd=acd_config,
-        acd_only=True,
-        generator=True,
-        info=False,
-        barrier_s=acd_config.barrier_s,
+    generator = ACDipolePzGenerator.build(
+        data=prepared,
+        model_details=model_details,
+        config=acd_config,
+        closed_orbit_at_zero=frame.closed_orbit_at_zero,
+        orbit_mode=frame.orbit_mode,
+        optics=OpticsInput(
+            measurement_dir=compensated_dir,
+            sources={"phase": "measurement"},
+        ),
     )
     _log_elapsed(
         "ACD momentum reconstruction",
@@ -1326,9 +1520,7 @@ def _marker_initial_condition_diagnostics(
             f"dpp={dpp:+.4e}, marker={marker}: retained {len(merged)} turns"
         )
         values = merged[["x_fit", "px_fit", "y_fit", "py_fit"]].to_numpy(dtype=float)
-        expected_values = merged[["x_true", "px_true", "y_true", "py_true"]].to_numpy(
-            dtype=float
-        )
+        expected_values = merged[["x_true", "px_true", "y_true", "py_true"]].to_numpy(dtype=float)
         residual = values - expected_values
         diagnostics[side] = _rms(residual)
         assert np.isfinite(values).all(), f"dpp={dpp:+.4e}, marker={marker}: non-finite launch"
@@ -1378,10 +1570,10 @@ def test_psb_acd_initial_conditions_and_fit_r2(
         driven_phase_errors[dpp] = _phase_rms(driven, machine.free_twiss[dpp])
         compensated_phase_errors[dpp] = _phase_rms(compensated, machine.free_twiss[dpp])
 
-    assert _rms(list(compensated_phase_errors.values())) < _rms(
-        list(driven_phase_errors.values())
+    assert _rms(list(compensated_phase_errors.values())) < _rms(list(driven_phase_errors.values()))
+    fitted, _ = _fit_reference(
+        machine, compensated_dirs, tmp_path, scenario, noise_factor=noise_factor
     )
-    fitted, _ = _fit_reference(machine, compensated_dirs, tmp_path, scenario)
     mixed_reference = _mixed_reference(machine, fitted, scenario)
 
     for dpp in DPP_VALUES:
@@ -1563,7 +1755,9 @@ def test_psb_acd_r2_factor_case_study(
             machine=machine,
         )
         compensated_dirs[pt_values[dpp]] = compensated
-    fitted, _ = _fit_reference(machine, compensated_dirs, tmp_path, scenario)
+    fitted, _ = _fit_reference(
+        machine, compensated_dirs, tmp_path, scenario, noise_factor=noise_factor
+    )
 
     if factor in {"truth_quads", "truth_bends", "truth_magnets"}:
         if factor == "truth_magnets":
@@ -1595,8 +1789,7 @@ def test_psb_acd_r2_factor_case_study(
     )
     acd_result = result.attrs["acd_result"]
     LOGGER.warning(
-        "ACD R2 factor case; factor=%s, dpx_r2=%.6f, dpy_r2=%.6f, "
-        "dpx_amp=%.6e, dpy_amp=%.6e",
+        "ACD R2 factor case; factor=%s, dpx_r2=%.6f, dpy_r2=%.6f, dpx_amp=%.6e, dpy_amp=%.6e",
         factor,
         float(acd_result.attrs["dpx_r2"]),
         float(acd_result.attrs["dpy_r2"]),
@@ -1630,7 +1823,7 @@ def _run_acd_fit(
     validation_fraction: float = 0.1,
 ) -> tuple[dict[str, float], float, ACDMarkerFitter]:
     controller_ref: dict[str, ACDMarkerFitter] = {}
-    track_data_ref: dict[int, pd.DataFrame] = {}
+    track_data_ref: dict[int, FileTracks] = {}
 
     def refresh_marker_initial_conditions(
         current_knobs: dict[str, float], _best_knobs: dict[str, float]
@@ -1647,35 +1840,32 @@ def _run_acd_fit(
             raise RuntimeError("ACD controller was not initialised before refreshing markers")
 
         full_strengths = {**initial, **current_knobs}
-        updated_track_data: dict[int, pd.DataFrame] = {}
+        updated_track_data: dict[int, FileTracks] = {}
         for file_idx, dpp in enumerate(files):
             refreshed = generators[dpp].update(magnet_strengths=full_strengths)
-            source = track_data_ref[file_idx].reset_index()
-            source = source.copy(deep=True)
+            tracks = track_data_ref[file_idx]
+            values = {name: array.copy() for name, array in tracks.values.items()}
+            column_by_name = {name.upper(): col for name, col in tracks.marker_col.items()}
             marker_rows = refreshed.loc[
                 refreshed["name"].astype(str).str.lower().str.endswith(("_before", "_after")),
                 ["name", "turn", "x", "px", "y", "py"],
-            ].copy()
-            def _acd_marker_name(name: object) -> str:
-                prefix, suffix = str(name).rsplit("_", 1)
-                return f"{prefix.upper()}_{suffix.lower()}"
-
-            marker_rows["name"] = marker_rows["name"].map(_acd_marker_name)
-            source["name"] = source["name"].map(_acd_marker_name)
+            ]
             for marker_name, marker in marker_rows.groupby("name", sort=False):
-                target_mask = source["name"].eq(marker_name)
-                target_indices = source.index[target_mask]
+                col = column_by_name[str(marker_name).upper()]
                 marker = marker.sort_values("turn")
-                target_indices = target_indices[np.argsort(source.loc[target_indices, "turn"])]
-                if len(target_indices) != len(marker):
+                if len(marker) != len(tracks.turns):
                     raise ValueError(
                         f"Marker refresh length mismatch for {marker_name}: "
-                        f"{len(target_indices)} != {len(marker)}"
+                        f"{len(tracks.turns)} != {len(marker)}"
                     )
-                source.loc[target_indices, ["x", "px", "y", "py"]] = marker[
-                    ["x", "px", "y", "py"]
-                ].to_numpy()
-            updated_track_data[file_idx] = source.set_index(["turn", "name"])
+                for coordinate in ("x", "px", "y", "py"):
+                    values[coordinate][:, col] = marker[coordinate].to_numpy()
+            updated_track_data[file_idx] = FileTracks(
+                turns=tracks.turns,
+                markers=tracks.markers,
+                values=values,
+                kick_plane=tracks.kick_plane,
+            )
 
         return controller.worker_manager.build_update_coords(updated_track_data)
 
@@ -1694,9 +1884,8 @@ def _run_acd_fit(
         initial_conditions_callback=refresh_marker_initial_conditions,
     )
     controller_ref["controller"] = ctrl
-    track_data_ref.update(
-        {file_idx: frame.copy(deep=True) for file_idx, frame in ctrl.data_manager.track_data.items()}
-    )
+    # The refresh copies each grid before writing, so the stored tracks stay intact.
+    track_data_ref.update(ctrl.data_manager.tracks)
     assert ctrl.optimisation_loop.use_true_strengths
     quad_truth = {name for name in machine.truth if name.lower().endswith(".dk1l")}
     assert quad_truth <= set(ctrl.optimisation_loop.true_strengths)
@@ -1773,17 +1962,15 @@ def _build_acd_marker_fitter(
             ring=machine.case.ring,
             kinetic_energy=machine.case.kinetic_energy,
             sequence_file=machine.accelerator.sequence_file,
-            optimise_quadrupoles=True,
             # The ACD fit never moves bends in either scenario -- they stay at the
-            # reference-fit value -- so this does not follow scenario.optimise_bends.
-            optimise_bends=False,
-            optimise_quad_dy=False,
+            # reference-fit value -- so this does not follow scenario.fit_bends.
+            errors={"quad": {"k1"}},
         ),
         optimiser_config=OptimiserConfig(
             max_epochs=max_epochs,
             warmup_epochs=15,
             warmup_lr_start=1e-7,
-            max_lr=2e-5,
+            max_lr=2e-6,
             min_lr=1e-6,
             gradient_converged_value=1e-11,
         ),
@@ -1793,7 +1980,6 @@ def _build_acd_marker_fitter(
             data_fraction=data_fraction,
             validation_fraction=validation_fraction,
             optimise_momenta=optimise_momenta,
-            run_arc_by_arc=True,
             use_fixed_bpm=True,
             enable_preloop_outlier_screening=False,
         ),
@@ -1842,9 +2028,7 @@ def _log_acd_objective_scan(
     diag = []
     for (point_label, knobs), loss in zip(scan, losses, strict=True):
         truth_l1 = sum(abs(knobs[name] - truth[name]) for name in knob_names)
-        diag.append(
-            f"{point_label}:loss={loss:.3e},ratio={loss / best_loss:.3f},td={truth_l1:.3e}"
-        )
+        diag.append(f"{point_label}:loss={loss:.3e},ratio={loss / best_loss:.3f},td={truth_l1:.3e}")
     LOGGER.info("ACD marker fit '%s' objective scan; %s", label, "; ".join(diag))
 
 
@@ -1963,7 +2147,9 @@ def test_psb_full_acd_reconstruction_and_optimisation(
     LOGGER.info("Phase compensation summary: %s", phase_diag)
     assert phase_compensated < phase_driven, phase_diag
 
-    fitted, _measurements = _fit_reference(machine, compensated_dirs, tmp_path)
+    fitted, _measurements = _fit_reference(
+        machine, compensated_dirs, tmp_path, noise_factor=noise_factor
+    )
     nominal_bend = _relative_error_rms({}, machine.truth, ".dk0l")
     nominal_quad = _relative_error_rms({}, machine.truth, ".dk1l")
     fitted_bend = _relative_error_rms(fitted.magnet_strengths, machine.truth, ".dk0l")
@@ -1995,6 +2181,19 @@ def test_psb_full_acd_reconstruction_and_optimisation(
         sum(name.lower().endswith(".dk0l") for name in fitted.magnet_strengths),
         sum(name.lower().endswith(".dk1l") for name in fitted.magnet_strengths),
         _strength_fingerprint(fitted.magnet_strengths),
+    )
+    # Per-magnet quad error is not the quantity the pipeline depends on -- see
+    # _fitted_optics_quality. Log the observable combination next to it so the two
+    # can be compared before deciding which the assertion should use.
+    fitted_phase, fitted_beating = _fitted_optics_quality(machine, fitted.magnet_strengths)
+    nominal_phase, nominal_beating = _fitted_optics_quality(machine, {})
+    LOGGER.info(
+        "Reference fit optics quality; phase_advance_rms nominal/ref=%.3e/%.3e, "
+        "beta_beating_rms nominal/ref=%.3e/%.3e",
+        nominal_phase,
+        fitted_phase,
+        nominal_beating,
+        fitted_beating,
     )
     assert fitted_bend < nominal_bend, fit_diag
     assert fitted_quad < nominal_quad, fit_diag
@@ -2095,9 +2294,7 @@ def test_psb_full_acd_reconstruction_and_optimisation(
     )
     final_quad = _relative_error_rms(all_strengths, machine.truth, ".dk1l")
     final_bend = _relative_error_rms(all_strengths, machine.truth, ".dk0l")
-    estimated_knobs = {
-        name: all_strengths[name] for name in all_ctrl.initial_knobs
-    }
+    estimated_knobs = {name: all_strengths[name] for name in all_ctrl.initial_knobs}
     truth_knobs = {name: machine.truth[name] for name in all_ctrl.initial_knobs}
     initial_objective, final_objective, truth_objective = evaluate_controller_worker_losses(
         all_ctrl, [dict(all_ctrl.initial_knobs), estimated_knobs, truth_knobs]
@@ -2167,9 +2364,7 @@ def psb_campaign_machine(
     )
 
 
-def _build_machine(
-    root: Path, seq_psb: Path, *, excitation_scale: float
-) -> MachineArtifacts:
+def _build_machine(root: Path, seq_psb: Path, *, excitation_scale: float) -> MachineArtifacts:
     fixture_start = time.perf_counter()
     LOGGER.info(
         "Building PSB pipeline machine fixture; root=%s, sequence=%s, excitation_scale=%.4f",
@@ -2189,9 +2384,7 @@ def _build_machine(
         ring=case.ring,
         kinetic_energy=case.kinetic_energy,
         sequence_file=seq_psb,
-        optimise_bends=True,
-        optimise_quadrupoles=True,
-        optimise_quad_dy=False,
+        errors={"bend": {"k0"}, "quad": {"k1"}},
     )
     iface = GradientDescentMadInterface(accelerator)
     try:
@@ -2240,8 +2433,8 @@ def _build_machine(
                 {
                     "X": frame["x"],
                     "Y": frame["y"],
-                    "ERRX": 1e-8,
-                    "ERRY": 1e-8,
+                    "ERRX": PSB_BPM_RESOLUTION,
+                    "ERRY": PSB_BPM_RESOLUTION,
                 },
                 index=frame.index,
             )
@@ -2249,7 +2442,9 @@ def _build_machine(
         }
 
         correctors = _corrector_strengths(corrector_file)
-        LOGGER.info("Loaded non-zero corrector strengths; count=%d, values=%s", len(correctors), correctors)
+        LOGGER.info(
+            "Loaded non-zero corrector strengths; count=%d, values=%s", len(correctors), correctors
+        )
         corrector_table = tfs.read(corrector_file)
         corrector_table = corrector_table.loc[
             ~corrector_table["kind"].astype(str).str.contains("monitor")  # ty:ignore[unresolved-attribute]
@@ -2381,8 +2576,7 @@ def test_psb_kicker_measurement_and_optimisation(
         ring=3,
         kinetic_energy=loaded_psb_interface.accelerator.kinetic_energy,
         sequence_file=seq_psb,
-        optimise_quadrupoles=True,
-        optimise_quad_dy=False,
+        errors={"quad": {"k1"}},
     )
     ctrl = KickerFitter(
         accelerator,
@@ -2419,13 +2613,9 @@ def test_psb_kicker_measurement_and_optimisation(
         [ctrl.initial_knobs[name] - magnet_strengths[name] for name in magnet_strengths]
     )
     estimated_strengths, _ = ctrl.run()
-    estimated_knobs = {
-        name: estimated_strengths[name] for name in ctrl.initial_knobs
-    }
+    estimated_knobs = {name: estimated_strengths[name] for name in ctrl.initial_knobs}
     final_loss = evaluate_controller_worker_loss(ctrl, estimated_knobs)
-    final_diff = _rms(
-        [estimated_knobs[name] - magnet_strengths[name] for name in estimated_knobs]
-    )
+    final_diff = _rms([estimated_knobs[name] - magnet_strengths[name] for name in estimated_knobs])
     truth_knobs = {name: magnet_strengths[name] for name in ctrl.initial_knobs}
     truth_loss = evaluate_controller_worker_loss(ctrl, truth_knobs)
     LOGGER.info(

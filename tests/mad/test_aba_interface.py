@@ -12,11 +12,9 @@ import tfs
 
 from aba_optimiser.accelerators import LHC
 from aba_optimiser.mad.aba_mad_interface import AbaMadInterface
-from src.aba_optimiser.physics.deltap import dp2pt as physics_dp2pt
 from tests.mad.helpers import (
     check_interface_basic_init,
     cleanup_interface,
-    get_marker_and_element_positions,
 )
 
 ORBIT_CORRECTION_BPMS = [f"BPM.{i}R2.B1" for i in range(9, 13)]
@@ -188,9 +186,7 @@ class TestDp2pt:
         dp = 0.01
         pt = interface.dp2pt(dp)
         # Compare with physics calculation
-        mass = 0.938  # proton mass
-        pc = interface.mad.loaded_sequence.beam.pc
-        expected_pt = physics_dp2pt(dp, mass, pc=pc)
+        expected_pt = interface.accelerator.dp2pt(dp)
         assert np.isclose(pt, expected_pt, rtol=1e-12, atol=1e-13)
 
     def test_negative_dp(self, loaded_interface: AbaMadInterface):
@@ -199,9 +195,7 @@ class TestDp2pt:
         dp = -0.005
         pt = interface.dp2pt(dp)
         # Compare with physics calculation
-        mass = 0.938
-        pc = interface.mad.loaded_sequence.beam.pc
-        expected_pt = physics_dp2pt(dp, mass, pc=pc)
+        expected_pt = interface.accelerator.dp2pt(dp)
         assert np.isclose(pt, expected_pt, rtol=1e-12, atol=1e-13)
 
     def test_high_energy_approximation(self, loaded_interface: AbaMadInterface):

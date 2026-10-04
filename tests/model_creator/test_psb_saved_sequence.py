@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import tfs
 
 from aba_optimiser.accelerators import PSB
 from aba_optimiser.mad.aba_mad_interface import AbaMadInterface
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 NATURAL_TUNES = (0.17, 0.225)
 DRIVEN_TUNES = (0.162, 0.232)

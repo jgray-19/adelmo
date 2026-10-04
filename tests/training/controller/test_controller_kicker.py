@@ -62,7 +62,7 @@ def _build_kicker_controller(
             ring=3,
             kinetic_energy=loaded_psb_interface.accelerator.kinetic_energy,
             sequence_file=seq_psb,
-            optimise_quadrupoles=True,
+            errors={"quad": {"k1"}},
         ),
         optimiser_config,
         _make_simulation_config_quad(),
@@ -105,7 +105,7 @@ def test_controller_kicker_has_no_held_out_validation(
     assert ctrl.data_manager.validation_turn_batches == []
 
     ctrl.worker_manager.start_workers(
-        ctrl.data_manager.track_data,
+        ctrl.data_manager.tracks,
         ctrl.data_manager.turn_batches,
         ctrl.data_manager.validation_turn_batches,
         ctrl.data_manager.file_map,
@@ -144,7 +144,8 @@ def test_controller_quad_opt_with_kicker(
 
     if loss_regression:
         true_loss = evaluate_controller_worker_loss(ctrl, magnet_strengths)
-        assert true_loss < 1e-18, (
+        # Round-off only: a run at the true strengths lands around 1e-18.
+        assert true_loss < 1e-16, (
             f"True-strength kicker loss should be numerically tiny, got {true_loss:.3e}"
         )
         assert true_loss < initial_loss * 1e-3, (

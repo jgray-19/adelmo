@@ -66,7 +66,7 @@ def _matching_quadrupoles(iface: GenericMadInterface) -> dict[str, float]:
 @pytest.fixture(scope="function")
 def tilt_iface(seq_psb: Path) -> GradientDescentMadInterface:
     """Interface for PSB ring 3 with quadrupole tilt knobs enabled."""
-    accelerator = PSB(ring=3, sequence_file=seq_psb, optimise_quad_tilt=True)
+    accelerator = PSB(ring=3, sequence_file=seq_psb, misalignments={"quad": {"tilt"}})
     iface = GradientDescentMadInterface(accelerator=accelerator, discard_mad_output=True)
     yield iface
     with contextlib.suppress(Exception):
@@ -146,7 +146,7 @@ def test_tilt_knobs_leave_vertical_offsets_working(seq_psb: Path) -> None:
     The two reach the element by different routes, and the ``misalign`` table
     ``dy`` uses is replaced wholesale whenever it is built.
     """
-    accelerator = PSB(ring=3, sequence_file=seq_psb, optimise_quad_tilt=True, optimise_quad_dy=True)
+    accelerator = PSB(ring=3, sequence_file=seq_psb, misalignments={"quad": {"dy", "tilt"}})
     iface = GradientDescentMadInterface(accelerator=accelerator, discard_mad_output=True)
     try:
         dy_knobs = [k for k in iface.knob_names if k.endswith(".dy")]
@@ -167,7 +167,7 @@ def test_tilt_knobs_leave_vertical_offsets_working(seq_psb: Path) -> None:
 
 
 def test_tilt_knobs_are_off_by_default(seq_psb: Path) -> None:
-    """``optimise_quad_tilt`` defaults off, and enabling it adds nothing but tilts.
+    """Quadrupole ``tilt`` misalignments default off, and enabling it adds nothing but tilts.
 
     Compared on the full ordered knob list, so existing fits are unaffected.
     """
@@ -182,13 +182,11 @@ def test_tilt_knobs_are_off_by_default(seq_psb: Path) -> None:
             with contextlib.suppress(Exception):
                 del iface
 
-    baseline = knob_names(optimise_quadrupoles=True, optimise_quad_dy=True)
+    baseline = knob_names(errors={"quad": {"k1"}}, misalignments={"quad": {"dy"}})
     assert baseline, "the baseline configuration should produce knobs"
     assert not [k for k in baseline if k.endswith(".tilt")]
 
-    with_tilts = knob_names(
-        optimise_quadrupoles=True, optimise_quad_dy=True, optimise_quad_tilt=True
-    )
+    with_tilts = knob_names(errors={"quad": {"k1"}}, misalignments={"quad": {"dy", "tilt"}})
     assert [k for k in with_tilts if not k.endswith(".tilt")] == baseline
     assert [k for k in with_tilts if k.endswith(".tilt")]
 

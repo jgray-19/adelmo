@@ -11,7 +11,7 @@ same b2 errors through ``dknl[2]`` -- and asserts the two twiss agree on phase
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -23,9 +23,6 @@ from pymadng_utils.madx.make_sequence import make_madx_sequence
 
 from aba_optimiser.accelerators import LHC
 from aba_optimiser.mad.optimising_mad_interface import GenericMadInterface
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 BEAM = 1
 ENERGY_GEV = 6800.0
@@ -86,12 +83,13 @@ def _extract_kqt_knobs(b2_settings_madx: Path) -> dict[str, float]:
     MAD-X instance resolves them without loading the sequence. The MAD-NG MADX
     environment uses underscores, so ``kqtf.a12b1`` is stored as ``kqtf_a12b1``.
     """
-    madx = Madx(stdout=open(os.devnull, "w"))
-    try:
-        madx.call(str(b2_settings_madx))
-        return {name.replace(".", "_"): float(madx.globals[name]) for name in KQT_MADX_NAMES}
-    finally:
-        madx.quit()
+    with Path(os.devnull).open("w") as devnull:
+        madx = Madx(stdout=devnull)
+        try:
+            madx.call(str(b2_settings_madx))
+            return {name.replace(".", "_"): float(madx.globals[name]) for name in KQT_MADX_NAMES}
+        finally:
+            madx.quit()
 
 
 def _phase_advances(table: tfs.TfsDataFrame, column: str, bpms: list[str]) -> np.ndarray:

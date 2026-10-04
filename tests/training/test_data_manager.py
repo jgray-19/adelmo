@@ -7,19 +7,18 @@ import pytest
 
 from aba_optimiser.config import SimulationConfig
 from aba_optimiser.training.config.tracking import (
-    ArcByArcTrackingPlan,
+    TrackingPlan,
     _boundary_turns_for_track,
 )
-from aba_optimiser.training.data_manager import DataManager
+from aba_optimiser.training.data_manager import DataManager, _marker_order
 from aba_optimiser.training.workers.turn_planner import (
     _allocate_batches_per_file,
-    _get_range_spec_plan,
 )
 from aba_optimiser.training.workers.turn_planner import (
     group_turns_by_file as _group_turns_by_file,
 )
 
-_DEFAULT_TRACKING_PLAN = ArcByArcTrackingPlan()
+_DEFAULT_TRACKING_PLAN = TrackingPlan()
 
 
 def _make_track_df(turns: list[int], bpm_name: str = "BPM.1") -> pd.DataFrame:
@@ -37,6 +36,12 @@ def _make_track_df(turns: list[int], bpm_name: str = "BPM.1") -> pd.DataFrame:
             "var_py": [1.0] * len(turns),
         }
     ).set_index(["turn", "name"])
+
+
+def _range_spec_plan(*, use_fixed_bpm: bool, num_starts: int, num_ends: int):
+    return _DEFAULT_TRACKING_PLAN.range_specs_per_batch(
+        use_fixed_bpm=use_fixed_bpm, num_starts=num_starts, num_ends=num_ends
+    )
 
 
 def _single_bunch_by_file(*turn_lists: list[int]) -> dict[int, dict[int, list[int]]]:
@@ -64,7 +69,6 @@ def test_prepare_turn_batches_distributes_all_training_turns_across_workers() ->
         simulation_config=SimulationConfig(
             num_workers=6,
             num_batches=1,
-            run_arc_by_arc=True,
             n_run_turns=1,
             validation_fraction=0.0,
         ),
@@ -72,7 +76,7 @@ def test_prepare_turn_batches_distributes_all_training_turns_across_workers() ->
         tracking_plan=_DEFAULT_TRACKING_PLAN,
         shuffle_turns=lambda turns: None,
     )
-    data_manager.track_data = {0: _make_track_df(list(range(12)))}
+    data_manager.tracks = {0: None}
     data_manager.available_turns = list(range(12))
     data_manager.bunch_turns_by_file = _single_bunch_by_file(list(range(12)))
     data_manager.file_map = dict.fromkeys(range(12), 0)
@@ -95,7 +99,6 @@ def test_prepare_turn_batches_keeps_batches_within_their_file() -> None:
         simulation_config=SimulationConfig(
             num_workers=8,
             num_batches=1,
-            run_arc_by_arc=True,
             n_run_turns=1,
             validation_fraction=0.0,
         ),
@@ -103,10 +106,7 @@ def test_prepare_turn_batches_keeps_batches_within_their_file() -> None:
         tracking_plan=_DEFAULT_TRACKING_PLAN,
         shuffle_turns=lambda turns: None,
     )
-    data_manager.track_data = {
-        0: _make_track_df(file0_turns),
-        1: _make_track_df(file1_turns),
-    }
+    data_manager.tracks = dict.fromkeys(range(2))
     data_manager.available_turns = file0_turns + file1_turns
     data_manager.bunch_turns_by_file = _single_bunch_by_file(file0_turns, file1_turns)
     data_manager.file_map = dict.fromkeys(file0_turns, 0) | dict.fromkeys(file1_turns, 1)
@@ -132,25 +132,21 @@ def test_prepare_turn_batches_caps_batches_at_num_workers() -> None:
         simulation_config=SimulationConfig(
             num_workers=60,
             num_batches=2,
-            run_arc_by_arc=False,
             n_run_turns=1,
             validation_fraction=0.0,
         ),
         measurement_files=["file0.parquet"],
         tracking_plan=_DEFAULT_TRACKING_PLAN,
     )
-    data_manager.track_data = {0: _make_track_df(list(range(total_turns)))}
+    data_manager.tracks = {0: None}
     data_manager.available_turns = list(range(total_turns))
     data_manager.bunch_turns_by_file = _single_bunch_by_file(list(range(total_turns)))
     data_manager.file_map = dict.fromkeys(range(total_turns), 0)
 
     data_manager.prepare_turn_batches(_config_manager(["BPM.1"], []))
 
-    range_specs_per_batch, _ = _get_range_spec_plan(
-        run_arc_by_arc=False,
-        use_fixed_bpm=True,
-        num_starts=1,
-        num_ends=0,
+    range_specs_per_batch, _ = _range_spec_plan(
+        use_fixed_bpm=True, num_starts=1, num_ends=0
     )
     assert len(data_manager.turn_batches) == 60 // range_specs_per_batch
     # Batch sizes are trimmed to an even multiple of num_batches=2.
@@ -165,7 +161,6 @@ def test_prepare_turn_batches_num_batches_does_not_inflate_worker_groups() -> No
         simulation_config=SimulationConfig(
             num_workers=60,
             num_batches=40,
-            run_arc_by_arc=True,
             use_fixed_bpm=True,
             n_run_turns=1,
             validation_fraction=0.0,
@@ -173,18 +168,15 @@ def test_prepare_turn_batches_num_batches_does_not_inflate_worker_groups() -> No
         measurement_files=["file0.parquet"],
         tracking_plan=_DEFAULT_TRACKING_PLAN,
     )
-    data_manager.track_data = {0: _make_track_df(list(range(400)))}
+    data_manager.tracks = {0: None}
     data_manager.available_turns = list(range(400))
     data_manager.bunch_turns_by_file = _single_bunch_by_file(list(range(400)))
     data_manager.file_map = dict.fromkeys(range(400), 0)
 
     data_manager.prepare_turn_batches(_config_manager(["BPM.1", "BPM.2"], []))
 
-    range_specs_per_batch, _ = _get_range_spec_plan(
-        run_arc_by_arc=True,
-        use_fixed_bpm=True,
-        num_starts=2,
-        num_ends=0,
+    range_specs_per_batch, _ = _range_spec_plan(
+        use_fixed_bpm=True, num_starts=2, num_ends=0
     )
     assert len(data_manager.turn_batches) == 60 // range_specs_per_batch
     assert len(data_manager.turn_batches) * range_specs_per_batch == 60
@@ -200,7 +192,6 @@ def test_prepare_turn_batches_holds_out_disjoint_validation_turns() -> None:
         simulation_config=SimulationConfig(
             num_workers=4,
             num_batches=1,
-            run_arc_by_arc=True,
             n_run_turns=1,
             validation_fraction=0.25,
             data_fraction=1.0,
@@ -209,7 +200,7 @@ def test_prepare_turn_batches_holds_out_disjoint_validation_turns() -> None:
         tracking_plan=_DEFAULT_TRACKING_PLAN,
         shuffle_turns=lambda turns: None,
     )
-    data_manager.track_data = {0: _make_track_df(turns)}
+    data_manager.tracks = {0: None}
     data_manager.available_turns = list(turns)
     data_manager.bunch_turns_by_file = _single_bunch_by_file(turns)
     data_manager.file_map = dict.fromkeys(turns, 0)
@@ -238,7 +229,6 @@ def test_prepare_turn_batches_data_fraction_samples_training_turns() -> None:
         simulation_config=SimulationConfig(
             num_workers=1,
             num_batches=1,
-            run_arc_by_arc=True,
             n_run_turns=1,
             validation_fraction=0.0,
             data_fraction=0.5,
@@ -247,7 +237,7 @@ def test_prepare_turn_batches_data_fraction_samples_training_turns() -> None:
         tracking_plan=_DEFAULT_TRACKING_PLAN,
         shuffle_turns=lambda turns: None,
     )
-    data_manager.track_data = {0: _make_track_df(turns)}
+    data_manager.tracks = {0: None}
     data_manager.available_turns = list(turns)
     data_manager.bunch_turns_by_file = _single_bunch_by_file(turns)
     data_manager.file_map = dict.fromkeys(turns, 0)
@@ -274,7 +264,6 @@ def test_prepare_turn_batches_holds_out_disjoint_validation_across_files() -> No
         simulation_config=SimulationConfig(
             num_workers=8,
             num_batches=1,
-            run_arc_by_arc=True,
             n_run_turns=1,
             validation_fraction=0.25,
             data_fraction=1.0,
@@ -283,10 +272,7 @@ def test_prepare_turn_batches_holds_out_disjoint_validation_across_files() -> No
         tracking_plan=_DEFAULT_TRACKING_PLAN,
         shuffle_turns=lambda turns: None,
     )
-    data_manager.track_data = {
-        0: _make_track_df(file0_turns),
-        1: _make_track_df(file1_turns),
-    }
+    data_manager.tracks = dict.fromkeys(range(2))
     data_manager.available_turns = file0_turns + file1_turns
     data_manager.bunch_turns_by_file = _single_bunch_by_file(file0_turns, file1_turns)
     data_manager.file_map = dict.fromkeys(file0_turns, 0) | dict.fromkeys(file1_turns, 1)
@@ -322,7 +308,6 @@ def test_prepare_turn_batches_keeps_all_turns_when_too_little_to_hold_out() -> N
         simulation_config=SimulationConfig(
             num_workers=1,
             num_batches=1,
-            run_arc_by_arc=True,
             n_run_turns=1,
             validation_fraction=0.25,
             data_fraction=1.0,
@@ -331,7 +316,7 @@ def test_prepare_turn_batches_keeps_all_turns_when_too_little_to_hold_out() -> N
         tracking_plan=_DEFAULT_TRACKING_PLAN,
         shuffle_turns=lambda turns: None,
     )
-    data_manager.track_data = {0: _make_track_df(turns)}
+    data_manager.tracks = {0: None}
     data_manager.available_turns = list(turns)
     data_manager.bunch_turns_by_file = _single_bunch_by_file(turns)
     data_manager.file_map = dict.fromkeys(turns, 0)
@@ -382,7 +367,6 @@ def test_get_total_turns_counts_multi_turn_tracking_samples() -> None:
         simulation_config=SimulationConfig(
             num_workers=1,
             num_batches=1,
-            run_arc_by_arc=False,
             n_run_turns=256,
         ),
         measurement_files=["file0.parquet"],
@@ -393,50 +377,33 @@ def test_get_total_turns_counts_multi_turn_tracking_samples() -> None:
     assert data_manager.get_total_turns() == 256
 
 
-def test_cycle_ring_to_first_bpm_uses_next_available_model_bpm_when_requested_is_missing(
-) -> None:
-    data_manager = DataManager(
-        bpms_in_range=["BPM.A", "BPM.C", "BPM.D"],
-        all_bpms=["BPM.A", "BPM.BAD", "BPM.C", "BPM.D"],
-        simulation_config=SimulationConfig(
-            num_workers=1,
-            num_batches=1,
-        ),
-        measurement_files=["file0.parquet"],
-        tracking_plan=_DEFAULT_TRACKING_PLAN,
-        first_bpms=["BPM.BAD"],
+def test_marker_order_projects_a_missing_first_bpm_onto_the_next_recorded_one() -> None:
+    """The requested boundary BPM is absent from this file, so its successor is used."""
+    frame = pd.DataFrame({"name": ["BPM.D", "BPM.A", "BPM.C"]})
+
+    order = _marker_order(frame, ["BPM.A", "BPM.BAD", "BPM.C", "BPM.D"], "BPM.BAD")
+
+    assert order == ["BPM.C", "BPM.D", "BPM.A"]
+
+
+def test_marker_order_places_a_non_ring_marker_before_the_first_bpm() -> None:
+    """A kicker marker is recorded just before tracking starts, so it sorts first."""
+    frame = pd.DataFrame({"name": ["KICKER", "BPM.A", "BPM.B", "BPM.C"]})
+
+    order = _marker_order(frame, ["BPM.A", "BPM.B", "BPM.C"], "KICKER")
+
+    assert order == ["KICKER", "BPM.A", "BPM.B", "BPM.C"]
+
+
+def test_range_spec_plan_counts_workers_per_turn_batch() -> None:
+    assert _range_spec_plan(use_fixed_bpm=True, num_starts=2, num_ends=4) == (
+        6,
+        "fixed pairs (2 starts + 4 ends)",
     )
-
-    cycled = data_manager._cycle_ring_to_first_bpm(
-        0,
-        ring_bpms=["BPM.A", "BPM.C", "BPM.D"],
-        appearance=["BPM.D", "BPM.A", "BPM.C"],
+    assert _range_spec_plan(use_fixed_bpm=False, num_starts=2, num_ends=3) == (
+        12,
+        "2 directions x 2 starts x 3 ends",
     )
-
-    assert cycled == ["BPM.C", "BPM.D", "BPM.A"]
-
-
-def test_get_range_spec_plan_modes() -> None:
-    assert _get_range_spec_plan(
-        run_arc_by_arc=False,
-        use_fixed_bpm=False,
-        num_starts=3,
-        num_ends=5,
-    ) == (6, "2 directions x 3 start BPMs")
-
-    assert _get_range_spec_plan(
-        run_arc_by_arc=True,
-        use_fixed_bpm=True,
-        num_starts=2,
-        num_ends=4,
-    ) == (6, "fixed pairs (2 starts + 4 ends)")
-
-    assert _get_range_spec_plan(
-        run_arc_by_arc=True,
-        use_fixed_bpm=False,
-        num_starts=2,
-        num_ends=3,
-    ) == (12, "2 directions x 2 starts x 3 ends")
 
 
 def test_group_turns_by_file_partitions_turns() -> None:
@@ -476,7 +443,6 @@ def test_select_available_turns_removes_boundaries_per_bunch() -> None:
         simulation_config=SimulationConfig(
             num_workers=1,
             num_batches=1,
-            run_arc_by_arc=True,
         ),
         available_turns=available_turns,
     )

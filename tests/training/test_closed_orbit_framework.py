@@ -120,7 +120,12 @@ def test_batched_measurements_keep_distinct_signal_orbits_and_share_only_referen
     worker.knob_name_set = set()
     worker.control_nominal = 1.0
     worker.control_delta = 2.0
+    worker.machine_state = {}
+    worker._baseline = {}
     worker._subtract = np.ones(1)
+    worker.weight_scale = 1.0  # the alignment below uses weights == raw weights
+    worker.shared_reference = False
+    worker.reference_only = False
     worker.series_measurements = [
         ClosedOrbitMeasurementData([Observable("x", np.array([11.0]), np.ones(1))], pt=1.0),
         ClosedOrbitMeasurementData([Observable("x", np.array([22.0]), np.ones(1))], pt=2.0),
@@ -138,7 +143,7 @@ def test_batched_measurements_keep_distinct_signal_orbits_and_share_only_referen
     def set_pt(self, _mad, value):
         current["pt"] = value
 
-    def model(self, _mad):
+    def model(self, _mad, *, context=""):
         state = (current["control"], current["pt"])
         states.append(state)
         value = state[0] + 10.0 * state[1]

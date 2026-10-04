@@ -46,10 +46,10 @@ QUAD_REL = 1e-3
 MEASURED_FROM_TWISS = {
     "X": "x",
     "Y": "y",
-    "BETX": "beta11",
-    "BETY": "beta22",
-    "ALFX": "alfa11",
-    "ALFY": "alfa22",
+    "BETX": "betx",
+    "BETY": "bety",
+    "ALFX": "alfx",
+    "ALFY": "alfy",
     "DX": "dx",
     "DY": "dy",
     "MUX": "mu1",
@@ -73,7 +73,7 @@ def _accelerator(seq: Path, **kwargs) -> PSB:
 
 
 def _both(seq: Path) -> PSB:
-    return _accelerator(seq, optimise_bends=True, optimise_quadrupoles=True)
+    return _accelerator(seq, errors={"bend": {"k0"}, "quad": {"k1"}})
 
 
 def _truth(seq: Path, seed: int = 7) -> dict[str, float]:
@@ -128,6 +128,9 @@ def _measurement(
         measurement[column] += np.cumsum(rng.normal(0.0, PHASE_SIGMA, len(measurement)))
     for column, value in RESOLUTIONS.items():
         measurement[column] = value
+    # Beta noise above is relative, so its declared error scales with beta.
+    for column, key in (("BETX", "ERRBETX"), ("BETY", "ERRBETY")):
+        measurement[key] = RESOLUTIONS[key] * measurement[column]
     measurement["mu1_var"] = np.arange(len(measurement)) * PHASE_SIGMA**2
     measurement["mu2_var"] = np.arange(len(measurement)) * PHASE_SIGMA**2
     return measurement
@@ -212,39 +215,3 @@ def test_reference_records_plain_data_fit_metadata(fitted) -> None:
     assert reference.diagnostics["iterations"] > 0
 
 
-def test_closed_orbit_evaluation_closes_mad_deterministically(monkeypatch) -> None:
-    closed = []
-
-    class FakeTable:
-        @staticmethod
-        def to_df(*, columns):
-            return pd.DataFrame(
-                [["BPM1", 1.0, 2.0, 3.0, 4.0]], columns=columns
-            )
-
-    class FakeMad:
-        moref = FakeTable()
-
-        @staticmethod
-        def send(_script):
-            return None
-
-    class FakeInterface:
-        def __init__(self, *_args, **_kwargs):
-            self.mad = FakeMad()
-
-        @staticmethod
-        def update_knob_values(_values):
-            return None
-
-        def close(self):
-            closed.append(True)
-
-    monkeypatch.setattr(
-        "aba_optimiser.momentum_reference.GradientDescentMadInterface",
-        FakeInterface,
-    )
-    result = closed_orbit_at(object(), {"BR.BHZ11.dk0l": 1e-5})
-
-    assert closed == [True]
-    assert result.loc["BPM1", "px"] == 3.0

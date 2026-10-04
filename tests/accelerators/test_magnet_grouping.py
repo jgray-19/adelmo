@@ -5,9 +5,28 @@ from __future__ import annotations
 import pytest
 
 from aba_optimiser.accelerators.magnet_grouping import (
+    collapse_psb_grouped_quadrupole_knobs,
     expand_psb_grouped_quadrupole_knobs,
     normalise_lhcbend_magnets,
 )
+
+
+def test_psb_physical_qfo_pair_collapses_to_grouped_knob() -> None:
+    assert collapse_psb_grouped_quadrupole_knobs(
+        {"BR.QFO111.dk1l": 2e-4, "BR.QFO112.dk1l": 2e-4, "BR.QDE11.dk1l": 1e-4}
+    ) == {"BR.QFOCELL11.dk1l": 2e-4, "BR.QDE11.dk1l": 1e-4}
+
+
+@pytest.mark.parametrize(
+    "values, message",
+    [
+        ({"BR.QFO111.dk1l": 2e-4}, "needs both"),
+        ({"BR.QFO111.dk1l": 2e-4, "BR.QFO112.dk1l": 3e-4}, "unequal"),
+    ],
+)
+def test_psb_invalid_physical_qfo_warm_start_is_rejected(values, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        collapse_psb_grouped_quadrupole_knobs(values)
 
 
 def test_psb_grouped_qfo_value_expands_to_both_physical_magnets() -> None:
