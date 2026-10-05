@@ -266,6 +266,9 @@ class ClosedOrbitWorker(ClosedTwissWorker):
             optics_values = np.empty((0, n_bpms))
             optics_jacobian = np.empty((0, n_bpms, n_knobs))
 
+        if not self.optics_names:  # orbit coordinates only: already in observable order, no second 112 MB array
+            return orbit_values, orbit_jacobian
+
         # Re-interleave into the caller's observable order, exactly as
         # ClosedTwissWorker.compute_gradients_and_loss does for its own single
         # measurement -- here duplicated because this worker caches signal and

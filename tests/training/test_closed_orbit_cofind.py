@@ -233,14 +233,12 @@ def test_lost_closed_orbit_is_reported_and_recovered_from(seq_psb: Path) -> None
     """No closed orbit -> ``false`` from both solvers; the next sane call still works.
 
     The optimiser turns the ``false`` into a NaN loss and backtracks, so it must be
-    reported, and it must not poison the call that follows. That is why
-    ``compute_closed_orbit`` starts every solve from a fresh copy of ``x0map`` rather than
-    reusing the previous orbit: cofind updates the copy in place.
+    reported, and it must not poison the call that follows.
 
     A linear lattice always has a closed orbit, even an optically unstable one, so knob
-    values cannot force a loss short of crashing MAD-NG. A starting orbit 10 m off axis
-    does: the particle is lost before cofind can converge. ``x0map`` is what both solvers
-    copy their start from, so it is the one lever that hits them identically.
+    values cannot force a loss short of crashing MAD-NG. A momentum deviation of
+    ``pt = 10`` does. ``x0map.pt`` is the one lever both solvers read (``compute_closed_orbit``
+    seeds its plain ``cofind`` from it alone), so it hits them identically.
     """
     kwargs = {"misalignments": {"quad": {"dx"}}}
     iface = GradientDescentMadInterface(
@@ -250,11 +248,11 @@ def test_lost_closed_orbit_is_reported_and_recovered_from(seq_psb: Path) -> None
     _send_init(iface, [next(k for k in iface.knob_names if k != "pt")], ["beta11_"], 0.0)
 
     for solver in ("compute_closed_orbit", "compute_closed_twiss"):
-        mad.send("x0map.x:set0(10)")
+        mad.send("x0map.pt:set0(10)")
         mad.send(f"{solver}()")
         assert not mad.recv(), f"{solver} should report a lost closed orbit from x0 = 10 m"
 
-        mad.send("x0map.x:set0(0)")
+        mad.send("x0map.pt:set0(0)")
         mad.send(f"{solver}()")
         assert mad.recv(), f"{solver} did not recover after a lost closed orbit"
     del iface

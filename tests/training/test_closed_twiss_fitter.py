@@ -511,6 +511,7 @@ def _analytic_orbit_jacobian(
     mad["knob_names"] = knobs
     mad["optics_columns"] = []
     mad["orbit_coords"] = ["x", "y"]
+    mad["nbpms"] = len(iface.all_bpms)
     mad.send(
         "\n".join(
             line

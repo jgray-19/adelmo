@@ -61,6 +61,7 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
         self.loss_only_trials = bool(loss_only_trials)
         self.sigma_bpm = float(sigma_bpm)
         self.sigma_corrector = float(sigma_corrector)
+        self._part: CalibrationBlocks | None = None  # receive buffer of _collect_calibrated
         self.calibration_result: dict[str, float] = {}
         self.calibration_spec: CalibrationSpec | None = None
         super().__init__(*args, **kwargs)
@@ -92,12 +93,10 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
     def _collect_calibrated(self, channels, knobs: dict[str, float]) -> tuple[CalibrationBlocks, float] | None:
         """Sum every worker's blocks; ``None`` if any worker lost its closed orbit."""
         channels.send_all((knobs, 0))
-        results = channels.recv_all()
-        if not results:
-            raise RuntimeError("No closed-orbit workers returned results")
         total, unit = None, 1.0
         lost = False
-        for result in results:
+        for index in range(len(channels.workers)):  # one payload at a time: each is ~n_u x n_b doubles
+            (result,) = channels.recv_some([index])
             if not isinstance(result, tuple) or len(result) != 5:
                 raise RuntimeError(f"Unexpected closed-orbit worker payload: {result!r}")
             _, _, loss, _, payload = result
@@ -106,12 +105,17 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
             if np.isnan(loss):
                 lost = True
                 continue
-            part = CalibrationBlocks.from_payload(payload)
             unit = payload["loss_unit"]
+            conn = channels.parent_conns[index]
             if total is None:
-                total = part
-            else:
-                total.add(part)
+                total = CalibrationBlocks.from_payload(payload)
+                total.recv_arrays(conn)
+            else:  # read into one reused buffer, then add: no copy of the 170 MB through a pickle
+                if self._part is None:
+                    self._part = CalibrationBlocks.from_payload(payload)
+                self._part.loss = payload["loss"]
+                self._part.recv_arrays(conn)
+                total.add(self._part)
         return None if lost or total is None else (total, unit)
 
     def _collect_loss_only(self, channels, knobs: dict[str, float]) -> tuple[float, float] | None:

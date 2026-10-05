@@ -496,8 +496,8 @@ def _make_optimiser_config_quad() -> OptimiserConfig:
         max_epochs=300,
         warmup_epochs=200,
         warmup_lr_start=1e-4,
-        max_lr=1e-6,
-        min_lr=1e-6,
+        max_lr=1e-4,
+        min_lr=1e-4,
         gradient_converged_value=5e-14,
     )
 

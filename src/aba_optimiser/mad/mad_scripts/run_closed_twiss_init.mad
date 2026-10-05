@@ -24,9 +24,9 @@
 ! their knob derivatives are read from the saved map's linear part instead.
 !
 ! When *only* orbit coordinates are observed (``optics_columns`` is empty) none of
-! that machinery is needed, and ``compute_closed_orbit`` replaces ``twiss``: it runs
-! ``cofind`` alone, and tracks a single parametric map that already carries the
-! closed orbit's knob dependence. See ``compute_closed_orbit`` below.
+! that machinery is needed, and ``compute_closed_orbit`` replaces ``twiss``: a plain
+! ``cofind`` finds the closed orbit and ONE parametric pass gives its knob derivatives.
+! See ``compute_closed_orbit`` below.
 !
 ! Assumes the following globals are already defined (set by the worker):
 !   loaded_sequence   : the sequence to compute the closed twiss of
@@ -49,11 +49,6 @@ local cofind, track in MAD
 local normal in MAD.gphys
 
 num_knobs = #knob_names
-
-local get_range = vector(num_knobs):seq(7)
-local function get_knob_vec(coord_tpsa)
-    return coord_tpsa:getvec(1, num_knobs + 7):getvec(get_range)
-end
 
 ! Identity parametric map over the 6 phase-space coords + one parameter per knob.
 !
@@ -115,8 +110,9 @@ function compute_closed_twiss()
 end
 
 ! Orbit buffers, allocated once (first use) and only zeroed per computation.
-! ``orbit_val[coord]`` is a vector and ``orbit_jac[coord]`` an (nbpm x nknob) matrix.
+! ``orbit_val[coord]`` is a vector and ``orbit_jac[coord]`` an (nbpm x nknob) matrix;
 local orbit_n, orbit_names, orbit_val, orbit_jac, orbit_ready = 0, {}, {}, {}, false
+local orbit_row = vector(num_knobs)
 
 local function reset_orbit()
     if not orbit_ready then
@@ -142,49 +138,54 @@ local function save_orbit(elm, mflw, _, slc)
     for _, coord in ipairs(orbit_coords) do orbit_val[coord]:seti(orbit_n, mflw[1][coord]:get0()) end
 end
 
-! Orbit values and, filled straight into the Jacobian rows, d(orbit)/d(knob)
-! (compute_closed_orbit). Also records the BPM names.
+! Orbit values and, filled straight into the Jacobian rows, d(orbit)/d(knob) (compute_closed_orbit).
+! Also records the BPM names. Coefficient 0 of a coordinate TPSA is the constant, 1-6 the phase space, 7.. the knobs.
 local function save_orbit_jac(elm, mflw, _, slc)
     if slc ~= -4 or not elm:is_observed() then return end
     orbit_n = orbit_n + 1
     orbit_names[orbit_n] = elm.name
     for _, coord in ipairs(orbit_coords) do
-        orbit_val[coord]:seti(orbit_n, mflw[1][coord]:get0())
-        orbit_jac[coord]:setrow(orbit_n, get_knob_vec(mflw[1][coord]))
+        local tpsa = mflw[1][coord]
+        orbit_val[coord]:seti(orbit_n, tpsa:get0())
+        orbit_jac[coord]:setrow(orbit_n, tpsa:getvec(8, orbit_row))
     end
 end
 
-! Closed orbit and its knob derivatives without ``twiss``.
-!
-! ``twiss`` also normalises the parametric one-turn map and tracks the normal form
-! to fill every optical-function column, none of which an orbit observable reads.
-! Only two things are needed, and MAD-NG provides both without it:
-!
-!   1. ``cofind`` finds the closed orbit X0. It iterates on a map truncated to
-!      order 1, and leaves that one-turn map in the damap it was given: R, the
-!      linear part, and P = dM/dk, the knob part (the parameters are first order).
-!   2. The closed orbit moves with the knobs as dX0/dk = (I-R)^-1 P. ``normal``
-!      returns it as the knob terms of the normalising map, as twiss uses it.
-!      Tracking that map once makes the saved map at each BPM carry d(orbit)/dk
-!      directly: d x_i / dk = R_i dX0/dk + P_i, with R_i and P_i the map from the
-!      start to BPM i. send_orbit_only reads it out.
-function compute_closed_orbit()
-    -- Fresh copy each call: cofind updates a damap in place when ``nocopy`` is
-    -- set, and leaves the one-turn map in it, which must not leak into x0map.
-    local start = x0map:copy()
-    start.nocopy = true
-    cofind{
+! Closed orbit with the knobs as plain numbers (call between knobs_to_plain() and knobs_to_param()): cofind from a plain
+! start builds its own 6-variable map. Returns the one-turn map; its status is 'stable' at a closed orbit.
+local function plain_cofind(atexit)
+    local _, mflw = cofind{
         sequence = loaded_sequence,
-        X0       = start,
         method   = 6,
+        observe  = 1,
+        X0       = { pt = x0map.pt:get0() },  -- the fixed momentum pinned by the worker on x0map
+        save     = false,
+        atexit   = atexit,
     }
-    if start.status ~= 'stable' then
+    return mflw[1]
+end
+
+! Closed orbit and its knob derivatives without ``twiss``, which also normalises the parametric one-turn map and tracks
+! the normal form to fill every optical-function column, none of which an orbit observable reads. Three steps:
+!
+!   1. ``cofind`` with the knobs as plain numbers finds the closed orbit X0.
+!   2. ``track`` of the parametric map from X0 gives the one-turn map (R, and P = dM/dk the knob part); ``normal`` returns
+!      the closed orbit's knob dependence in the knob terms of the normalising map, as twiss uses it.
+!   3. ``track`` of that map: the saved map at each BPM then carries d(orbit)/dk directly. send_orbit_only reads it out.
+function compute_closed_orbit()
+    knobs_to_plain()
+    local ok, plain = pcall(plain_cofind)
+    knobs_to_param()  -- whatever happened: the worker's knob updates need the parameters
+    if not ok or plain.status ~= 'stable' then
         python:send(false, true)
         return
     end
 
-    -- Seed the closed orbit's knob dependence exactly as twiss does: the
-    -- normalising map carries the parametric closed orbit in its knob terms.
+    -- Fresh copy each call: ``nocopy`` makes the tracked map the one-turn map, which must not leak into x0map.
+    local start = x0map:copy()
+    start.nocopy = true
+    start:set0(plain:get0())
+    track{ sequence = loaded_sequence, X0 = start, method = 6, save = false }
     local nf = normal(start)
     nf.a:copy(start):set0(nf.x0)
 
@@ -214,10 +215,6 @@ function send_orbit_only()
     end
 end
 
-if orbit_only then
-    plain_map = MAD.damap { nv = #coord_names, mo = 1, vn = coord_names }
-end
-
 function knobs_to_plain()
     for _, p in ipairs(knob_names) do loaded_sequence[p] = loaded_sequence[p]:get0() end
 end
@@ -228,11 +225,8 @@ end
 
 ! After knobs_to_plain(): sends success, then each orbit coordinate's values in BPM order.
 function compute_orbit_plain_core()
-    local start = plain_map:copy()
-    start.nocopy = true
-    start.pt:set0(x0map.pt:get0())  -- the fixed momentum pinned by the worker on x0map
     reset_orbit()
-    cofind{ sequence = loaded_sequence, X0 = start, method = 6, observe = 1, save = false, atexit = save_orbit }
+    local start = plain_cofind(save_orbit)
     -- orbit_n must be exactly nbpms: fewer means one of the passes stopped early
     if start.status ~= 'stable' or orbit_n ~= nbpms then
         python:send(false, true)

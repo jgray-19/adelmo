@@ -69,14 +69,25 @@ class CalibrationBlocks:
         self.hess_bb *= factor
         self.grad_b *= factor
 
+    ARRAYS = ("grad_u", "hess_uu", "hess_ub", "hess_bb", "grad_b")
+
     def to_payload(self) -> dict:
-        return dict(vars(self))
+        """The scalars; the arrays travel as raw bytes (:meth:`send_arrays`): pickling them copies ~170 MB twice."""
+        return {"n_q": self.n_q, "n_g": self.n_g, "n_b": self.n_b, "loss": self.loss}
 
     @classmethod
     def from_payload(cls, payload: dict) -> CalibrationBlocks:
         blocks = cls(payload["n_q"], payload["n_g"], payload["n_b"])
-        vars(blocks).update(payload)
+        blocks.loss = payload["loss"]
         return blocks
+
+    def send_arrays(self, conn) -> None:
+        for name in self.ARRAYS:
+            conn.send_bytes(memoryview(getattr(self, name)).cast("B"))
+
+    def recv_arrays(self, conn) -> None:
+        for name in self.ARRAYS:
+            conn.recv_bytes_into(memoryview(getattr(self, name)).cast("B"))
 
 
 def add_series(
@@ -101,25 +112,28 @@ def add_series(
     for o in range(model.shape[0]):
         scale = 1.0 + bpm_gain[o]
         mp = scale * model[o]
-        jac = scale[:, None] * jacobian[o]
+        jac = jacobian[o]  # not scaled: the BPM gain scale is folded into the weights below, so no copy of the Jacobian
         d_g = scale[:, None] * d_gain[o]
         w = np.asarray(weights[o], dtype=float)
+        w_scaled = w * scale**2
         r = np.where(w > 0.0, mp - np.asarray(targets[o], dtype=float), 0.0)
         wr = w * r
         d_b = model[o]
         cols = bpm_cols[o]
 
         blocks.loss += float(np.sum(w * r * r))
-        blocks.grad_u[:n_q] += 2.0 * wr @ jac
-        blocks.hess_uu[:n_q, :n_q] += 2.0 * (jac.T * w) @ jac
+        blocks.grad_u[:n_q] += 2.0 * (scale * wr) @ jac
+        two_w_jac = (2.0 * w_scaled)[:, None] * jac  # 2 (J^T w scale^2) transposed
+        blocks.hess_uu[:n_q, :n_q] += two_w_jac.T @ jac
+        cross = two_w_jac.T @ d_gain[o]
+        del two_w_jac
         blocks.grad_u[g_rows] += 2.0 * wr @ d_g
         blocks.hess_uu[np.ix_(g_rows, g_rows)] += 2.0 * (d_g.T * w) @ d_g
-        cross = 2.0 * jac.T @ (w[:, None] * d_g)
         blocks.hess_uu[:n_q, g_rows] += cross
         blocks.hess_uu[g_rows, :n_q] += cross.T
         blocks.grad_b[cols] += 2.0 * wr * d_b
         blocks.hess_bb[cols] += 2.0 * w * d_b * d_b
-        blocks.hess_ub[:n_q, cols] += 2.0 * jac.T * (w * d_b)
+        blocks.hess_ub[:n_q, cols] += jac.T * (2.0 * scale * w * d_b)
         blocks.hess_ub[np.ix_(g_rows, cols)] += 2.0 * (d_g * (w * d_b)[:, None]).T
 
 
@@ -166,7 +180,8 @@ def reduce_blocks(blocks: CalibrationBlocks) -> tuple[np.ndarray, np.ndarray]:
     """Schur complement over ``b``: reduced ``(gradient, Hessian)`` of ``u``."""
     inv = 1.0 / blocks.hess_bb
     ub = blocks.hess_ub
-    hess = blocks.hess_uu - (ub * inv) @ ub.T
+    scaled = ub * np.sqrt(inv)
+    hess = blocks.hess_uu - scaled @ scaled.T
     grad = blocks.grad_u - ub @ (inv * blocks.grad_b)
     return grad, hess
 

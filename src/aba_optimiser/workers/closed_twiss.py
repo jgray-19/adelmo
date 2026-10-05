@@ -305,7 +305,7 @@ class ClosedTwissWorker(AbstractWorker[ClosedTwissData]):
                     self.send_error_payload(exc, phase="computation")
                     break
 
-                self.conn.send(
+                self._send_reply(
                     (
                         self.worker_id,
                         grad / self.normalisation_points,
@@ -324,6 +324,9 @@ class ClosedTwissWorker(AbstractWorker[ClosedTwissData]):
             if mad is not None:
                 mad.send("shush()")
                 del mad
+
+    def _send_reply(self, reply: tuple) -> None:
+        self.conn.send(reply)
 
     @staticmethod
     def get_n_data_points(nbpms: int) -> int:
