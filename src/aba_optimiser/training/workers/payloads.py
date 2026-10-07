@@ -17,8 +17,11 @@ from aba_optimiser.workers import (
     TrackingData,
     WeightProcessor,
 )
+from aba_optimiser.workers.tracking import active_observables
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from aba_optimiser.accelerators import Accelerator
     from aba_optimiser.training.data_manager import FileTracks
     from aba_optimiser.training.workers.setup import WorkerObservationPlan
@@ -27,6 +30,19 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 WorkerPayload: TypeAlias = tuple["TrackingData", "WorkerConfig", int]
+
+
+def global_weight_scale(weights: Iterable[np.ndarray]) -> float:
+    """The largest inverse-variance weight anywhere in a fit, or 1 if every weight is zero.
+
+    Dividing every worker's weights by this one number keeps losses near unity
+    without changing any *relative* weight, so all workers report on one scale.
+    """
+    largest = max((float(np.max(w)) for w in weights if w.size), default=0.0)
+    if largest > 0.0:
+        return largest
+    LOGGER.warning("All computed weights are zero; skipping global normalisation")
+    return 1.0
 
 
 def observation_turn_offsets(cols: np.ndarray, sdir: int) -> np.ndarray:
@@ -179,19 +195,11 @@ class WorkerPayloadBuilder:
         if not payloads:
             return payloads
 
-        def active_observables(config: WorkerConfig) -> tuple[str, ...]:
-            kick_plane = config.kick_plane
-            if kick_plane == "x":
-                return ("x", "px") if optimise_momenta else ("x",)
-            if kick_plane == "y":
-                return ("y", "py") if optimise_momenta else ("y",)
-            return ("x", "y", "px", "py") if optimise_momenta else ("x", "y")
-
         observables = ("x", "y", "px", "py")
         raw_by_payload = []
-        global_max = 0.0
+        active_weights = []
         for data, config, _file_idx in payloads:
-            active = active_observables(config)
+            active = active_observables(config.kick_plane, optimise_momenta)
             raw = [
                 WeightProcessor.variance_to_weight(variance)
                 for variance in (
@@ -201,18 +209,9 @@ class WorkerPayloadBuilder:
                     data.momentum_variances[:, :, 1],
                 )
             ]
-            global_max = max(
-                global_max,
-                max(
-                    (np.max(raw[i]) for i, name in enumerate(observables) if name in active),
-                    default=0.0,
-                ),
-            )
+            active_weights += [raw[i] for i, name in enumerate(observables) if name in active]
             raw_by_payload.append((data, raw))
-
-        if global_max == 0.0:
-            LOGGER.warning("All computed weights are zero; skipping global normalisation")
-            global_max = 1.0
+        global_max = global_weight_scale(active_weights)
 
         for data, raw in raw_by_payload:
             data.precomputed_weights = PrecomputedTrackingWeights(

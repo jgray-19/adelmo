@@ -159,7 +159,7 @@ def test_controller_quad_opt_with_kicker(
         abs(ctrl.initial_knobs[magnet] - magnet_strengths[magnet])
         for magnet in magnet_strengths
     )
-    estimate, _unc = ctrl.run()
+    estimate = ctrl.run().knobs
     final_sum_true_diff = sum(
         abs(estimate[magnet] - magnet_strengths[magnet])
         for magnet in magnet_strengths

@@ -15,17 +15,21 @@ from aba_optimiser.calibration import (
     corrector_gain_knob_name,
     corrector_gain_name,
 )
-from aba_optimiser.workers.closed_orbit import ClosedOrbitBatchWorker
-from aba_optimiser.workers.protocol import LOSS_ONLY
+from aba_optimiser.mad.machine_state import assign_state
+from aba_optimiser.workers.closed_orbit import ClosedOrbitWorker
+from aba_optimiser.workers.protocol import GradReply
 
 if TYPE_CHECKING:
     from pymadng import MAD
 
+    from aba_optimiser.workers.closed_orbit import SeriesState
+    from aba_optimiser.workers.protocol import Evaluate
+
 LOGGER = logging.getLogger(__name__)
 
 
-class CalibratedClosedOrbitBatchWorker(ClosedOrbitBatchWorker):
-    """Batch worker that fits ``(1 + b_bpm) * model(q, kicks * (1 + g_corrector))`` to the measured orbit changes.
+class CalibratedClosedOrbitWorker(ClosedOrbitWorker):
+    """Worker that fits ``(1 + b_bpm) * model(q, kicks * (1 + g_corrector))`` to the measured orbit changes.
 
     Every calibrated corrector that is on (a non-zero ``k_<corrector>`` global) in either the series' state or its
     reference state has its whole kick scaled by its gain, in both states.
@@ -34,8 +38,8 @@ class CalibratedClosedOrbitBatchWorker(ClosedOrbitBatchWorker):
     either state) gets no gain knob and is never scaled.
 
     The knob dict it receives carries the gains next to the magnet knobs (names from :mod:`aba_optimiser.calibration`);
-    MAD-NG never sees them. It returns the ``u = (q, g)`` gradient and Hessian in the usual slots and the remaining
-    blocks (``b`` coupling, diagonal, gradient, loss-normalisation constant) as a payload in the last slot.
+    MAD-NG never sees them. Its reply carries the blocks' header (``b`` coupling, diagonal, gradient, loss-normalisation
+    constant) in :attr:`~aba_optimiser.workers.protocol.GradReply.extra`, followed on the pipe by the blocks' arrays.
     """
 
     def _setup_da_maps(self, mad: MAD) -> None:
@@ -43,9 +47,9 @@ class CalibratedClosedOrbitBatchWorker(ClosedOrbitBatchWorker):
         correctors = list(
             dict.fromkeys(
                 name[2:].upper()
-                for state in self._series_states
-                for name, value in (*state["machine_state"].items(), *state["reference_state"].items())
-                if name.startswith("k_") and name[2:].upper() in state["calibration"].correctors and value != 0.0
+                for series in self.series
+                for name, value in (*series.data.machine_state.items(), *series.data.reference_state.items())
+                if name.startswith("k_") and name[2:].upper() in series.data.calibration.correctors and value != 0.0
             )
         )
         gain_knobs = [corrector_gain_knob_name(corrector) for corrector in correctors]
@@ -57,14 +61,14 @@ class CalibratedClosedOrbitBatchWorker(ClosedOrbitBatchWorker):
         #: The correctors with a gain knob, in Jacobian column order (columns ``n_q`` onwards).
         self._correctors = correctors
 
-    def _enter_scaled(self, mad: MAD, role: str, knob_updates: dict[str, float]) -> None:
+    def _enter_state(self, mad: MAD, role: str, knob_updates: dict[str, float]) -> None:
         """Enter *role*'s state with every corrector kick ``k`` set to ``k * (1 + g + gain knob)``.
 
         The gain knob is 0, so the value is ``k * (1 + g)``, and its Jacobian column is d(orbit)/d(g). The kick is a deferred
         expression, like the magnet strengths, so it follows the knobs when they are made plain (``knobs_to_plain``).
         """
         state = self._states[role]
-        self._assign_state(mad, state)
+        assign_state(mad, state)
         commands = []
         for name, kick in state.items():
             corrector = name[2:].upper()
@@ -75,93 +79,66 @@ class CalibratedClosedOrbitBatchWorker(ClosedOrbitBatchWorker):
         if commands:
             mad.send("\n".join(commands))
 
-    def setup_mad_interface(self, knob_values):
-        """The startup message also carries the gains, which are not model values."""
-        magnet_knobs = {k: v for k, v in knob_values.items() if not k.startswith(("bpmgain.", "corrgain."))}
-        return super().setup_mad_interface(magnet_knobs)
+    def _loss_unit(self) -> float:
+        return 1.0 / (self.weight_scale * self.normalisation_points)
 
-    def compute_gradients_and_loss(self, mad: MAD, knob_updates: dict[str, float], batch: int):
-        if batch == LOSS_ONLY:
-            return self._loss_only(mad, knob_updates)
-        self._apply_knobs(mad, knob_updates)
-        spec = self._series_states[0]["calibration"]
-        n_b = len(PLANES) * len(spec.bpms)
-        blocks = CalibrationBlocks(self.n_q, len(spec.correctors), n_b)
-        for self._series_index, state in enumerate(self._series_states):
-            self._load_state(state)
-            found = self._evaluate_calibrated(mad, knob_updates, spec, blocks)
-            state.update(self._save_state())
-            if not found:
-                nan = float("nan")
-                return np.zeros(1), nan, np.zeros((1, 1)), {}
+    def evaluate(self, mad: MAD, message: Evaluate) -> GradReply:
+        if message.loss_only:
+            return self._loss_only(mad, message.knobs)
+        knob_updates = message.knobs
+        self.send_knobs(mad, knob_updates)
+        spec = self.series[0].data.calibration
+        blocks = CalibrationBlocks(self.n_q, len(spec.correctors), len(PLANES) * len(spec.bpms))
+        for series in self.series:
+            if not self._evaluate_calibrated(mad, series, knob_updates, spec, blocks):
+                return GradReply(self.worker_id, float("nan"), np.zeros(1), extra={})
         blocks.scale(1.0 / self.normalisation_points)
         payload = blocks.to_payload()
-        payload["loss_unit"] = 1.0 / (self.weight_scale * self.normalisation_points)
+        payload["loss_unit"] = self._loss_unit()
         self._blocks_to_send = blocks
-        # The master reads everything from the payload (already normalised); the standard slots are dummies.
-        return np.zeros(1), blocks.loss * self.normalisation_points, np.zeros((1, 1)), payload
+        # The fitter reads everything from the payload (already normalised).
+        return GradReply(self.worker_id, blocks.loss, np.zeros(1), extra=payload)
 
     _blocks_to_send: CalibrationBlocks | None = None
 
-    def _send_reply(self, reply: tuple) -> None:
-        """The reply tuple, then the blocks' arrays as raw bytes (see :meth:`CalibrationBlocks.to_payload`)."""
-        super()._send_reply(reply)
+    def send_reply(self, reply: object) -> None:
+        """The reply, then the blocks' arrays as raw bytes (see :meth:`CalibrationBlocks.to_payload`)."""
+        super().send_reply(reply)
         blocks, self._blocks_to_send = self._blocks_to_send, None
         if blocks is not None:
             blocks.send_arrays(self.conn)
 
-    def _loss_only(self, mad: MAD, knob_updates: dict[str, float]):
+    def _loss_only(self, mad: MAD, knob_updates: dict[str, float]) -> GradReply:
         """Data loss alone, from plain closed-orbit solves (no knob parameters, no Jacobian, no Hessian).
 
-        Same loss as the blocks' ``loss`` of :meth:`compute_gradients_and_loss`; returned in the standard dummy slots with
-        ``{"loss": normalised loss, "loss_unit": ...}`` as the payload.
+        The same loss as the blocks' ``loss`` of a full evaluation; the reply's ``extra`` is
+        ``{"loss": normalised loss, "loss_unit": ...}``.
         """
-        self._apply_knobs(mad, knob_updates)
-        spec = self._series_states[0]["calibration"]
+        self.send_knobs(mad, knob_updates)
         total = 0.0
         mad.send("knobs_to_plain()")
         try:
-            for self._series_index, state in enumerate(self._series_states):
-                self._load_state(state)
-                part = self._evaluate_calibrated_loss(mad, knob_updates, spec)
-                state.update(self._save_state())
+            for series in self.series:
+                part = self._evaluate_calibrated_loss(mad, series, knob_updates)
                 if part is None:
-                    nan = float("nan")
-                    return np.zeros(1), nan, np.zeros((1, 1)), {}
+                    return GradReply(self.worker_id, float("nan"), np.zeros(1), extra={})
                 total += part
         finally:
             mad.send("knobs_to_param()")
-        payload = {"loss": total / self.normalisation_points, "loss_unit": 1.0 / (self.weight_scale * self.normalisation_points)}
-        return np.zeros(1), total, np.zeros((1, 1)), payload
+        loss = total / self.normalisation_points
+        return GradReply(self.worker_id, loss, np.zeros(1), extra={"loss": loss, "loss_unit": self._loss_unit()})
 
-    def _evaluate_calibrated_loss(self, mad: MAD, knob_updates: dict[str, float], spec) -> float | None:
+    def _evaluate_calibrated_loss(
+        self, mad: MAD, series: SeriesState, knob_updates: dict[str, float]
+    ) -> float | None:
         """One series' ``sum w ((1 + b) * model - target)^2`` as in :func:`add_series`, from orbit values only."""
-        cache = {}
-
-        def evaluate(role: str, pt: float):
-            key = (role, pt)
-            if key not in cache:
-                self._enter_scaled(mad, role, knob_updates)
-                self._set_pt(mad, pt)
-                self._set_co_key(mad, role, pt)
-                cache[key] = self._orbit_plain(mad, context=f" ({role}, pt={pt:+.9g})")
-            return cache[key]
-
         loss = 0.0
-        with self._in_series(mad):
-            for index, measurement in enumerate(self.series_measurements):
-                signal = evaluate("signal", float(measurement.pt))
-                if signal is None:
+        names = series.twiss_bpm_order
+        with self._in_series(mad, series):
+            for index, model in self._models(mad, series, knob_updates, self._orbit_plain):
+                if model is None:
                     return None
-                if np.any(self._subtract):
-                    reference = evaluate("reference", float(measurement.reference_pt))
-                    if reference is None:
-                        return None
-                    model = signal - reference * self._subtract[:, None]
-                else:
-                    model = signal
-                observables, targets, weights, _raw = self._measurement_alignment[index]
-                names = self._twiss_bpm_order
+                observables, targets, weights, _raw = series.alignment[index]
                 for o, observable in enumerate(observables):
                     gains = np.array([knob_updates.get(bpm_gain_name(observable.name, name), 0.0) for name in names])
                     residual = (1.0 + gains) * model[o] - np.asarray(targets[o], dtype=float)
@@ -169,35 +146,19 @@ class CalibratedClosedOrbitBatchWorker(ClosedOrbitBatchWorker):
                     loss += float(np.sum(w * np.where(w > 0.0, residual, 0.0) ** 2))
         return loss
 
-    def _evaluate_calibrated(self, mad: MAD, knob_updates: dict[str, float], spec, blocks: CalibrationBlocks) -> bool:
+    def _evaluate_calibrated(
+        self, mad: MAD, series: SeriesState, knob_updates: dict[str, float], spec, blocks: CalibrationBlocks
+    ) -> bool:
         """Add one series' blocks to ``blocks``; ``False`` if its closed orbit is lost."""
         bpm_index = {name: i for i, name in enumerate(spec.bpms)}
         corrector_indices = [spec.correctors.index(corrector) for corrector in self._correctors]
-        cache = {}
-
-        def evaluate(role: str, pt: float):
-            key = (role, pt)
-            if key not in cache:
-                self._enter_scaled(mad, role, knob_updates)
-                self._set_pt(mad, pt)
-                self._set_co_key(mad, role, pt)
-                cache[key] = self._model_and_jacobian(mad, context=f" ({role}, pt={pt:+.9g})")
-            return cache[key]
-
-        with self._in_series(mad):
-            for index, measurement in enumerate(self.series_measurements):
-                signal = evaluate("signal", float(measurement.pt))
-                if signal is None:
+        with self._in_series(mad, series):
+            for index, model in self._models(mad, series, knob_updates, self._model_and_jacobian):
+                if model is None:
                     return False
-                if np.any(self._subtract):
-                    reference = evaluate("reference", float(measurement.reference_pt))
-                    if reference is None:
-                        return False
-                    model, jacobian = self._compare_to_reference(signal, reference)
-                else:
-                    model, jacobian = signal
-                observables, targets, weights, _raw = self._measurement_alignment[index]
-                names = self._twiss_bpm_order
+                values, jacobian = model
+                observables, targets, weights, _raw = series.alignment[index]
+                names = series.twiss_bpm_order
                 cols = np.empty((len(observables), len(names)), dtype=int)
                 gains = np.empty((len(observables), len(names)))
                 for o, observable in enumerate(observables):
@@ -206,5 +167,5 @@ class CalibratedClosedOrbitBatchWorker(ClosedOrbitBatchWorker):
                         cols[o, k] = plane * len(spec.bpms) + bpm_index[name]
                         gains[o, k] = knob_updates.get(bpm_gain_name(observable.name, name), 0.0)
                 q_jac, d_gain = jacobian[..., : self.n_q], jacobian[..., self.n_q :]
-                add_series(blocks, model, q_jac, d_gain, targets, weights, gains, cols, corrector_indices)
+                add_series(blocks, values, q_jac, d_gain, targets, weights, gains, cols, corrector_indices)
         return True

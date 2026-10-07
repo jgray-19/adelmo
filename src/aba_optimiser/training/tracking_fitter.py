@@ -30,6 +30,8 @@ from aba_optimiser.training.config.tracking import (
     kicker_setup,
 )
 from aba_optimiser.training.data_manager import DataManager
+from aba_optimiser.training.lifecycle import run_with_workers
+from aba_optimiser.training.results import FitResult
 from aba_optimiser.training.workers.manager import WorkerManager
 from aba_optimiser.training.workers.setup import WorkerSetupHelper
 from aba_optimiser.workers.common import sandwich_uncertainties
@@ -38,8 +40,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
     from typing import Unpack
-
-    from tensorboardX import SummaryWriter
 
     from aba_optimiser.accelerators import Accelerator
     from aba_optimiser.analysis import DegeneracyReport
@@ -184,26 +184,21 @@ class TrackingFitter(BaseFitter):
             sequence_config.magnet_range,
             sequence_config.bad_bpms,
         )
-        # Initialise OptimisationLoop and ResultManager now that _init_data_manager
+        # Initialise OptimisationLoop now that _init_data_manager
         # has finalised simulation_config.num_batches.
         BaseFitter._init_managers(self)
 
-    def run(self) -> tuple[dict[str, float], dict[str, float]]:
-        """Execute the optimisation process.
-
-        Returns:
-            Tuple of (final_knobs, uncertainties) in optimisation space.
-        """
+    def run(self) -> FitResult:
+        """Run the optimisation; knobs and uncertainties are in optimisation space."""
         run_start = time.time()
         writer = self.setup_logging("tracking_opt")
         total_turns = self.data_manager.get_total_turns()
-        self.final_knobs = None  # Will be set after optimisation loop
         initial_worker_values = {
             **self.config_manager.initial_model_values,
             **self.initial_knobs,
         }
 
-        try:
+        def body() -> tuple[dict[str, float], tuple[np.ndarray, np.ndarray] | None]:
             self.worker_manager.start_workers(
                 self.data_manager.tracks,
                 self.data_manager.turn_batches,
@@ -227,48 +222,42 @@ class TrackingFitter(BaseFitter):
 
             # Clean up memory after workers are started
             self._cleanup_memory()
-            channels = self.worker_manager.training.channels
 
-            epoch_end_hook = self._make_epoch_end_hook()
-            self.final_knobs = self.optimisation_loop.run_optimisation(
+            final_knobs = self.optimisation_loop.run_optimisation(
                 self.initial_knobs,
-                channels,
+                self.worker_manager.training.channels,
                 writer,
                 run_start,
                 total_turns,
                 checkpoint_config=self.checkpoint_config,
                 validation_loss_fn=self.worker_manager.compute_validation_loss,
                 loss_callback=self.loss_callback,
-                epoch_end_hook=epoch_end_hook,
+                epoch_end_hook=self._make_epoch_end_hook(),
             )
 
-            # Workers still hold the last batch's knobs; the Hessian must be taken
-            # at the knobs we return.
+            # Workers still hold the last batch's knobs; the uncertainty must be
+            # propagated at the knobs we return.
             if self.output_config.include_uncertainty:
-                self.worker_manager.set_training_knobs(self.final_knobs)
-            total_hessian = self.worker_manager.termination_and_hessian(
-                len(self.final_knobs),
-                estimate_hessian=self.output_config.include_uncertainty,
+                self.worker_manager.set_training_knobs(final_knobs)
+            normal_and_noise = self.worker_manager.stop_and_collect_uncertainty(
+                len(final_knobs),
+                propagate_uncertainty=self.output_config.include_uncertainty,
             )
-        except RuntimeError as e:
-            logger.error(f"optimisation failed: {e}")
-            self.worker_manager.terminate_workers()
-            raise RuntimeError(f"Worker error during optimisation: {e}") from e
-        except KeyboardInterrupt:
-            logger.warning(
-                "\nKeyboardInterrupt detected. Terminating early and writing results."
-            )
-            self.worker_manager.terminate_workers()
-            self.final_knobs = self.optimisation_loop.best_knobs
-            total_hessian = None
-        finally:
-            if self.final_knobs is None:
-                self.final_knobs = self.optimisation_loop.best_knobs
+            return final_knobs, normal_and_noise
 
-        uncertainties = self._finalise_results(total_hessian, writer)
-        uncertainties = dict(zip(self.final_knobs.keys(), uncertainties))
-
-        return self.final_knobs, uncertainties
+        final_knobs, normal_and_noise = run_with_workers(
+            body,
+            fallback=lambda: (self.optimisation_loop.best.value, None),
+            stop_workers=self.worker_manager.terminate_workers,
+            writer=writer,
+        )
+        uncertainties = self._uncertainties(final_knobs, normal_and_noise)
+        logger.info("Optimisation complete.")
+        return FitResult(
+            knobs=final_knobs,
+            uncertainties=dict(zip(final_knobs.keys(), uncertainties)),
+            diagnostics=self.optimisation_loop.diagnostics,
+        )
 
     def build_initial_normal_matrix(self) -> tuple[np.ndarray, list[str]]:
         """Accumulate the Gauss-Newton normal matrix ``A = JᵀWJ`` at the initial knobs.
@@ -303,11 +292,11 @@ class TrackingFitter(BaseFitter):
                 initial_worker_values,
                 enable_validation=self.tracking_plan.enable_validation,
             )
-            total_hessian, _ = self.worker_manager.termination_and_hessian(
+            total_hessian, _ = self.worker_manager.stop_and_collect_uncertainty(
                 len(self.config_manager.knob_names),
-                estimate_hessian=True,
+                propagate_uncertainty=True,
             )
-            # termination_and_hessian shuts the workers down cleanly itself.
+            # stop_and_collect_uncertainty shuts the workers down cleanly itself.
             workers_finalised = True
         finally:
             if not workers_finalised:
@@ -382,36 +371,25 @@ class TrackingFitter(BaseFitter):
         del self.data_manager
         gc.collect()
 
-    def _format_result_uncertainties(self, uncertainties: np.ndarray) -> np.ndarray:
-        """Align uncertainty values with the formatted output knob ordering."""
+    def _uncertainties(
+        self,
+        final_knobs: dict[str, float],
+        normal_and_noise: tuple[np.ndarray, np.ndarray] | None,
+    ) -> np.ndarray:
+        """1-sigma knob uncertainties in the order of :attr:`output_knob_names`; zero when not computed.
+
+        ``(A, B)`` are the normal matrix and the measurement noise propagated through
+        every observation and start coordinate, ``Cov = A⁻¹ B A⁻¹``.
+        """
+        if self.output_config.include_uncertainty and normal_and_noise is not None:
+            uncertainties = sandwich_uncertainties(*normal_and_noise)
+        else:
+            uncertainties = np.zeros(len(final_knobs), dtype=np.float64)
         uncertainty_by_knob = dict(zip(self.config_manager.knob_names, uncertainties, strict=True))
         return np.array(
             [uncertainty_by_knob[name] for name in self.output_knob_names],
             dtype=np.float64,
         )
-
-    def _finalise_results(
-        self,
-        total_hessian: tuple[np.ndarray, np.ndarray] | None,
-        writer: SummaryWriter | None,
-    ) -> np.ndarray:
-        """Save final results in optimisation space."""
-        # Calculate uncertainties only when explicitly requested.
-        if self.output_config.include_uncertainty and total_hessian is not None:
-            # ``(A, B)``: the normal matrix and the measurement noise propagated
-            # through every observation and start coordinate, Cov = A⁻¹ B A⁻¹.
-            uncertainties = sandwich_uncertainties(*total_hessian)
-        else:
-            uncertainties = np.zeros(len(self.final_knobs), dtype=np.float64)
-
-        # Close logging
-        if writer is not None:
-            writer.close()
-
-        uncertainties_abs = self._format_result_uncertainties(uncertainties)
-
-        logger.info("Optimisation complete.")
-        return uncertainties_abs
 
     def _init_data_manager(self) -> None:
         """Initialise data manager and load track data."""

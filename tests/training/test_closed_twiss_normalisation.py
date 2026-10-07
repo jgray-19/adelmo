@@ -25,8 +25,9 @@ import pytest
 
 from aba_optimiser.accelerators import PSB
 from aba_optimiser.config import SimulationConfig
-from aba_optimiser.training_closed_twiss.fitter import _stamp_global_normalisation
+from aba_optimiser.training_closed_twiss.fitter import stamp_global_normalisation
 from aba_optimiser.workers import ClosedTwissData, ClosedTwissWorker, Observable, WorkerConfig
+from aba_optimiser.workers.closed_twiss import align_observables
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -56,7 +57,7 @@ def test_every_worker_gets_the_same_normalisation() -> None:
     precise = _payload(0.0, np.full(len(BPMS), 1e-5))
     coarse = _payload(3e-3, np.full(len(BPMS), 1e-3))
 
-    _stamp_global_normalisation([precise, coarse])
+    stamp_global_normalisation([precise, coarse])
 
     assert precise[1].weight_scale == coarse[1].weight_scale
     assert precise[1].total_points == coarse[1].total_points
@@ -71,7 +72,7 @@ def test_relative_weighting_between_momenta_survives_normalisation() -> None:
     precise = _payload(0.0, np.full(len(BPMS), 1e-5))
     coarse = _payload(3e-3, np.full(len(BPMS), 1e-3))
 
-    _stamp_global_normalisation([precise, coarse])
+    stamp_global_normalisation([precise, coarse])
 
     scale = precise[1].weight_scale
     precise_weight = (1.0 / 1e-5**2) / scale
@@ -84,7 +85,7 @@ def test_points_with_no_usable_error_do_not_count() -> None:
     errors = np.array([1e-4, np.nan, 1e-4, 0.0])
     (payload,) = [_payload(0.0, errors)]
 
-    _stamp_global_normalisation([payload])
+    stamp_global_normalisation([payload])
 
     assert payload[1].total_points == 2
 
@@ -106,13 +107,15 @@ def test_worker_applies_the_stamped_normalisation(seq_psb: Path) -> None:
     worker = ClosedTwissWorker(
         child, 0, data, config, SimulationConfig(num_workers=1, num_batches=1)
     )
-    worker._align_targets_to_twiss(list(BPMS))
+    _targets, raw_weights, weights = align_observables(
+        worker.observables, worker._measured_index, list(BPMS), worker.weight_scale, worker_id=0
+    )
 
     assert worker.normalisation_points == 99
     # Raw inverse-variance weights are untouched; only the stepping copy is scaled.
-    assert worker.raw_weights[0][0] == pytest.approx(1.0 / 1e-4**2)
-    assert worker.weights[0][0] == pytest.approx((1.0 / 1e-4**2) / 4.0e8)
-    assert worker.weights[0][2] == pytest.approx((1.0 / 2e-4**2) / 4.0e8)
+    assert raw_weights[0][0] == pytest.approx(1.0 / 1e-4**2)
+    assert weights[0][0] == pytest.approx((1.0 / 1e-4**2) / 4.0e8)
+    assert weights[0][2] == pytest.approx((1.0 / 2e-4**2) / 4.0e8)
 
 
 def test_worker_rejects_a_nonsensical_weight_scale(seq_psb: Path) -> None:

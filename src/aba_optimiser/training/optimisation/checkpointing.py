@@ -75,13 +75,13 @@ class OptimisationCheckpointer:
             "next_epoch": int(epoch + 1),
             "knob_names": self._knob_names,
             "current_knobs": {k: float(v) for k, v in current_knobs.items()},
-            "best_knobs": {k: float(v) for k, v in self._loop.best_knobs.items()},
-            "best_loss": float(self._loop.best_loss),
+            "best_knobs": {k: float(v) for k, v in self._loop.best.value.items()},
+            "best_loss": float(self._loop.best.loss),
             "prev_loss": None if prev_loss is None else float(prev_loss),
             "smoothed_grad_norm": float(self._loop.smoothed_grad_norm),
             "smoothed_loss_change": float(self._loop.smoothed_loss_change),
             "optimiser_class": self._loop.optimiser.__class__.__name__,
-            "optimiser_state": self._loop.optimiser.state_to_dict(),
+            "optimiser_state": self._loop.optimiser.state_dict(),
         }
         self.path.write_text(json.dumps(payload, indent=2))
 
@@ -113,20 +113,26 @@ class OptimisationCheckpointer:
         checkpoint_best = self._parse_checkpoint_knob_values(payload, "best_knobs")
         self._validate_finite_knob_values(checkpoint_best, label="Checkpoint best_knobs")
 
-        self._loop.best_knobs = merged_current_knobs.copy()
-        self._loop.best_knobs.update(checkpoint_best)
-        self._loop.best_loss = float(payload.get("best_loss", float("inf")))
+        best_knobs = merged_current_knobs.copy()
+        best_knobs.update(checkpoint_best)
+        self._loop.best.record(float(payload.get("best_loss", float("inf"))), best_knobs)
         self._loop.smoothed_grad_norm = float(payload.get("smoothed_grad_norm", 0.0))
         self._loop.smoothed_loss_change = float(payload.get("smoothed_loss_change", 0.0))
 
         optimiser_state = payload.get("optimiser_state", {})
         if optimiser_state:
             try:
-                resized_state = self._resize_optimiser_state_for_current_knobs(
-                    cast("dict[str, Any]", optimiser_state),
-                    saved_knob_names,
+                remap = None
+                if saved_knob_names != self._knob_names:
+
+                    def remap(vector: list[float]) -> list[float]:
+                        return self._expand_vector_to_current_knobs(
+                            vector, saved_knob_names, self._knob_names, fill_value=0.0
+                        )
+
+                self._loop.optimiser.load_state_dict(
+                    cast("dict[str, Any]", optimiser_state), remap=remap
                 )
-                self._loop.optimiser.load_state_dict(resized_state)
             except (KeyError, TypeError, ValueError) as exc:
                 LOGGER.info("Skipping optimiser state restore: %s", exc)
 
@@ -221,40 +227,3 @@ class OptimisationCheckpointer:
             float(vector[saved_index[name]]) if name in saved_index else fill_value
             for name in current_knob_names
         ]
-
-    def _resize_optimiser_state_for_current_knobs(
-        self,
-        optimiser_state: dict[str, Any],
-        saved_knob_names: list[str],
-    ) -> dict[str, Any]:
-        """Resize/remap optimiser state vectors to match current knob layout."""
-        if saved_knob_names == self._knob_names:
-            return optimiser_state
-
-        state = dict(optimiser_state)
-        state_type = str(state.get("type", "")).lower()
-
-        def remap(vector: list[float]) -> list[float]:
-            return self._expand_vector_to_current_knobs(
-                vector, saved_knob_names, self._knob_names, fill_value=0.0
-            )
-
-        if state_type == "adam":
-            state["m"] = remap(cast("list[float]", state["m"]))
-            state["v"] = remap(cast("list[float]", state["v"]))
-            return state
-
-        if state_type == "lbfgs":
-            state["S"] = [remap(cast("list[float]", vec)) for vec in cast("list[list[float]]", state.get("S", []))]
-            state["Y"] = [remap(cast("list[float]", vec)) for vec in cast("list[list[float]]", state.get("Y", []))]
-            prev_params = state.get("prev_params")
-            if prev_params is not None:
-                state["prev_params"] = remap(cast("list[float]", prev_params))
-            prev_grads = state.get("prev_grads")
-            if prev_grads is not None:
-                state["prev_grads"] = remap(cast("list[float]", prev_grads))
-            return state
-
-        # Unknown optimiser states are passed through unchanged and may still fail
-        # in load_state_dict with a clearer optimiser-specific message.
-        return state

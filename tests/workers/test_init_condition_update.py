@@ -2,7 +2,7 @@
 
 Covers:
 - TrackingWorker._send_init_condition_update updates _init_coords_np in Python
-- TrackingWorker._handle_control_command dispatches 'update_init_coords'
+- TrackingWorker.handle_command dispatches UPDATE_INIT_COORDS
 - WorkerManager.send_init_condition_updates validates shape and sends per-worker slices
 - TrackingFitter._make_epoch_end_hook dispatches the callback's coordinates
 """
@@ -16,6 +16,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from aba_optimiser.config import SimulationConfig
+from aba_optimiser.workers import TrackingData, WorkerConfig
+from aba_optimiser.workers.common import PrecomputedTrackingWeights
+from aba_optimiser.workers.protocol import Ack, Command, CommandKind
 from aba_optimiser.workers.tracking import TrackingWorker
 
 # ---------------------------------------------------------------------------
@@ -34,45 +38,46 @@ class FakeMAD:
         return self  # support chaining
 
 
-class FakeConn:
-    """Minimal pipe-like object that stores the last sent message."""
-
-    def __init__(self) -> None:
-        self.last_sent = None
-
-    def send(self, obj) -> None:
-        self.last_sent = obj
-
-
 # ---------------------------------------------------------------------------
 # Shared helper
 # ---------------------------------------------------------------------------
 
 def _make_worker_with_init_coords(n_particles: int = 6, num_batches: int = 2) -> TrackingWorker:
-    """Return a TrackingWorker with _prepare_batches already called (no subprocess)."""
-    worker = object.__new__(TrackingWorker)
-    worker.worker_id = 0
-    worker.observables = ("x", "px")
-    worker.simulation_config = SimpleNamespace(num_batches=num_batches)
-    worker.config = SimpleNamespace(kick_plane="x")
-
+    """Return a prepared TrackingWorker (its process is never started)."""
     init_coords = np.zeros((n_particles, 6), dtype=np.float64)
     init_coords[:, 0] = np.arange(n_particles, dtype=float)        # x
     init_coords[:, 1] = np.arange(n_particles, dtype=float) * 0.1  # px
     init_coords[:, 3] = np.arange(n_particles, dtype=float) * 0.01 # py
-    init_pts = np.ones(n_particles, dtype=np.float64) * 1e-3
-
-    worker.comparison_arrays = {
-        "x": np.zeros((n_particles, 2)),
-        "px": np.zeros((n_particles, 2)),
-    }
-    worker.weight_arrays = {
-        "x": np.ones((n_particles, 2)),
-        "px": np.ones((n_particles, 2)),
-    }
-
-    worker._prepare_batches(init_coords, init_pts, num_batches)
-    return worker
+    init_coords[:, 5] = 1e-3                                       # pt
+    shape = (n_particles, 2)
+    data = TrackingData(
+        position_comparisons=np.zeros((*shape, 2)),
+        momentum_comparisons=np.zeros((*shape, 2)),
+        position_variances=np.ones((*shape, 2)),
+        momentum_variances=np.ones((*shape, 2)),
+        init_coords=init_coords,
+        init_pts=np.ones(n_particles) * 1e-3,
+        reading_ids=np.zeros(shape, dtype=np.int64),
+        init_reading_ids=np.zeros(n_particles, dtype=np.int64),
+        init_variances=np.ones((n_particles, 2)),
+        precomputed_weights=PrecomputedTrackingWeights(
+            x=np.ones(shape), y=np.ones(shape), px=np.ones(shape), py=np.ones(shape), scale=1.0
+        ),
+    )
+    config = WorkerConfig(
+        accelerator=None,  # type: ignore[arg-type]  # only the MAD session needs it
+        tracking_start_bpm="BPM.A",
+        tracking_end_bpm="BPM.B",
+        magnet_range="$start/$end",
+        kick_plane="x",
+    )
+    return TrackingWorker(
+        None,  # type: ignore[arg-type]
+        0,
+        data,
+        config,
+        SimulationConfig(num_workers=1, num_batches=num_batches),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -117,14 +122,12 @@ def test_send_init_condition_update_sends_column_matrices_to_mad() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _handle_control_command dispatches update_init_coords
+# handle_command dispatches UPDATE_INIT_COORDS
 # ---------------------------------------------------------------------------
 
-def test_handle_control_command_update_init_coords_updates_arrays_and_acks() -> None:
+def test_handle_command_update_init_coords_updates_arrays_and_acks() -> None:
     n = 4
     worker = _make_worker_with_init_coords(n_particles=n, num_batches=2)
-    conn = FakeConn()
-    worker.conn = conn
 
     new = {
         "x": np.linspace(0.3, 0.6, n),
@@ -132,13 +135,13 @@ def test_handle_control_command_update_init_coords_updates_arrays_and_acks() -> 
         "y": np.linspace(-0.3, -0.6, n),
         "py": np.linspace(-0.1, -0.4, n),
     }
-    command = {"cmd": "update_init_coords", **new}
+    command = Command(CommandKind.UPDATE_INIT_COORDS, new)
 
-    worker._handle_control_command(FakeMAD(), command)  # type: ignore[arg-type]
+    reply = worker.handle_command(FakeMAD(), command)  # type: ignore[arg-type]
 
     for column, name in enumerate(("x", "px", "y", "py")):
         assert np.allclose(worker._init_coords_np[:, column], new[name])
-    assert conn.last_sent == {"worker_id": 0, "status": "ok"}
+    assert reply == Ack(0)
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +152,7 @@ def _recv_and_ack(child_conn, received_store: list, idx: int) -> None:
     """Thread target: receive one message from the child end and send ack back."""
     msg = child_conn.recv()
     received_store[idx] = msg
-    child_conn.send({"worker_id": idx, "status": "ok"})
+    child_conn.send(Ack(idx))
 
 
 def _make_pool(counts: list[int], id_offset: int = 0):
@@ -217,8 +220,9 @@ def test_send_init_condition_updates_slices_correctly() -> None:
     offset = 0
     for i, n in enumerate(counts):
         msg = received[i]
-        assert isinstance(msg, dict), f"Worker {i} received unexpected value: {msg!r}"
-        assert msg["cmd"] == "update_init_coords"
+        assert isinstance(msg, Command), f"Worker {i} received unexpected value: {msg!r}"
+        assert msg.kind is CommandKind.UPDATE_INIT_COORDS
+        msg = msg.payload
         for column, name in enumerate(("x", "px", "y", "py")):
             assert isinstance(msg[name], np.ndarray)
             assert msg[name].shape == (n, 1)
@@ -266,8 +270,9 @@ def test_send_init_condition_updates_also_updates_validation_workers() -> None:
     offset = 0
     for i, n in enumerate(all_counts):
         msg = received[i]
-        assert isinstance(msg, dict), f"Worker {i} received unexpected value: {msg!r}"
-        assert msg["cmd"] == "update_init_coords"
+        assert isinstance(msg, Command), f"Worker {i} received unexpected value: {msg!r}"
+        assert msg.kind is CommandKind.UPDATE_INIT_COORDS
+        msg = msg.payload
         for column, name in enumerate(("x", "px", "y", "py")):
             assert msg[name].shape == (n, 1)
             assert np.allclose(msg[name][:, 0], new_coords[offset : offset + n, column])

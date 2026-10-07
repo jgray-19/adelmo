@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import time
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -21,11 +19,10 @@ from aba_optimiser.calibration import (
     reduce_blocks,
 )
 from aba_optimiser.mad.machine_state import resolve_machine_state
-from aba_optimiser.optimisers.levenberg_marquardt import LevenbergMarquardtOptimiser
 from aba_optimiser.training_closed_twiss.closed_orbit import ClosedOrbitFitter
-from aba_optimiser.workers.calibrated_closed_orbit import CalibratedClosedOrbitBatchWorker
-from aba_optimiser.workers.closed_orbit import ClosedOrbitBatchData
-from aba_optimiser.workers.protocol import LOSS_ONLY, distribute
+from aba_optimiser.training_closed_twiss.lm_loop import LMPoint, run_levenberg_marquardt
+from aba_optimiser.workers.calibrated_closed_orbit import CalibratedClosedOrbitWorker
+from aba_optimiser.workers.protocol import Evaluate, GradReply, distribute
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -43,6 +40,8 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
     also fix the ``b``/``g`` scale degeneracy. ``knob_sigmas`` (knob name -> absolute width, in the knob's units) adds a
     Gaussian prior on those magnet knobs; knobs it does not name stay free. After the fit, :attr:`calibration_result` holds every gain.
     """
+
+    worker_class = CalibratedClosedOrbitWorker
 
     def __init__(
         self,
@@ -84,22 +83,19 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
         for _, data in payloads:
             data.calibration = self.calibration_spec
         groups = distribute([len(item.measurements) for item in self.series], self.n_workers)
-        self.worker_class = CalibratedClosedOrbitBatchWorker
         LOGGER.info("Calibration fit: %d BPMs x 2 planes, %d correctors, %d worker(s)", len(bpms), len(correctors), len(groups))
-        return [
-            (payloads[group[0]][0], ClosedOrbitBatchData([payloads[i][1] for i in group])) for group in groups
-        ]
+        return [(payloads[group[0]][0], [payloads[i][1] for i in group]) for group in groups]
 
     def _collect_calibrated(self, channels, knobs: dict[str, float]) -> tuple[CalibrationBlocks, float] | None:
         """Sum every worker's blocks; ``None`` if any worker lost its closed orbit."""
-        channels.send_all((knobs, 0))
+        channels.send_all(Evaluate(knobs))
         total, unit = None, 1.0
         lost = False
         for index in range(len(channels.workers)):  # one payload at a time: each is ~n_u x n_b doubles
             (result,) = channels.recv_some([index])
-            if not isinstance(result, tuple) or len(result) != 5:
+            if not isinstance(result, GradReply):
                 raise RuntimeError(f"Unexpected closed-orbit worker payload: {result!r}")
-            _, _, loss, _, payload = result
+            loss, payload = result.loss, result.extra
             if loss == float("inf"):
                 raise RuntimeError("Worker error detected during calibrated closed-orbit optimisation")
             if np.isnan(loss):
@@ -120,15 +116,15 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
 
     def _collect_loss_only(self, channels, knobs: dict[str, float]) -> tuple[float, float] | None:
         """Sum every worker's data loss (no derivatives); ``None`` if any worker lost its closed orbit. Returns ``(loss, loss_unit)``."""
-        channels.send_all((knobs, LOSS_ONLY))
+        channels.send_all(Evaluate(knobs, loss_only=True))
         results = channels.recv_all()
         if not results:
             raise RuntimeError("No closed-orbit workers returned results")
         total, unit, lost = 0.0, 1.0, False
         for result in results:
-            if not isinstance(result, tuple) or len(result) != 5:
+            if not isinstance(result, GradReply):
                 raise RuntimeError(f"Unexpected closed-orbit worker payload: {result!r}")
-            _, _, loss, _, payload = result
+            loss, payload = result.loss, result.extra
             if loss == float("inf"):
                 raise RuntimeError("Worker error detected during calibrated closed-orbit optimisation")
             if np.isnan(loss):
@@ -138,7 +134,10 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
             unit = payload["loss_unit"]
         return None if lost else (total, unit)
 
-    def _gauss_newton(self, channels, writer):
+    def _extra_result(self) -> dict[str, float]:
+        return dict(self.calibration_result)
+
+    def _solve(self, channels, writer):
         spec = self.calibration_spec
         knob_names = list(self.config_manager.knob_names)
         n_q, n_g, n_b = len(knob_names), len(spec.correctors), len(PLANES) * len(spec.bpms)
@@ -152,73 +151,50 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
 
         u = np.zeros(n_q + n_g)
         u[:n_q] = [float(self.initial_knobs[name]) for name in knob_names]
-        b = np.zeros(n_b)
-        best_b, best_blocks = b.copy(), None
-        optimiser = LevenbergMarquardtOptimiser(self.lm_config, initial_params=u)
-        zero_grad, zero_hess = (np.zeros(n_q + n_g), np.zeros((n_q + n_g,) * 2)) if self.loss_only_trials else (None, None)
-        run_start = time.time()
-        last_update, completed = None, 0
+        #: The BPM gains: eliminated from each solve, then back-substituted from the best point's blocks.
+        gains = {"b": np.zeros(n_b), "best_b": np.zeros(n_b), "best_blocks": None}
 
-        for iteration in range(self.lm_config.max_iterations):
-            completed = iteration + 1
-            knobs = dict(zip(knob_names + g_names + b_names, np.concatenate([u, b]).tolist(), strict=True))
-            update = None
-            if self.loss_only_trials and optimiser.best_hessian is not None:
-                # Trial point: the loss alone decides. Only a point that improves on the best loss gets the (expensive) full
-                # evaluation below, so a rejected trial costs one plain closed-orbit solve instead of a parametric one + Hessian.
-                trial = self._collect_loss_only(channels, knobs)
-                if trial is None:
-                    update = optimiser.update(u, float("nan"), zero_grad, zero_hess, failed=True)
-                else:
-                    shell = SimpleNamespace(loss=trial[0], n_q=n_q)
-                    apply_prior(shell, u, b, self.sigma_corrector, self.sigma_bpm, trial[1], sigma_q, loss_only=True)
-                    if os.environ.get("ABA_VERIFY_LOSS_ONLY"):  # debugging: compare with the full evaluation at the same point
-                        full = self._collect_calibrated(channels, knobs)
-                        if full is not None:
-                            check = SimpleNamespace(loss=full[0].loss, n_q=n_q)
-                            apply_prior(check, u, b, self.sigma_corrector, self.sigma_bpm, full[1], sigma_q, loss_only=True)
-                            LOGGER.warning("verify: loss-only %.10e  full %.10e  rel diff %.2e (data %.10e vs %.10e)",
-                                           shell.loss, check.loss, (shell.loss - check.loss) / check.loss, trial[0], full[0].loss)
-                    if not shell.loss < optimiser.best_loss:
-                        update = optimiser.update(u, shell.loss, zero_grad, zero_hess, failed=False)
-            if update is None:
-                collected = self._collect_calibrated(channels, knobs)
-                if collected is None:
-                    blocks, loss, grad, hess, lost = None, float("nan"), np.zeros(n_q + n_g), np.zeros((n_q + n_g,) * 2), True
-                else:
-                    blocks, unit = collected
-                    apply_prior(blocks, u, b, self.sigma_corrector, self.sigma_bpm, unit, sigma_q)
-                    loss = blocks.loss
-                    grad, hess = reduce_blocks(blocks)
-                    lost = False
-                update = optimiser.update(u, loss, grad, hess, lost)
-            last_update = update
-            if update.accepted:
-                best_b, best_blocks = b.copy(), blocks
-                self.history.append((dict(zip(knob_names, u[:n_q].tolist(), strict=True)), float(loss)))
-            u = update.next_params
+        def knobs_at(params: np.ndarray) -> dict[str, float]:
+            values = np.concatenate([params, gains["b"]]).tolist()
+            return dict(zip(knob_names + g_names + b_names, values, strict=True))
 
-            if update.converged and not update.accepted:
-                LOGGER.warning("Levenberg-Marquardt stopped at iter %d (%s)", iteration, update.reason)
-                break
-            if best_blocks is not None:
-                b = best_b + back_substitute(best_blocks, u - optimiser.best_params)
-            if update.reason == "failed" or not update.accepted:
-                LOGGER.info("Iter %d: step rejected or closed orbit lost; retrying from best (lam=%.1e)", iteration, update.damping)
-                continue
-            self._log_gn_iteration(writer, iteration, update.loss, update.grad_norm, update.damping, run_start)
-            if update.converged:
-                LOGGER.info("Levenberg-Marquardt converged (%s) at iter %d", update.reason, iteration)
-                break
+        def trial_loss(params: np.ndarray) -> float | None:
+            trial = self._collect_loss_only(channels, knobs_at(params))
+            if trial is None:
+                return None
+            shell = SimpleNamespace(loss=trial[0], n_q=n_q)
+            apply_prior(shell, params, gains["b"], self.sigma_corrector, self.sigma_bpm, trial[1], sigma_q, loss_only=True)
+            return shell.loss
 
-        best_u = optimiser.best_params
-        best_knobs = dict(zip(knob_names, best_u[:n_q].tolist(), strict=True))
+        def evaluate(params: np.ndarray, iteration: int) -> LMPoint:
+            del iteration
+            collected = self._collect_calibrated(channels, knobs_at(params))
+            if collected is None:
+                return LMPoint(float("nan"), np.zeros(n_q + n_g), np.zeros((n_q + n_g,) * 2), failed=True)
+            blocks, unit = collected
+            apply_prior(blocks, params, gains["b"], self.sigma_corrector, self.sigma_bpm, unit, sigma_q)
+            grad, hess = reduce_blocks(blocks)
+            return LMPoint(blocks.loss, grad, hess, extra=blocks)
+
+        def on_accept(params: np.ndarray, point: LMPoint) -> None:
+            gains["best_b"], gains["best_blocks"] = gains["b"].copy(), point.extra
+            self.history.append((dict(zip(knob_names, params[:n_q].tolist(), strict=True)), float(point.loss)))
+
+        def after_step(params: np.ndarray, optimiser) -> None:
+            if gains["best_blocks"] is not None:
+                gains["b"] = gains["best_b"] + back_substitute(gains["best_blocks"], params - optimiser.best.value)
+
+        optimiser, self.diagnostics = run_levenberg_marquardt(
+            u,
+            evaluate,
+            self.lm_config,
+            trial_loss=trial_loss if self.loss_only_trials else None,
+            on_accept=on_accept,
+            after_step=after_step,
+            writer=writer,
+        )
+        best_u = optimiser.best.value
         self.calibration_result = dict(zip(g_names, best_u[n_q:].tolist(), strict=True))
-        self.calibration_result.update(zip(b_names, best_b.tolist(), strict=True))
-        self.diagnostics = {
-            "converged": bool(last_update is not None and last_update.converged),
-            "reason": None if last_update is None else last_update.reason,
-            "iterations": completed,
-            "best_loss": float(optimiser.best_loss),
-        }
-        return best_knobs, None, knob_names
+        self.calibration_result.update(zip(b_names, gains["best_b"].tolist(), strict=True))
+        # No uncertainty yet: the gains' covariance needs the Schur-reduced normal matrix of the physical weights.
+        return dict(zip(knob_names, best_u[:n_q].tolist(), strict=True)), None

@@ -3,12 +3,12 @@ from __future__ import annotations
 import numpy as np
 
 from aba_optimiser.mad.scripts import dump_debug_script
-from aba_optimiser.workers.tracking import TrackingWorker
-from aba_optimiser.workers.tracking_position_only import PositionOnlyTrackingWorker
+from aba_optimiser.workers.tracking import TrackingWorker, active_observables
 
 
-def _build_worker(worker_cls: type[TrackingWorker]) -> TrackingWorker:
-    worker = object.__new__(worker_cls)
+def _build_worker(*, include_momentum: bool = True) -> TrackingWorker:
+    worker = object.__new__(TrackingWorker)
+    worker.observables = active_observables("xy", include_momentum)
     worker.comparisons = {
         "x": [np.array([[1.0, 5.0]])],
         "y": [np.array([[2.0, 6.0]])],
@@ -26,7 +26,7 @@ def _build_worker(worker_cls: type[TrackingWorker]) -> TrackingWorker:
 
 
 def test_tracking_worker_accumulates_all_configured_observables() -> None:
-    worker = _build_worker(TrackingWorker)
+    worker = _build_worker()
     results = {
         "x": np.array([[2.0, 100.0]]),
         "y": np.array([[4.0, 100.0]]),
@@ -45,7 +45,7 @@ def test_tracking_worker_accumulates_all_configured_observables() -> None:
 
 
 def test_position_only_tracking_worker_ignores_momentum_observables() -> None:
-    worker = _build_worker(PositionOnlyTrackingWorker)
+    worker = _build_worker(include_momentum=False)
     results = {
         "x": np.array([[2.0, 100.0]]),
         "y": np.array([[4.0, 100.0]]),
@@ -60,7 +60,7 @@ def test_position_only_tracking_worker_ignores_momentum_observables() -> None:
 
 
 def test_tracking_worker_supports_single_plane_observable_sets() -> None:
-    worker = _build_worker(TrackingWorker)
+    worker = _build_worker()
     worker.observables = ("x", "px")
     results = {
         "x": np.array([[2.0, 100.0]]),

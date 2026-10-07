@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from aba_optimiser.optimisers.base import BaseOptimiser
 
+if TYPE_CHECKING:
+    from aba_optimiser.config import OptimiserConfig
+
 
 class LBFGSOptimiser(BaseOptimiser):
-    OPTIMISER_NAME = "lbfgs"
-
     """
     Limited-memory BFGS with an adaptive, line-search-free step length.
 
@@ -25,6 +26,22 @@ class LBFGSOptimiser(BaseOptimiser):
     * Initial Hessian scaling gamma = (s^T y)/(y^T y) is retained for conditioning.
     * The BB1 multiplier reuses the (s, y) pair already built; no extra evaluations.
     """
+
+    OPTIMISER_NAME = "lbfgs"
+    KNOB_VECTORS = ("prev_params", "prev_grads")
+    KNOB_VECTOR_LISTS = ("S", "Y")
+
+    @classmethod
+    def config_kwargs(cls, config: OptimiserConfig, n_params: int) -> dict[str, Any]:
+        del n_params
+        return {
+            "history_size": config.lbfgs_history_size,
+            "eps": 1e-12,
+            "weight_decay": 0,
+            "max_grad_norm": config.lbfgs_max_grad_norm,
+            "max_step_norm": config.lbfgs_max_step_norm,
+            "powell_damping": config.lbfgs_powell_damping,
+        }
 
     def __init__(
         self,
@@ -150,7 +167,7 @@ class LBFGSOptimiser(BaseOptimiser):
         self.t += 1
 
         # Weight decay (L2 regularisation)
-        g = grads + (self.weight_decay * params if self.weight_decay != 0 else 0)
+        g = self.with_weight_decay(grads, params, self.weight_decay)
 
         # Gradient clipping — keeps noisy gradients from corrupting the (s,y) history
         if self.max_grad_norm is not None:
@@ -187,7 +204,7 @@ class LBFGSOptimiser(BaseOptimiser):
 
         return new_params
 
-    def state_to_dict(self) -> dict[str, Any]:
+    def state_dict(self) -> dict[str, Any]:
         """Return optimiser internal state as a serialisable dictionary."""
         return {
             "type": self.OPTIMISER_NAME,
@@ -210,7 +227,7 @@ class LBFGSOptimiser(BaseOptimiser):
             "powell_damping": float(self.powell_damping),
         }
 
-    def load_state_dict(self, state: dict[str, Any]) -> None:
+    def _load_state(self, state: dict[str, Any]) -> None:
         """Restore optimiser internal state from a dictionary."""
         if state.get("type") != self.OPTIMISER_NAME:
             raise ValueError(

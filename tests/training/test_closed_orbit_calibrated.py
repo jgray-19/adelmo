@@ -83,7 +83,7 @@ def test_unit_gains_are_recovered_as_zero(seq_k: Path) -> None:
 
     fitter = _fitter(seq_k, series)
     try:
-        fitted, _ = fitter.run()
+        fitted = fitter.run().knobs
     finally:
         fitter.close()
 

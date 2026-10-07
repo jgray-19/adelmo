@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+from aba_optimiser.workers.protocol import Ack, Command, CommandKind, LossReply
 
 if TYPE_CHECKING:
     from aba_optimiser.training.workers.payloads import WorkerPayloadBuilder
@@ -65,14 +67,7 @@ class OutlierScreener:
 
         worker_metadata = pool.metadata
         diagnostics = self.request_worker_diagnostics(pool.channels, initial_knobs)
-        worker_losses: list[float] = []
-        for idx, diag in enumerate(diagnostics):
-            total_loss_raw = diag.get("total_loss")
-            if not isinstance(total_loss_raw, int | float | np.floating):
-                raise RuntimeError(
-                    f"Worker diagnostics at index {idx} missing numeric total_loss: {diag}"
-                )
-            worker_losses.append(float(total_loss_raw))
+        worker_losses = [float(diag.loss) for diag in diagnostics]
 
         worker_disabled = self.classify_worker_outliers(
             np.asarray(worker_losses, dtype=np.float64),
@@ -115,19 +110,18 @@ class OutlierScreener:
         self,
         channels: WorkerChannels,
         initial_knobs: dict[str, float],
-    ) -> list[dict[str, object]]:
-        """Request diagnostics from all workers and return validated payloads."""
-        diagnostics: list[dict[str, object]] = []
-        channels.send_all({"cmd": "diagnostics", "knobs": initial_knobs})
-        for result in channels.recv_all():
-            if not isinstance(result, dict):
-                raise RuntimeError(f"Unexpected diagnostics payload from worker: {type(result)}")
-            diagnostics.append(result)  # ty:ignore[invalid-argument-type]
+    ) -> list[LossReply]:
+        """Request every worker's total and per-point loss at ``initial_knobs``."""
+        channels.send_all(Command(CommandKind.DIAGNOSE, {"knobs": initial_knobs}))
+        diagnostics = channels.recv_all()
+        for result in diagnostics:
+            if not isinstance(result, LossReply):
+                raise RuntimeError(f"Unexpected diagnostics reply from worker: {result!r}")
         return diagnostics
 
     def build_bpm_masks_from_diagnostics(
         self,
-        diagnostics: list[dict[str, object]],
+        diagnostics: list[LossReply],
         worker_metadata: list[WorkerRuntimeMetadata],
         bpm_sigma_threshold: float,
     ) -> list[np.ndarray]:
@@ -135,8 +129,8 @@ class OutlierScreener:
         bpm_masks: list[np.ndarray] = []
 
         for meta, diag in zip(worker_metadata, diagnostics, strict=True):
-            worker_id = int(diag["worker_id"])
-            loss_per_point = np.asarray(diag["loss_per_bpm"], dtype=np.float64)
+            worker_id = diag.worker_id
+            loss_per_point = np.asarray(diag.per_point, dtype=np.float64)
             loss_per_bpm = self.payload_builder.diagnostic_loss_per_bpm(
                 loss_per_point=loss_per_point,
                 bpm_names=meta.bpm_names,
@@ -293,7 +287,7 @@ class OutlierScreener:
 
     def summarise_screening_losses(
         self,
-        diagnostics: list[dict[str, object]],
+        diagnostics: list[LossReply],
         bpm_masks: list[np.ndarray],
         worker_disabled: list[bool],
         worker_metadata: list[WorkerRuntimeMetadata],
@@ -305,7 +299,7 @@ class OutlierScreener:
         for idx, (diag, mask, disable, meta) in enumerate(
             zip(diagnostics, bpm_masks, worker_disabled, worker_metadata, strict=True)
         ):
-            loss_per_point = np.asarray(diag["loss_per_bpm"], dtype=np.float64)
+            loss_per_point = np.asarray(diag.per_point, dtype=np.float64)
             expanded_mask = self.payload_builder.expand_bpm_mask(mask, meta.n_run_turns)
             if loss_per_point.size != expanded_mask.size:
                 raise RuntimeError(
@@ -349,14 +343,12 @@ class OutlierScreener:
         ):
             expanded_mask = self.payload_builder.expand_bpm_mask(keep_mask, meta.n_run_turns)
             conn.send(
-                {
-                    "cmd": "apply_mask",
-                    "keep_bpm_mask": expanded_mask.tolist(),
-                    "disable_worker": disable,
-                }
+                Command(
+                    CommandKind.APPLY_MASK,
+                    {"keep_bpm_mask": expanded_mask, "disable_worker": disable},
+                )
             )
 
         for ack in pool.channels.recv_all():
-            ack_dict = cast("dict[object, object]", ack) if isinstance(ack, dict) else None
-            if ack_dict is None or ack_dict.get("status") != "ok":
-                raise RuntimeError(f"Failed to apply worker mask settings: {ack}")
+            if not isinstance(ack, Ack):
+                raise RuntimeError(f"Failed to apply worker mask settings: {ack!r}")

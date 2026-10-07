@@ -59,6 +59,7 @@ from aba_optimiser.accelerators import PSB
 from aba_optimiser.mad import GradientDescentMadInterface
 from aba_optimiser.mad.scripts import CLOSED_TWISS_INIT, PYTHON_IN_MAD
 from aba_optimiser.training.config.models import SequenceConfig
+from aba_optimiser.training.reduction import reduce_replies
 from aba_optimiser.training.workers.pool import WorkerPool
 from aba_optimiser.training_closed_twiss import (
     DEFAULT_OBSERVABLES,
@@ -67,6 +68,7 @@ from aba_optimiser.training_closed_twiss import (
 )
 from aba_optimiser.workers import ClosedTwissWorker
 from aba_optimiser.workers.closed_twiss import read_orbit_only
+from aba_optimiser.workers.protocol import Start
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -175,8 +177,7 @@ def _fit(
             dict.fromkeys(families, prior_strength) if prior_strength > 0.0 else None
         ),
     )
-    final_knobs, _ = fitter.run()
-    return final_knobs
+    return fitter.run().knobs
 
 
 @pytest.mark.slow
@@ -367,10 +368,10 @@ def _normal_matrix(
         for worker_id, (config, data) in enumerate(fitter.worker_payloads):
             pool.spawn(ClosedTwissWorker, worker_id, data, config, fitter.simulation_config)
         names = list(fitter.config_manager.knob_names)
-        *_, normal_matrix, _ = fitter._collect_gn(
-            pool.channels, dict.fromkeys(names, 0.0), names
-        )
-        return normal_matrix, names
+        knobs = dict.fromkeys(names, 0.0)
+        pool.channels.send_all(Start(knobs))
+        replies = fitter._evaluate_workers(pool.channels, knobs)
+        return reduce_replies(replies, len(names)).normal, names
     finally:
         pool.stop()
         iface = getattr(fitter.config_manager, "mad_iface", None)

@@ -252,11 +252,6 @@ class ClosedTwissData:
     weight_scale: float = 1.0
     total_points: int = 1
 
-    @property
-    def all_observables(self) -> list[Observable]:
-        """Observable blocks contributing to this worker's loss."""
-        return self.observables
-
 
 class WeightProcessor:
     """Utility class for processing and normalizing measurement weights.
@@ -409,17 +404,3 @@ def hessian_uncertainties(
     covariance = _floored_inverse(normal_matrix, min_eigenvalue)
     variances = np.clip(np.diag(covariance), 0.0, None)
     return np.sqrt(variances)
-
-
-def split_array_to_batches(array: np.ndarray, num_batches: int, axis: int = 0) -> list[np.ndarray]:
-    """Split an array into equal batches along specified axis.
-
-    Args:
-        array: Input array to split
-        num_batches: Number of batches to create
-        axis: Axis along which to split
-
-    Returns:
-        List of array batches
-    """
-    return np.array_split(array, num_batches, axis=axis)

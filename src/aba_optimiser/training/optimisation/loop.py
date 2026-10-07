@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from aba_optimiser.optimisers import adam as _adam  # noqa: F401
 from aba_optimiser.optimisers import lbfgs as _lbfgs  # noqa: F401
-from aba_optimiser.optimisers.base import BaseOptimiser
+from aba_optimiser.optimisers.base import BaseOptimiser, BestTracker
 from aba_optimiser.training.optimisation.checkpointing import OptimisationCheckpointer
 from aba_optimiser.training.optimisation.scheduler import LRScheduler
+from aba_optimiser.training.reduction import reduce_replies
+from aba_optimiser.training.results import FitDiagnostics
+from aba_optimiser.workers.protocol import Evaluate
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -37,9 +39,6 @@ class OptimisationLoop:
         true_strengths: dict[str, float],
         optimiser_config: OptimiserConfig,
         simulation_config: SimulationConfig,
-        optimiser_type: str | None = None,
-        abs_offsets: np.ndarray | None = None,
-        dabs_dopt: np.ndarray | None = None,
     ):
         self.knob_names = knob_names
         self.true_strengths = true_strengths
@@ -48,19 +47,18 @@ class OptimisationLoop:
         self.smoothed_loss_change: float = 0.0
         self.grad_norm_alpha = optimiser_config.grad_norm_alpha
 
-        # Track best knobs and loss for rejection logic
-        self.best_loss: float = float("inf")
-        self.best_knobs: dict[str, float] = {}
+        #: Best knobs so far and their (validation, else training) loss; empty until the first epoch.
+        self.best: BestTracker[dict[str, float]] = BestTracker(value={})
+        #: How the last :meth:`run_optimisation` ended.
+        self.diagnostics: FitDiagnostics | None = None
         self.loss_improvement_threshold = 1e-4  # Minimum relative improvement to accept new best
 
         self.max_epochs = optimiser_config.max_epochs
         self.gradient_converged_value = optimiser_config.gradient_converged_value
         self.optimiser: BaseOptimiser
 
-        # Initialise optimiser
-        if optimiser_type is not None:
-            optimiser_config = replace(optimiser_config, optimiser_type=optimiser_type)
-        self._init_optimiser(initial_strengths.shape, optimiser_config)
+        self.optimiser = BaseOptimiser.from_config(optimiser_config, len(knob_names))
+        LOGGER.info(f"Using optimiser: {self.optimiser.__class__.__name__}")
 
         # Initialise scheduler
         self.scheduler = LRScheduler(
@@ -72,52 +70,6 @@ class OptimisationLoop:
         )
         self.num_batches = simulation_config.num_batches
 
-        if abs_offsets is None:
-            self.abs_offsets = np.zeros_like(initial_strengths, dtype=np.float64)
-        else:
-            self.abs_offsets = np.asarray(abs_offsets, dtype=np.float64)
-
-        if dabs_dopt is None:
-            self.dabs_dopt = np.ones_like(initial_strengths, dtype=np.float64)
-        else:
-            self.dabs_dopt = np.asarray(dabs_dopt, dtype=np.float64)
-
-        if self.abs_offsets.shape != initial_strengths.shape:
-            raise ValueError("abs_offsets must have same shape as initial_strengths")
-        if self.dabs_dopt.shape != initial_strengths.shape:
-            raise ValueError("dabs_dopt must have same shape as initial_strengths")
-        if np.any(self.dabs_dopt == 0.0):
-            raise ValueError("dabs_dopt contains zero entries, cannot map trust region")
-
-        self.dopt_dabs = 1.0 / self.dabs_dopt
-
-    def _init_optimiser(self, shape: tuple[int, ...], optimiser_config: OptimiserConfig) -> None:
-        """Initialise the optimiser based on type."""
-        optimiser_type = optimiser_config.optimiser_type
-        if optimiser_type == "adam":
-            eps = {} if optimiser_config.adam_eps is None else {"eps": optimiser_config.adam_eps}
-            self.optimiser = BaseOptimiser.create(
-                optimiser_type,
-                shape=shape,
-                beta1=0.9,
-                beta2=0.999,
-                weight_decay=optimiser_config.adam_weight_decay,
-                **eps,
-            )
-        elif optimiser_type == "lbfgs":
-            self.optimiser = BaseOptimiser.create(
-                optimiser_type,
-                history_size=optimiser_config.lbfgs_history_size,
-                eps=1e-12,
-                weight_decay=0,
-                max_grad_norm=optimiser_config.lbfgs_max_grad_norm,
-                max_step_norm=optimiser_config.lbfgs_max_step_norm,
-                powell_damping=optimiser_config.lbfgs_powell_damping,
-            )
-        else:
-            raise ValueError(f"Unknown optimiser type: {optimiser_type}")
-        LOGGER.info(f"Using optimiser: {self.optimiser.__class__.__name__}")
-
     def _is_new_best(
         self,
         epoch_loss: float,
@@ -126,19 +78,19 @@ class OptimisationLoop:
     ) -> bool:
         """Decide whether the current epoch should replace the best known state."""
         should_save_as_best = True
-        if self.best_loss != float("inf") and prev_loss is not None:
+        if self.best.loss != float("inf") and prev_loss is not None:
             loss_improvement = (
-                (self.best_loss - epoch_loss) / abs(prev_loss) if prev_loss != 0 else 0
+                (self.best.loss - epoch_loss) / abs(prev_loss) if prev_loss != 0 else 0
             )
             if loss_improvement < self.loss_improvement_threshold:
-                best_sum_diff = self._calculate_diff(self.best_knobs)
+                best_sum_diff = self._calculate_diff(self.best.value)
                 if sum_diff > best_sum_diff:
                     should_save_as_best = False
                     LOGGER.debug(
                         f"Not saving as best: loss improvement {loss_improvement:.3e} < {self.loss_improvement_threshold:.3e} "
                         f"and rel_diff {sum_diff:.3e} > {best_sum_diff:.3e}."
                     )
-        return should_save_as_best and epoch_loss < self.best_loss
+        return should_save_as_best and epoch_loss < self.best.loss
 
     def _should_stop_for_loss_change(
         self,
@@ -195,7 +147,10 @@ class OptimisationLoop:
             )
 
         last_completed_epoch = start_epoch - 1
+        stop_reason = "max_epochs"
+        epochs_run = start_epoch
         for epoch in range(start_epoch, self.max_epochs):
+            epochs_run = epoch + 1
             epoch_start = time.time()
 
             epoch_loss = 0.0
@@ -205,7 +160,7 @@ class OptimisationLoop:
             epoch_had_particle_loss = False
 
             for batch in range(self.num_batches):
-                channels.send_all((current_knobs, batch))
+                channels.send_all(Evaluate(current_knobs, batch))
 
                 batch_loss, batch_grad, had_particle_loss = self._collect_batch_results(channels)
                 epoch_loss += batch_loss
@@ -245,13 +200,12 @@ class OptimisationLoop:
 
             new_best = False
             if self._is_new_best(stop_loss, prev_loss, sum_true_diff):
-                self.best_loss = stop_loss
-                self.best_knobs = current_knobs.copy()
+                self.best.record(stop_loss, current_knobs.copy())
                 new_best = True
 
             hook_note = None
             if epoch_end_hook is not None:
-                hook_note = epoch_end_hook(current_knobs, self.best_knobs)
+                hook_note = epoch_end_hook(current_knobs, self.best.value)
 
             stop_for_loss_change = self._should_stop_for_loss_change(epoch, stop_loss, prev_loss)
             if not stop_for_loss_change:
@@ -288,61 +242,36 @@ class OptimisationLoop:
 
             if stop_for_loss_change:
                 LOGGER.info(f"\nLoss change below threshold. Stopping early at epoch {epoch}.")
+                stop_reason = "loss_converged"
                 break
 
             if stop_for_grad_norm:
                 LOGGER.info(
                     f"\nGradient norm below threshold: {self.smoothed_grad_norm:.3e}. Stopping early at epoch {epoch}."
                 )
+                stop_reason = "gradient_converged"
                 break
         if checkpointer.should_save_final(last_completed_epoch):
             checkpointer.save(last_completed_epoch, current_knobs, prev_loss)
+        self.diagnostics = FitDiagnostics(
+            converged=stop_reason != "max_epochs",
+            reason=stop_reason,
+            iterations=epochs_run,
+            best_loss=self.best.loss,
+        )
 
-        return self.best_knobs
+        return self.best.value
 
     def _collect_batch_results(
         self, channels: WorkerChannels
     ) -> tuple[float, np.ndarray, bool]:
-        """Collect results from all workers for a batch.
+        """Sum the workers' gradients for one batch and average their losses.
 
-        Aggregates gradients using per-knob averaging: each knob's gradient is
-        averaged only over the workers that contributed a non-zero gradient for
-        that knob. This prevents magnets at the edges of the BPM range (which
-        are only visible to fewer workers) from being under-weighted compared
-        to magnets in the middle (which contribute gradients from all workers).
-
-        Returns a third element `had_particle_loss` — True if any worker detected
-        particle loss this batch. The caller should reject the knob update for
-        the enclosing epoch in that case.
+        Returns ``(loss, gradient, had_particle_loss)``; on particle loss the caller
+        rejects the knob update for the enclosing epoch.
         """
-        import math
-
-        total_loss = 0.0
-        agg_grad = np.zeros(len(self.knob_names), dtype=float)
-        had_particle_loss = False
-        results = channels.recv_all()
-        n_workers = len(results)
-        if n_workers == 0:
-            raise RuntimeError("No training workers returned batch results")
-
-        for result in results:
-            if not isinstance(result, tuple) or len(result) != 3:
-                raise RuntimeError(f"Unexpected worker result payload: {result!r}")
-
-            _, grad, loss = cast("tuple[object, np.ndarray, float]", result)
-            if loss == float("inf"):
-                LOGGER.error("Worker error detected, stopping optimisation immediately.")
-                raise RuntimeError("Worker error detected during optimisation")
-
-            if math.isnan(float(loss)):
-                had_particle_loss = True
-                continue
-
-            grad_flat = grad.flatten()
-            agg_grad += grad_flat
-            total_loss += float(loss)
-
-        return total_loss / n_workers, agg_grad, had_particle_loss
+        reduced = reduce_replies(channels.recv_all(), len(self.knob_names))
+        return reduced.loss / len(channels.workers), reduced.grad, reduced.particle_lost
 
     def _update_knobs(
         self, current_knobs: dict[str, float], agg_grad: np.ndarray, lr: float

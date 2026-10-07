@@ -4,36 +4,17 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-import tfs
 from pymadng_utils.io.utils import read_knobs
-
-if TYPE_CHECKING:
-    import pandas as pd
 
 LOGGER = logging.getLogger(__name__)
 
 __all__ = [
-    "bpm_supports_both_planes",
-    "bpm_supports_plane",
     "create_bpm_range_specs",
     "extract_bpm_range_names",
     "filter_bad_bpms",
-    "find_common_bpms",
-    "load_tfs_files",
     "normalise_true_strengths",
 ]
-
-
-def find_common_bpms(*dataframes: pd.DataFrame) -> list[str]:
-    """Return BPM names common to all tables, preserving the first table order."""
-    if not dataframes:
-        return []
-    common = set(dataframes[0].index)
-    for dataframe in dataframes[1:]:
-        common &= set(dataframe.index)
-    return [str(bpm) for bpm in dataframes[0].index if bpm in common]
 
 
 def filter_bad_bpms(
@@ -131,38 +112,6 @@ def extract_bpm_range_names(
         extracted = extracted[::-1]
 
     return extracted
-
-
-def load_tfs_files(
-    directory: Path,
-    file_specs: dict[str, tuple[str, str]],
-) -> dict[str, pd.DataFrame]:
-    """Load TFS files, preserving phase-table NAME/NAME2 rows."""
-    no_index_keys = {key for key in file_specs if "phase" in key and "beta" not in key}
-    loaded = {}
-    for key, (prefix, suffix) in file_specs.items():
-        path = directory / f"{prefix}{suffix}.tfs"
-        if not path.exists():
-            raise FileNotFoundError(path)
-        loaded[key] = tfs.read(path, index=None if key in no_index_keys else "NAME")
-    return loaded
-
-
-def bpm_supports_plane(accelerator, bpm: str, kick_plane: str) -> bool:
-    """Return whether ``bpm`` can measure the requested kick plane."""
-    plane = accelerator.infer_monitor_plane(bpm)
-    if kick_plane in ("x", "X"):
-        return "H" in plane
-    if kick_plane in ("y", "Y"):
-        return "V" in plane
-    if kick_plane in ("xy", "XY"):
-        return ("H" in plane) or ("V" in plane)
-    raise ValueError(f"Unsupported kick plane {kick_plane!r}")
-
-
-def bpm_supports_both_planes(accelerator, bpm: str) -> bool:
-    """Return whether ``bpm`` can measure both transverse planes."""
-    return bpm_supports_plane(accelerator, bpm, "x") and bpm_supports_plane(accelerator, bpm, "y")
 
 
 def create_bpm_range_specs(

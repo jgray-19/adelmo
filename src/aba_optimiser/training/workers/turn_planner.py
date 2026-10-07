@@ -35,7 +35,7 @@ def group_turns_by_file(
     return turns_by_file
 
 
-def _allocate_batches_per_file(
+def allocate_batches_per_file(
     turns_by_file: dict[int, list[int]], num_turn_batches: int
 ) -> dict[int, int]:
     """Split ``num_turn_batches`` batches across files, keeping >=1 turn per batch.
@@ -194,7 +194,7 @@ class WorkerTurnPlanner:
         for turns in turns_by_file.values():
             self.shuffle_turns(turns)
 
-        batches_per_file = _allocate_batches_per_file(turns_by_file, num_turn_batches)
+        batches_per_file = allocate_batches_per_file(turns_by_file, num_turn_batches)
         mad_num_batches = self.simulation_config.num_batches
 
         turn_batches: list[list[int]] = []

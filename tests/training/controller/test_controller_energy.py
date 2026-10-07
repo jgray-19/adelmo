@@ -62,7 +62,7 @@ def test_controller_energy_opt(
         assert true_loss < initial_loss * 1e-2
         return
 
-    estimate, unc = _run_energy_optimisation_case(
+    result = _run_energy_optimisation_case(
         tmp_path=tmp_path,
         loaded_interface=loaded_interface,
         simulation_config=simulation_config,
@@ -72,6 +72,7 @@ def test_controller_energy_opt(
         magnet_range="BPM.9R2.B1/BPM.9L3.B1",
         mad_log_name="controller_energy_opt.log",
     )
+    estimate, unc = result.knobs, result.uncertainties
 
     assert np.allclose(
         estimate.pop("pt"), loaded_interface.dp2pt(DPP_VALUE), rtol=2e-3, atol=1e-10

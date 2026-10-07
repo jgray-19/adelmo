@@ -1,8 +1,9 @@
 """Particle tracking worker for multi-turn beam dynamics simulations.
 
-This module implements the TrackingWorker class which performs particle
-tracking simulations and computes gradients for optimisation. It handles
-both position and momentum observables with full symmetry between x/y planes.
+A :class:`TrackingWorker` tracks its particles through its BPM range and returns
+the weighted least-squares loss and its knob gradient. Constructed with
+``validation=True`` it instead scores held-out turns: no knob parameters, no
+gradients, only the loss.
 """
 
 from __future__ import annotations
@@ -16,15 +17,13 @@ from aba_optimiser.mad.scripts import (
     build_tracking_init_script,
     build_tracking_preflight_script,
     build_tracking_script,
+    build_validation_init_script,
+    build_validation_script,
     dump_debug_script,
 )
 from aba_optimiser.workers.abstract_worker import AbstractWorker
-from aba_optimiser.workers.common import (
-    PrecomputedTrackingWeights,
-    TrackingData,
-    UncertaintyPart,
-    split_array_to_batches,
-)
+from aba_optimiser.workers.common import TrackingData, UncertaintyPart
+from aba_optimiser.workers.protocol import Ack, CommandKind, GradReply, LossReply
 
 if TYPE_CHECKING:
     from multiprocessing.connection import Connection
@@ -33,6 +32,7 @@ if TYPE_CHECKING:
 
     from aba_optimiser.config import SimulationConfig
     from aba_optimiser.workers.common import WorkerConfig
+    from aba_optimiser.workers.protocol import Command, Evaluate
 
 LOGGER = logging.getLogger(__name__)
 
@@ -54,26 +54,35 @@ READING_CODES: dict[str, int] = {"x": 0, "y": 1, "px": 2, "py": 3}
 START_CODES = np.array([READING_CODES["x"], READING_CODES["y"]])
 
 
+def active_observables(kick_plane: str, include_momentum: bool) -> tuple[str, ...]:
+    """Observables a worker of this kick plane compares."""
+    if kick_plane == "xy":
+        return ("x", "y", "px", "py") if include_momentum else ("x", "y")
+    if kick_plane == "x":
+        return ("x", "px") if include_momentum else ("x",)
+    if kick_plane == "y":
+        return ("y", "py") if include_momentum else ("y",)
+    raise ValueError(f"Unsupported kick plane {kick_plane!r}")
+
+
+def _largest_divisor_at_most(value: int, limit: int) -> int:
+    """Return the largest positive divisor of ``value`` not exceeding ``limit``."""
+    if value <= 0:
+        return 0
+    for candidate in range(min(value, limit), 0, -1):
+        if value % candidate == 0:
+            return candidate
+    return 1
+
+
 class TrackingWorker(AbstractWorker[TrackingData]):
     """Worker for particle tracking simulations.
 
-    This worker performs particle tracking through accelerator lattices,
-    computing positions and momenta at each BPM. It calculates gradients
-    of the loss function with respect to optimisation knobs using
-    differential algebra techniques.
-
-    The implementation treats x/y and position/momentum symmetrically,
-    ensuring consistent handling of all phase space dimensions.
+    Tracks every particle of a batch through the worker's range, compares the
+    observed positions (and, with ``SimulationConfig.optimise_momenta``, momenta)
+    with the measurement, and returns the loss and its knob gradient from the
+    differential-algebra map.
     """
-
-    #: Set by the ``apply_mask`` control command. Declared at class level because
-    #: subclasses override ``prepare_data`` without calling super (see
-    #: ``ValidationTrackingWorker``), and the command loop reads this on every
-    #: message -- an unset attribute would crash any run with screening disabled.
-    worker_disabled: bool = False
-
-    observables: tuple[str, ...] = ("x", "y", "px", "py")
-    include_momentum = True
 
     def __init__(
         self,
@@ -82,56 +91,63 @@ class TrackingWorker(AbstractWorker[TrackingData]):
         data: TrackingData,
         config: WorkerConfig,
         simulation_config: SimulationConfig,
+        validation: bool = False,
     ) -> None:
-        """Initialize the tracking worker.
-
-        Args:
-            conn: Pipe connection for communicating with main process
-            worker_id: Unique identifier for this worker
-            data: TrackingData container with reference measurements
-            config: Configuration parameters
-            simulation_config: Simulation configuration settings
-        """
+        self.validation = validation
         super().__init__(conn, worker_id, data, config, simulation_config)
 
     def prepare_data(self, data: TrackingData) -> None:
-        """Process and prepare tracking data for computation.
-
-        Extracts the active observables, loads precomputed weights, splits
-        data into batches, and prepares initial conditions.
-
-        Args:
-            data: TrackingData container with reference measurements
-        """
-        self.observables = self._resolve_observables()
-        num_batches = min(self.simulation_config.num_batches, len(data.init_coords))
+        """Split the measurement and start coordinates into batches and build the MAD scripts."""
+        self.observables = active_observables(
+            self.config.kick_plane, self.simulation_config.optimise_momenta
+        )
+        n_init = len(data.init_coords)
+        if self.validation:
+            # The MAD track script iterates a single fixed ``batch_size`` over every
+            # batch, so a divisor batch count keeps every held-out turn.
+            num_batches = _largest_divisor_at_most(n_init, self.simulation_config.num_batches)
+        else:
+            num_batches = min(self.simulation_config.num_batches, n_init)
         if num_batches <= 0:
             raise ValueError(f"Worker {self.worker_id}: No initial coordinates available")
-
-        n_init = len(data.init_coords)
-        init_coords = data.init_coords
-
         LOGGER.debug(
             f"Worker {self.worker_id}: Processing {n_init} particles in {num_batches} batches"
         )
 
-        # Validate initial conditions
+        init_coords = data.init_coords
         if np.isnan(init_coords).any():
             raise ValueError(f"Worker {self.worker_id}: NaNs found in initial coordinates")
-
-        self.comparison_arrays = self._extract_observable_arrays(data, n_init)
         if data.precomputed_weights is None:
             raise ValueError("Precomputed weights must be provided for TrackingWorker")
-        self.weight_arrays = self._load_precomputed_weights(data.precomputed_weights, n_init)
+
+        self.comparisons: dict[str, list[np.ndarray]] = {}
+        self.weights: dict[str, list[np.ndarray]] = {}
+        for observable in self.observables:
+            source_attr, plane_idx = OBSERVABLE_SPECS[observable]
+            values = getattr(data, source_attr)[:n_init][:, :, plane_idx]
+            weights = getattr(data.precomputed_weights, observable)[:n_init]
+            self.comparisons[observable] = np.array_split(values, num_batches)
+            self.weights[observable] = np.array_split(weights, num_batches)
         self.weight_scale = data.precomputed_weights.scale
-        self._prepare_batches(init_coords, data.init_pts, num_batches)
-        self._prepare_uncertainty_batches(data, n_init, num_batches)
+
+        # Flat copy kept in sync with MAD by per-epoch start-coordinate updates.
+        self._init_coords_np = np.ascontiguousarray(init_coords, dtype=np.float64)
+        self.init_coords = [batch.tolist() for batch in np.array_split(init_coords, num_batches)]
+        self.init_pts = [batch.tolist() for batch in np.array_split(data.init_pts, num_batches)]
+        self.batch_size = len(self.init_coords[0])
+        self.num_batches = num_batches
 
         self.worker_disabled = False
-        self.compute_hessian_on_exit = True
+        self.propagate_uncertainty_on_exit = True
         self.normalisation_points = self.comparisons[self.observables[0]][0].shape[1]
         self.keep_bpm_mask = np.ones(self.normalisation_points, dtype=bool)
 
+        if self.validation:
+            self.run_track_init_text = build_validation_init_script(self.observables)
+            self.run_track_script = build_validation_script(self.observables)
+            return
+
+        self._prepare_uncertainty_batches(data, n_init, num_batches)
         self.run_track_init_text = build_tracking_init_script(
             self.observables,
             start_on_first_turn=self.config.initial_condition_marker is not None,
@@ -140,61 +156,18 @@ class TrackingWorker(AbstractWorker[TrackingData]):
         self.uncertainty_track_script = build_tracking_script(
             self.observables, include_start_derivatives=True
         )
-        self._dump_debug_scripts()
-
-    def _dump_debug_scripts(self) -> None:
-        """Write generated MAD scripts to disk when debugging is enabled."""
-        dump_debug_script(
-            "run_track_init",
-            self.run_track_init_text,
-            debug=self.config.debug,
-            mad_logfile=self.config.mad_logfile,
-            worker_id=self.worker_id,
-        )
-        dump_debug_script(
-            "run_track",
-            self.run_track_script,
-            debug=self.config.debug,
-            mad_logfile=self.config.mad_logfile,
-            worker_id=self.worker_id,
-        )
-        dump_debug_script(
-            "run_track_uncertainty",
-            self.uncertainty_track_script,
-            debug=self.config.debug,
-            mad_logfile=self.config.mad_logfile,
-            worker_id=self.worker_id,
-        )
-
-    def _resolve_observables(self) -> tuple[str, ...]:
-        """Return the observables active for this worker configuration."""
-        kick_plane = self.config.kick_plane
-        if kick_plane == "xy":
-            return ("x", "y", "px", "py") if self.include_momentum else ("x", "y")
-        if kick_plane == "x":
-            return ("x", "px") if self.include_momentum else ("x",)
-        if kick_plane == "y":
-            return ("y", "py") if self.include_momentum else ("y",)
-        raise ValueError(f"Unsupported kick plane {kick_plane!r}")
-
-    def _extract_observable_arrays(self, data: TrackingData, n_init: int) -> dict[str, np.ndarray]:
-        """Return comparison arrays for the observables used by this worker."""
-        arrays: dict[str, np.ndarray] = {}
-        for observable in self.observables:
-            source_attr, plane_idx = OBSERVABLE_SPECS[observable]
-            source = getattr(data, source_attr)[:n_init]
-            arrays[observable] = source[:, :, plane_idx]
-        return arrays
-
-    def _load_precomputed_weights(
-        self,
-        weights: PrecomputedTrackingWeights,
-        n_init: int,
-    ) -> dict[str, np.ndarray]:
-        """Return per-particle weights for the active observables."""
-        return {
-            observable: getattr(weights, observable)[:n_init] for observable in self.observables
-        }
+        for name, text in (
+            ("run_track_init", self.run_track_init_text),
+            ("run_track", self.run_track_script),
+            ("run_track_uncertainty", self.uncertainty_track_script),
+        ):
+            dump_debug_script(
+                name,
+                text,
+                debug=self.config.debug,
+                mad_logfile=self.config.mad_logfile,
+                worker_id=self.worker_id,
+            )
 
     def _prepare_uncertainty_batches(self, data: TrackingData, n_init: int, num_batches: int) -> None:
         """Split reading ids and variances like the comparisons, for the uncertainty part."""
@@ -202,52 +175,15 @@ class TrackingWorker(AbstractWorker[TrackingData]):
         for observable in self.observables:
             source_attr, plane_idx = OBSERVABLE_SPECS[observable]
             variances = getattr(data, source_attr.replace("comparisons", "variances"))
-            self.variances[observable] = split_array_to_batches(
+            self.variances[observable] = np.array_split(
                 variances[:n_init, :, plane_idx], num_batches
             )
-        self.reading_ids = split_array_to_batches(data.reading_ids[:n_init], num_batches)
-        self.init_reading_ids = split_array_to_batches(data.init_reading_ids[:n_init], num_batches)
-        self.init_variances = split_array_to_batches(data.init_variances[:n_init], num_batches)
-
-    def _prepare_batches(
-        self, init_coords: np.ndarray, init_pts: np.ndarray, num_batches: int
-    ) -> None:
-        """Split data and initial conditions into batches.
-
-        Args:
-            init_coords: Initial particle coordinates
-            init_pts: Initial transverse momentum values
-            num_batches: Number of batches to create
-        """
-        # Keep flat numpy copies for fast update transfers
-        self._init_coords_np = np.ascontiguousarray(init_coords, dtype=np.float64)
-        self._init_pts_np = np.ascontiguousarray(init_pts, dtype=np.float64)
-
-        # Split initial conditions
-        init_coords_batches = split_array_to_batches(init_coords, num_batches)
-        init_pts_batches = split_array_to_batches(init_pts, num_batches)
-
-        # Convert to nested lists for MAD-NG
-        self.init_coords = [batch.tolist() for batch in init_coords_batches]
-        self.init_pts = [batch.tolist() for batch in init_pts_batches]
-        self.batch_size = len(self.init_coords[0])
-        self.num_batches = num_batches
-
-        self.comparisons = {
-            observable: split_array_to_batches(values, num_batches)
-            for observable, values in self.comparison_arrays.items()
-        }
-        self.weights = {
-            observable: split_array_to_batches(values, num_batches)
-            for observable, values in self.weight_arrays.items()
-        }
+        self.reading_ids = np.array_split(data.reading_ids[:n_init], num_batches)
+        self.init_reading_ids = np.array_split(data.init_reading_ids[:n_init], num_batches)
+        self.init_variances = np.array_split(data.init_variances[:n_init], num_batches)
 
     def setup_mad_sequence(self, mad: MAD) -> None:
-        """Configure MAD-NG sequence for tracking.
-
-        Args:
-            mad: MAD-NG interface object
-        """
+        """Configure MAD-NG sequence for tracking."""
         mad["batch_size"] = self.batch_size
         mad["num_batches"] = self.num_batches
         mad["optimise_energy"] = self.config.accelerator.optimise_energy
@@ -255,23 +191,18 @@ class TrackingWorker(AbstractWorker[TrackingData]):
         mad["n_run_turns"] = self.simulation_config.n_run_turns
 
     def _setup_da_maps(self, mad: MAD) -> None:
-        """Setup differential algebra maps for tracking.
+        """Install the knobs as TPSA parameters; a validation worker tracks numbers only."""
+        if self.validation:
+            mad.send("da_x0_base = damap{nv=6, np=0, mo=1, po=1}")
+            return
 
-        Creates base DAMAP and adds knob parameters for differentiation.
-
-        Args:
-            mad: MAD-NG interface object
-        """
-        # Remove "pt" from knob names if present (handled separately)
+        # ``pt`` is applied per particle, never as a sequence knob.
         knob_names = list(mad["knob_names"])
         if "pt" in knob_names:
             knob_names.remove("pt")
             mad["knob_names"] = knob_names
 
-        # Create base DAMAP
         self.create_base_damap(mad, knob_order=1)
-
-        # Add knobs as TPSA variables
         mad.send("""
 knob_monomials = {}
 for i,param in ipairs(knob_names) do
@@ -280,14 +211,19 @@ for i,param in ipairs(knob_names) do
 end
 """)
 
+    def on_start(self, knobs: dict[str, float]) -> MAD:
+        """Set up MAD, load the particles and check the observation geometry."""
+        # Replies carry one gradient entry per start value.
+        self.n_reply_knobs = len(knobs)
+        mad, nbpms = self.setup_mad_interface(knobs)
+        self.send_initial_conditions(mad)
+        mad.send(self.run_track_init_text)
+        self.run_preflight_check(mad, nbpms)
+        LOGGER.debug(f"Worker {self.worker_id}: Ready for computation with {nbpms} BPMs")
+        return mad
+
     def send_initial_conditions(self, mad: MAD) -> None:
-        """Send initial particle coordinates to MAD-NG.
-
-        Creates DAMAP objects for each particle in each batch.
-
-        Args:
-            mad: MAD-NG interface object
-        """
+        """Create one DA map per particle in each batch, at its start coordinates."""
         mad.send("""
 init_coords = python:recv()
 init_pts = python:recv()
@@ -304,14 +240,6 @@ for i=1,num_batches do
     end
 end
 """)
-
-    def _initialise_mad_computation(self, mad: MAD) -> None:
-        """Initialise MAD-NG environment for tracking computations.
-
-        Args:
-            mad: MAD-NG interface object
-        """
-        mad.send(self.run_track_init_text)
 
     def run_preflight_check(self, mad: MAD, nbpms: int) -> None:
         """Validate the observation geometry once with a single-particle dry run.
@@ -355,42 +283,45 @@ end
             expected,
         )
 
-    def compute_gradients_and_loss(
+    # ------------------------------------------------------------------
+    # Tracking
+    # ------------------------------------------------------------------
+
+    def _set_particle_pts(self, mad: MAD, pt: float, first_batch: int, last_batch: int) -> None:
+        """Set every particle's ``pt`` in batches ``first_batch..last_batch`` (1-based) to the machine ``pt`` plus its own offset."""
+        mad.send(f"""
+for b = {first_batch}, {last_batch} do
+    for i = 1, batch_size do
+        da_x0_c[b][i].pt:set0({pt:.15e} + init_pts[b][i])
+    end
+end
+""")
+
+    def _run_tracking_batch(
         self, mad: MAD, knob_updates: dict[str, float], batch: int
-    ) -> tuple[np.ndarray, float]:
-        """Compute gradients and loss for a batch of particle tracking.
-
-        Performs tracking simulation, receives position and momentum data
-        along with their derivatives, and computes loss and gradients using
-        weighted least-squares formulation.
-
-        Args:
-            mad: MAD-NG interface object
-            knob_updates: Dictionary of knob names to values
-            batch: Batch index to process
-
-        Returns:
-            Tuple of (gradient array, loss value)
-        """
-        results = self._run_tracking_batch(mad, knob_updates, batch)
-
-        # Compute loss and gradients
-        return self._compute_loss_and_gradients(results, batch)
+    ) -> dict[str, np.ndarray]:
+        """Run MAD-NG tracking for a single batch and return all outputs."""
+        machine_pt = knob_updates.get("pt", self.fixed_pt)
+        self.send_knobs(mad, knob_updates, plain=self.validation)
+        mad.send(f"batch = {batch + 1}")
+        self._set_particle_pts(mad, machine_pt, batch + 1, batch + 1)
+        mad.send(self.run_track_script)
+        return self._receive_tracking_results(mad)
 
     def _receive_tracking_results(
         self, mad: MAD, *, include_start_derivatives: bool = False
     ) -> dict[str, np.ndarray]:
         """Receive tracking results from MAD-NG.
 
-        Args:
-            mad: MAD-NG interface object
-            include_start_derivatives: Also receive ``d{o}_dc0``, shape
-                ``(n_particles, 2, n_points)``, the derivatives by the start x and y.
-
-        Returns:
-            Dictionary with one result array and one derivative array per active
-            observable.
+        A validation worker receives the observables alone. A training worker also
+        receives the loss report, one knob-derivative array per observable and, with
+        ``include_start_derivatives``, ``d{o}_dc0`` of shape ``(n_particles, 2,
+        n_points)``, the derivatives by the start x and y.
         """
+        if self.validation:
+            return {
+                observable: np.asarray(mad.recv()).squeeze(-1) for observable in self.observables
+            }
         loss_info: dict = mad.recv()
         n_lost: int = loss_info["n_lost"]
         n_total: int = loss_info["n_total"]
@@ -408,32 +339,6 @@ end
                 f"Worker {self.worker_id}: {n_lost}/{n_total} particles lost ({pct:.1f}%) during tracking"
             )
         return results
-
-    def _send_knobs(self, mad: MAD, knobs: dict[str, float]) -> None:
-        """Set this worker's sequence knobs; ``pt`` is applied per particle instead."""
-        update_commands = [
-            f"loaded_sequence['{name}']:set0({val:.15e})"
-            for name, val in knobs.items()
-            if name != "pt" and name in self.knob_name_set
-        ]
-        if update_commands:
-            mad.send("\n".join(update_commands))
-
-    def _run_tracking_batch(
-        self, mad: MAD, knob_updates: dict[str, float], batch: int
-    ) -> dict[str, np.ndarray]:
-        """Run MAD-NG tracking for a single batch and return all outputs."""
-        machine_pt = knob_updates.get("pt", getattr(self, "fixed_pt", 0.0))
-        self._send_knobs(mad, knob_updates)
-
-        mad.send(f"batch = {batch + 1}")
-        mad.send(f"""
-for i = 1, batch_size do
-    da_x0_c[batch][i].pt:set0({machine_pt:.15e} + init_pts[batch][i])
-end
-""")
-        mad.send(self.run_track_script)
-        return self._receive_tracking_results(mad)
 
     @staticmethod
     def _gradient_key(observable: str) -> str:
@@ -466,6 +371,57 @@ end
             loss_bpm += np.sum(weights[observable] * residuals[observable] ** 2, axis=0)
         return float(np.sum(loss_bpm)), loss_bpm
 
+    def _compute_loss_and_gradients(
+        self, results: dict[str, np.ndarray], batch: int
+    ) -> tuple[np.ndarray, float]:
+        """Weighted least-squares loss and its knob gradient for one batch."""
+        weights = self._masked_weights(batch)
+        residuals = self._residuals(results, batch)
+        gradient_shape = results[self._gradient_key(self.observables[0])].shape[1]
+        grad = np.zeros(gradient_shape, dtype=np.float64)
+        for observable in self.observables:
+            grad += np.einsum(
+                "pkm,pm->k",
+                results[self._gradient_key(observable)],
+                weights[observable] * residuals[observable],
+            )
+        loss, _ = self._compute_loss_and_bpm_contributions(results, batch)
+        return 2.0 * grad, loss
+
+    def evaluate(self, mad: MAD, message: Evaluate) -> GradReply:
+        """Loss and gradient of one batch.
+
+        The loss is per particle and per BPM point, so it is comparable across
+        workers (and to the held-out validation loss) however many particles a
+        worker holds; the gradient is per point and the loop divides it by the
+        total particle count.
+        """
+        if self.validation:
+            raise ValueError(f"Worker {self.worker_id}: validation workers do not evaluate gradients")
+        zeros = np.zeros(self.n_reply_knobs)
+        if self.worker_disabled:
+            return GradReply(self.worker_id, 0.0, zeros)
+        batch = int(message.batch)
+        try:
+            results = self._run_tracking_batch(mad, message.knobs, batch)
+        except ParticleLostError as exc:
+            LOGGER.warning(
+                "Worker %d: %s — sending zero contribution; epoch update will be rejected",
+                self.worker_id,
+                exc,
+            )
+            # NaN loss signals the aggregator to reject this epoch's knob updates.
+            return GradReply(self.worker_id, float("nan"), zeros)
+        grad, loss = self._compute_loss_and_gradients(results, batch)
+        n_particles = max(1, len(self.init_coords[batch]))
+        # ``normalisation_points`` is read live: ``APPLY_MASK`` shrinks it to the
+        # kept BPM count.
+        return GradReply(
+            self.worker_id,
+            loss / (self.normalisation_points * n_particles),
+            grad / self.normalisation_points,
+        )
+
     def compute_diagnostics(
         self, mad: MAD, knob_updates: dict[str, float]
     ) -> tuple[float, np.ndarray]:
@@ -481,8 +437,56 @@ end
 
         return total_loss, loss_per_bpm
 
+    def compute_validation_loss(self, mad: MAD, knob_updates: dict[str, float]) -> float:
+        """Held-out loss per particle and BPM point, normalised like the training loss."""
+        total_loss = 0.0
+        for batch in range(self.num_batches):
+            results = self._run_tracking_batch(mad, knob_updates, batch)
+            batch_loss, _ = self._compute_loss_and_bpm_contributions(results, batch)
+            n_particles = max(1, len(self.init_coords[batch]))
+            total_loss += batch_loss / (self.normalisation_points * n_particles)
+        return total_loss / max(1, self.num_batches)
+
+    # ------------------------------------------------------------------
+    # Commands
+    # ------------------------------------------------------------------
+
+    def handle_command(self, mad: MAD, command: Command) -> Ack | LossReply:
+        payload = command.payload
+        match command.kind:
+            case CommandKind.DIAGNOSE:
+                total_loss, loss_per_bpm = self.compute_diagnostics(mad, payload["knobs"])
+                return LossReply(
+                    self.worker_id,
+                    total_loss / self.normalisation_points,
+                    loss_per_bpm / self.normalisation_points,
+                )
+            case CommandKind.VALIDATE:
+                # A screened-out worker contributes no loss rather than a zero, which
+                # would dilute the mean by the fraction of disabled workers.
+                loss = None if self.worker_disabled else self.compute_validation_loss(mad, payload["knobs"])
+                return LossReply(self.worker_id, loss)
+            case CommandKind.APPLY_MASK:
+                keep_bpm_mask = np.asarray(payload["keep_bpm_mask"], dtype=bool)
+                if keep_bpm_mask.size:
+                    self._apply_runtime_mask(keep_bpm_mask)
+                self.worker_disabled = bool(payload["disable_worker"])
+            case CommandKind.SET_KNOBS:
+                knobs = payload["knobs"]
+                self.send_knobs(mad, knobs, plain=self.validation)
+                self._set_particle_pts(mad, knobs.get("pt", self.fixed_pt), 1, self.num_batches)
+            case CommandKind.UPDATE_INIT_COORDS:
+                self._send_init_condition_update(
+                    mad, *(np.asarray(payload[key], dtype=np.float64) for key in ("x", "px", "y", "py"))
+                )
+            case CommandKind.SET_UNCERTAINTY_MODE:
+                self.propagate_uncertainty_on_exit = bool(payload["enabled"])
+            case _:
+                return super().handle_command(mad, command)
+        return Ack(self.worker_id)
+
     def _apply_runtime_mask(self, keep_bpm_mask: np.ndarray) -> None:
-        """Apply BPM keep-mask for subsequent optimisation and Hessian steps."""
+        """Apply BPM keep-mask for subsequent optimisation and uncertainty steps."""
         if keep_bpm_mask.ndim != 1:
             raise ValueError("keep_bpm_mask must be a 1D array")
         if keep_bpm_mask.size != self.keep_bpm_mask.size:
@@ -545,75 +549,22 @@ end
         self._init_coords_np[:, 2] = new_y.ravel()
         self._init_coords_np[:, 3] = new_py.ravel()
 
-    def _handle_control_command(self, mad: MAD, command: dict[str, object]) -> None:
-        """Handle control-plane commands from parent process."""
-        cmd = command.get("cmd")
-        if cmd == "diagnostics":
-            raw_knobs = command.get("knobs", {})
-            if not isinstance(raw_knobs, dict):
-                raise ValueError(
-                    f"Worker {self.worker_id}: diagnostics command missing knob dictionary"
-                )
-            diagnostic_knobs: dict[str, float] = {}
-            for knob_name, knob_value in raw_knobs.items():
-                if not isinstance(knob_name, str):
-                    raise ValueError(
-                        f"Worker {self.worker_id}: knob name {knob_name!r} is not a string"
-                    )
-                if not isinstance(knob_value, int | float | np.floating):
-                    raise ValueError(
-                        f"Worker {self.worker_id}: knob {knob_name!r} has non-numeric value {knob_value!r}"
-                    )
-                diagnostic_knobs[knob_name] = float(knob_value)
-            total_loss, loss_per_bpm = self.compute_diagnostics(mad, diagnostic_knobs)
-            self.conn.send(
-                {
-                    "worker_id": self.worker_id,
-                    "total_loss": total_loss / self.normalisation_points,
-                    "loss_per_bpm": (loss_per_bpm / self.normalisation_points).tolist(),
-                }
-            )
-            return
+    # ------------------------------------------------------------------
+    # Uncertainty propagation
+    # ------------------------------------------------------------------
 
-        if cmd == "apply_mask":
-            keep_bpm_mask = np.asarray(command.get("keep_bpm_mask", []), dtype=bool)
-            disable_worker = bool(command.get("disable_worker", False))
-            if keep_bpm_mask.size:
-                self._apply_runtime_mask(keep_bpm_mask)
-            self.worker_disabled = disable_worker
-            self.conn.send({"worker_id": self.worker_id, "status": "ok"})
+    def on_stop(self, mad: MAD, failed: bool) -> None:
+        """A training worker answers :class:`Stop` with its uncertainty part."""
+        if self.validation:
             return
-
-        if cmd == "set_hessian_mode":
-            self.compute_hessian_on_exit = bool(command.get("enabled", True))
-            self.conn.send({"worker_id": self.worker_id, "status": "ok"})
-            return
-
-        if cmd == "set_knobs":
-            knobs = command["knobs"]
-            self._send_knobs(mad, knobs)
-            mad.send(f"""
-for b = 1, num_batches do
-    for i = 1, batch_size do
-        da_x0_c[b][i].pt:set0({knobs.get("pt", getattr(self, "fixed_pt", 0.0)):.15e} + init_pts[b][i])
-    end
-end
-""")
-            self.conn.send({"worker_id": self.worker_id, "status": "ok"})
-            return
-
-        if cmd == "update_init_coords":
-            self._send_init_condition_update(
-                mad,
-                *(
-                    np.asarray(command[key], dtype=np.float64)
-                    for key in ("x", "px", "y", "py")
-                ),
-            )
-            self.conn.send({"worker_id": self.worker_id, "status": "ok"})
-            return
-
-        raise ValueError(f"Worker {self.worker_id}: Unknown command {cmd}")
+        if not failed and not self.worker_disabled and self.propagate_uncertainty_on_exit:
+            LOGGER.debug(f"Worker {self.worker_id}: Propagating uncertainty")
+            try:
+                self.send_reply(self._compute_uncertainty_part(mad, self.n_reply_knobs))
+            except Exception as exc:  # noqa: BLE001
+                self.send_error_payload(exc, phase="uncertainty")
+        else:
+            self.send_reply(UncertaintyPart.empty(self.n_reply_knobs))
 
     def _compute_uncertainty_part(self, mad: MAD, n_knobs: int) -> UncertaintyPart:
         """Track every batch at the loaded knobs and return this worker's uncertainty part.
@@ -655,136 +606,3 @@ end
             sensitivities=np.concatenate(sensitivities),
             variances=np.concatenate(variances),
         )
-
-    def _compute_loss_and_gradients(
-        self, results: dict[str, np.ndarray], batch: int
-    ) -> tuple[np.ndarray, float]:
-        """Compute weighted loss and gradients from tracking results.
-
-        Uses symmetric treatment of all phase space dimensions.
-
-        Args:
-            results: Dictionary of tracking results and derivatives
-            batch: Batch index
-
-        Returns:
-            Tuple of (gradient array, loss value)
-        """
-        weights = self._masked_weights(batch)
-        residuals = self._residuals(results, batch)
-        gradient_shape = results[self._gradient_key(self.observables[0])].shape[1]
-        grad = np.zeros(gradient_shape, dtype=np.float64)
-        for observable in self.observables:
-            grad += np.einsum(
-                "pkm,pm->k",
-                results[self._gradient_key(observable)],
-                weights[observable] * residuals[observable],
-            )
-        loss, _ = self._compute_loss_and_bpm_contributions(results, batch)
-        return 2.0 * grad, loss
-
-    def run(self) -> None:
-        """Main worker run loop with Hessian calculation.
-
-        Extends the base run method to compute approximate Hessian
-        after the main optimisation loop completes.
-        """
-        mad: MAD | None = None
-        n_knobs = 0
-        computation_success = True
-
-        try:
-            self.configure_python_worker_logging()
-            self.configure_worker_threads()
-            knob_values, batch = self.conn.recv()
-            if knob_values is None:
-                return
-            n_knobs = len(knob_values)
-
-            mad, nbpms = self.setup_mad_interface(knob_values)
-            self.send_initial_conditions(mad)
-            self._initialise_mad_computation(mad)
-            self.run_preflight_check(mad, nbpms)
-
-            LOGGER.debug(f"Worker {self.worker_id}: Ready for computation with {nbpms} BPMs")
-
-            message: tuple[dict[str, float] | None, int | None] | dict[str, object] = (
-                self.conn.recv()
-            )
-
-            while True:
-                while isinstance(message, dict):
-                    self._handle_control_command(mad, message)
-                    message = self.conn.recv()
-
-                knob_values, batch = message
-                if knob_values is None or batch is None:
-                    LOGGER.debug(f"Worker {self.worker_id}: Received termination signal")
-                    break
-                try:
-                    if self.worker_disabled:
-                        self.conn.send((self.worker_id, np.zeros(n_knobs), 0.0))
-                    else:
-                        grad, loss = self.compute_gradients_and_loss(mad, knob_values, int(batch))
-                        # Report a per-turn, per-BPM-point loss so it is comparable
-                        # across workers (and to the held-out validation loss)
-                        # regardless of how many turns a worker holds. The gradient
-                        # keeps its own normalisation (per-point here, per-turn via
-                        # total_turns in the loop) and is intentionally unchanged.
-                        n_turns = max(1, len(self.init_coords[int(batch)]))
-                        self.conn.send(
-                            (
-                                self.worker_id,
-                                # Read live: ``apply_mask`` shrinks
-                                # ``normalisation_points`` to the kept BPM count, and
-                                # a snapshot taken before the command loop would keep
-                                # dividing the masked loss by the unmasked count --
-                                # putting training and validation on different scales.
-                                grad / self.normalisation_points,
-                                loss / (self.normalisation_points * n_turns),
-                            )
-                        )
-                except ParticleLostError as exc:
-                    LOGGER.warning(
-                        "Worker %d: %s — sending zero contribution; epoch update will be rejected",
-                        self.worker_id,
-                        exc,
-                    )
-                    # NaN loss signals the aggregator to reject this epoch's knob updates.
-                    self.conn.send((self.worker_id, np.zeros(n_knobs), float("nan")))
-                except Exception as exc:  # noqa: BLE001
-                    self.send_error_payload(exc, phase="computation")
-                    computation_success = False
-                    break
-
-                message = self.conn.recv()
-
-            if computation_success and not self.worker_disabled and self.compute_hessian_on_exit:
-                LOGGER.debug(f"Worker {self.worker_id}: Propagating uncertainty")
-                try:
-                    self.conn.send(self._compute_uncertainty_part(mad, n_knobs))
-                except Exception as exc:  # noqa: BLE001
-                    self.send_error_payload(exc, phase="hessian")
-                    computation_success = False
-            else:
-                self.conn.send(UncertaintyPart.empty(n_knobs))
-        except Exception as exc:  # noqa: BLE001
-            self.send_error_payload(exc, phase="startup")
-        finally:
-            LOGGER.debug(f"Worker {self.worker_id}: Terminating")
-            if mad is not None:
-                mad.send("shush()")
-                del mad
-
-    @staticmethod
-    def get_n_data_points(nbpms: int, n_turns: int = 1) -> int:
-        """Get number of data points for tracking.
-
-        Args:
-            nbpms: Number of BPMs in the range
-            n_turns: Number of tracking turns (default 1 for arc-by-arc)
-
-        Returns:
-            Total number of data points (nbpms * n_turns)
-        """
-        return nbpms * n_turns

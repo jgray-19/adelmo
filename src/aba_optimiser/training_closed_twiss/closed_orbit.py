@@ -9,19 +9,17 @@ from typing import TYPE_CHECKING
 from aba_optimiser.mad.machine_state import resolve_machine_state
 from aba_optimiser.training_closed_twiss.fitter import (
     LevenbergMarquardtConfig,
-    _create_worker_payload,
-    _GaussNewtonFitter,
-    _stamp_global_normalisation,
+    LMFitter,
+    build_worker_payload,
     load_measurement,
+    stamp_global_normalisation,
 )
 from aba_optimiser.workers.closed_orbit import (
-    ClosedOrbitBatchData,
-    ClosedOrbitBatchWorker,
     ClosedOrbitMeasurementData,
     ClosedOrbitSeriesData,
     ClosedOrbitWorker,
 )
-from aba_optimiser.workers.protocol import distribute, machine_worker_limit
+from aba_optimiser.workers.protocol import Evaluate, GradReply, distribute, machine_worker_limit
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -78,7 +76,7 @@ class ClosedOrbitSeries:
     observables: tuple[str, ...] = ()
 
 
-class ClosedOrbitFitter(_GaussNewtonFitter):
+class ClosedOrbitFitter(LMFitter):
     """Fit magnet knobs to absolute or reference-subtracted closed orbits.
 
     A :class:`ClosedOrbitSeries` is the unit assigned to one MAD-NG process.
@@ -185,21 +183,20 @@ class ClosedOrbitFitter(_GaussNewtonFitter):
         reference = replace(first, measurements=list(measurements), shared_reference=False, reference_only=True)
         for _, data in payloads:
             data.shared_reference = True
-        batched = isinstance(grouped[0][1], ClosedOrbitBatchData)
-        grouped = [*grouped, (config, ClosedOrbitBatchData([reference]) if batched else reference)]
+        grouped = [*grouped, (config, [reference])]
         self._reference_worker = len(grouped) - 1
         LOGGER.info("Reference orbit solved once by worker %d for %d series", self._reference_worker, len(needing))
         return grouped
 
-    def _exchange(self, channels, knobs):
+    def _evaluate_workers(self, channels, knobs):
         """As the base class; the reference worker's published orbit is relayed to the signal workers first."""
         if self._reference_worker is None:
-            return super()._exchange(channels, knobs)
-        channels.send_all((knobs, 0))
+            return super()._evaluate_workers(channels, knobs)
+        channels.send_all(Evaluate(knobs))
         (reply,) = channels.recv_some([self._reference_worker])
-        if not isinstance(reply, tuple) or len(reply) != 5:
+        if not isinstance(reply, GradReply):
             raise RuntimeError(f"Unexpected reference worker payload: {reply!r}")
-        reference = reply[4]  # None if the reference worker lost the closed orbit
+        reference = reply.extra  # None if the reference worker lost the closed orbit
         signal = [i for i in range(len(channels.workers)) if i != self._reference_worker]
         for index in signal:
             channels.send_to(index, reference)
@@ -208,19 +205,15 @@ class ClosedOrbitFitter(_GaussNewtonFitter):
     def _spread_payloads(self, payloads):
         """Spread the series over ``n_workers`` processes, each series whole in one."""
         if self.n_workers >= len(payloads):
-            return payloads
+            return [(config, [data]) for config, data in payloads]
         costs = [len(item.measurements) for item in self.series]
         groups = distribute(costs, self.n_workers)
-        self.worker_class = ClosedOrbitBatchWorker
         LOGGER.info(
             "Series per worker %s, momenta per worker %s",
             [len(group) for group in groups],
             [sum(costs[i] for i in group) for group in groups],
         )
-        return [
-            (payloads[group[0]][0], ClosedOrbitBatchData([payloads[i][1] for i in group]))
-            for group in groups
-        ]
+        return [(payloads[group[0]][0], [payloads[i][1] for i in group]) for group in groups]
 
     def _create_series_payloads(self, sequence_config, accelerator):
         payloads = []
@@ -244,7 +237,7 @@ class ClosedOrbitFitter(_GaussNewtonFitter):
             measurement_data = []
             config = None
             for measurement, frame in zip(item.measurements, frames, strict=True):
-                worker_config, base_data = _create_worker_payload(
+                worker_config, base_data = build_worker_payload(
                     float(measurement.pt),
                     frame.loc[common_bpms],
                     item_observables,
@@ -278,7 +271,7 @@ class ClosedOrbitFitter(_GaussNewtonFitter):
                     ),
                 )
             )
-        _stamp_global_normalisation(payloads)
+        stamp_global_normalisation(payloads)
         LOGGER.info(
             "Closed-orbit fit: %d worker series, %d independent measurements",
             len(payloads),

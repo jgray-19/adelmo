@@ -3,23 +3,38 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from aba_optimiser.optimisers.base import BaseOptimiser
 
+if TYPE_CHECKING:
+    from aba_optimiser.config import OptimiserConfig
+
 LOGGER = logging.getLogger(__name__)
 
 
 class AdamOptimiser(BaseOptimiser):
-    OPTIMISER_NAME = "adam"
-
     """Stateful Adam optimiser for dense NumPy parameter vectors.
 
     Instantiate once for a given parameter shape and call :meth:`step` for
     each optimisation update.
     """
+
+    OPTIMISER_NAME = "adam"
+    KNOB_VECTORS = ("m", "v")
+
+    @classmethod
+    def config_kwargs(cls, config: OptimiserConfig, n_params: int) -> dict[str, Any]:
+        eps = {} if config.adam_eps is None else {"eps": config.adam_eps}
+        return {
+            "shape": (n_params,),
+            "beta1": 0.9,
+            "beta2": 0.999,
+            "weight_decay": config.adam_weight_decay,
+            **eps,
+        }
 
     def __init__(
         self,
@@ -58,7 +73,6 @@ class AdamOptimiser(BaseOptimiser):
         params: np.ndarray,
         grads: np.ndarray,
         lr: float,
-        # diag_hessian: np.ndarray,
     ) -> np.ndarray:
         """
         Perform a single optimisation step.
@@ -75,10 +89,7 @@ class AdamOptimiser(BaseOptimiser):
 
         LOGGER.debug(f"Adam step {self.t}: lr={lr}, weight_decay={self.weight_decay}")
 
-        # Apply weight decay directly to gradients if specified
-        if self.weight_decay != 0:
-            grads = grads + self.weight_decay * params
-            LOGGER.debug(f"Applied weight decay: {self.weight_decay}")
+        grads = self.with_weight_decay(grads, params, self.weight_decay)
 
         # Update biased first and second moment estimates
         self.m = self.beta1 * self.m + (1 - self.beta1) * grads
@@ -89,9 +100,7 @@ class AdamOptimiser(BaseOptimiser):
         v_hat = self.v / (1 - self.beta2**self.t)
 
         # Parameter update
-        update = lr * (
-            m_hat / (np.sqrt(v_hat) + self.eps)
-        )  # / (np.sqrt(diag_hessian) + self.eps)
+        update = lr * (m_hat / (np.sqrt(v_hat) + self.eps))
 
         new_params = params - update
         update_norm = np.linalg.norm(update)
@@ -99,7 +108,7 @@ class AdamOptimiser(BaseOptimiser):
 
         return new_params
 
-    def state_to_dict(self) -> dict[str, Any]:
+    def state_dict(self) -> dict[str, Any]:
         """Return optimiser internal state as a serialisable dictionary."""
         return {
             "type": self.OPTIMISER_NAME,
@@ -112,7 +121,7 @@ class AdamOptimiser(BaseOptimiser):
             "t": int(self.t),
         }
 
-    def load_state_dict(self, state: dict[str, Any]) -> None:
+    def _load_state(self, state: dict[str, Any]) -> None:
         """Restore optimiser internal state from a dictionary."""
         if state.get("type") != self.OPTIMISER_NAME:
             raise ValueError(

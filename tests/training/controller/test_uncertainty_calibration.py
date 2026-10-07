@@ -91,8 +91,8 @@ def _reported_sigma(ctrl: ArcByArcFitter, true_knobs: dict[str, float]) -> float
     )
     knob_names = list(ctrl.config_manager.knob_names)
     ctrl.worker_manager.set_training_knobs(true_knobs)
-    normal, noise = ctrl.worker_manager.termination_and_hessian(
-        len(knob_names), estimate_hessian=True
+    normal, noise = ctrl.worker_manager.stop_and_collect_uncertainty(
+        len(knob_names), propagate_uncertainty=True
     )
     return float(sandwich_uncertainties(normal, noise)[knob_names.index("pt")])
 

@@ -123,7 +123,7 @@ def _fit(seq_psb: Path, series: list[ClosedOrbitSeries], **kwargs) -> dict[str, 
         **kwargs,
     )
     try:
-        knobs, _ = fitter.run()
+        knobs = fitter.run().knobs
     finally:
         fitter.close()
     return knobs
@@ -249,7 +249,7 @@ def test_series_state_is_the_change_from_the_fitter_state(seq_psb: Path) -> None
         machine_state=standing,
     )
     try:
-        fitted, _ = fitter.run()
+        fitted = fitter.run().knobs
     finally:
         fitter.close()
 

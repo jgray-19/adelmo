@@ -60,7 +60,7 @@ def test_fit_removes_most_of_the_beta_beating(study, data, case, tmp_path) -> No
     true_betas = study.bpm_betas(data, data.magnet_strengths)
     initial = study.beta_beating_rms(study.bpm_betas(data, None), true_betas)
 
-    estimate, _uncertainties = fitter.run()
+    estimate = fitter.run().knobs
 
     fitted = study.beta_beating_rms(study.bpm_betas(data, estimate), true_betas)
     for plane, before, after in zip("xy", initial, fitted, strict=True):

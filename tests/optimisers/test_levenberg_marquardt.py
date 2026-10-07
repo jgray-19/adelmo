@@ -23,7 +23,7 @@ def test_lm_solves_quadratic_newton_step() -> None:
     assert update.accepted
     assert not update.converged
     assert np.allclose(update.next_params, [2.0])
-    assert np.allclose(optim.best_params, [0.0])
+    assert np.allclose(optim.best.value, [0.0])
 
 
 def test_lm_rejects_worse_loss_and_increases_damping() -> None:
@@ -41,8 +41,8 @@ def test_lm_rejects_worse_loss_and_increases_damping() -> None:
     assert rejected.reason == "rejected"
     assert rejected.damping == pytest.approx(1e-4)
     # The retry is measured from the best point, not from the rejected one.
-    assert np.allclose(optim.best_params, [0.0])
-    assert not np.allclose(rejected.next_params, optim.best_params)
+    assert np.allclose(optim.best.value, [0.0])
+    assert not np.allclose(rejected.next_params, optim.best.value)
 
 
 def test_lm_retries_from_best_instead_of_re_evaluating_it() -> None:
@@ -94,7 +94,7 @@ def test_lm_recovers_from_an_overshooting_gauss_newton_step() -> None:
             break
 
     assert rejections > 0, "the overshoot should have been rejected at least once"
-    assert abs(optim.best_params[0]) == pytest.approx(1.0, abs=1e-6)
+    assert abs(optim.best.value[0]) == pytest.approx(1.0, abs=1e-6)
 
 
 def test_lm_stops_when_damping_is_exhausted() -> None:
@@ -112,7 +112,7 @@ def test_lm_stops_when_damping_is_exhausted() -> None:
 
     assert update.converged
     assert update.reason == "damping_exhausted"
-    assert np.allclose(update.next_params, optim.best_params)
+    assert np.allclose(update.next_params, optim.best.value)
 
 
 def test_lm_reports_no_progress_when_nothing_was_ever_accepted() -> None:
@@ -134,11 +134,11 @@ def test_lm_state_roundtrip() -> None:
     optim.update(np.array([1.0, 2.0]), 3.0, np.array([0.5, -0.5]), hessian)
 
     restored = LevenbergMarquardtOptimiser()
-    restored.load_state_dict(optim.state_to_dict())
+    restored.load_state_dict(optim.state_dict())
 
     assert restored.damping == optim.damping
-    assert restored.best_loss == optim.best_loss
-    assert np.allclose(restored.best_params, optim.best_params)
+    assert restored.best.loss == optim.best.loss
+    assert np.allclose(restored.best.value, optim.best.value)
     assert np.allclose(restored.best_hessian, optim.best_hessian)
     # Without the gradient at the best point a resumed run cannot backtrack.
     assert np.allclose(restored.best_grad, optim.best_grad)

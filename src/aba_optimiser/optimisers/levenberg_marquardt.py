@@ -7,6 +7,8 @@ from typing import Any
 
 import numpy as np
 
+from aba_optimiser.optimisers.base import BestTracker
+
 
 @dataclass(frozen=True)
 class LevenbergMarquardtConfig:
@@ -59,11 +61,13 @@ class LevenbergMarquardtOptimiser:
     ):
         self.config = config or LevenbergMarquardtConfig()
         self.damping = self.config.initial_lambda
-        self.best_loss = float("inf")
-        self.best_params = (
-            np.array(initial_params, dtype=float).copy()
-            if initial_params is not None
-            else np.array([], dtype=float)
+        #: Lowest loss so far and its parameters (the starting point until one is accepted).
+        self.best: BestTracker[np.ndarray] = BestTracker(
+            value=(
+                np.array(initial_params, dtype=float).copy()
+                if initial_params is not None
+                else np.array([], dtype=float)
+            )
         )
         self.best_hessian: np.ndarray | None = None
         # Gradient at the best point, kept so a rejected step can be retried from
@@ -86,15 +90,15 @@ class LevenbergMarquardtOptimiser:
         grad = np.asarray(grad, dtype=float)
         hessian = np.asarray(hessian, dtype=float)
 
-        if self.best_params.size == 0:
-            self.best_params = params.copy()
+        if self.best.value.size == 0:
+            self.best.value = params.copy()
 
         if failed or not np.isfinite(loss):
             self._increase_damping()
             return self._retry_from_best(loss, float("nan"), "failed")
 
         grad_norm = float(np.linalg.norm(grad))
-        if loss >= self.best_loss:
+        if loss >= self.best.loss:
             self._increase_damping()
             return self._retry_from_best(loss, grad_norm, "rejected")
 
@@ -105,8 +109,7 @@ class LevenbergMarquardtOptimiser:
         )
         grad_converged = grad_norm < self.config.gradient_converged_value
 
-        self.best_loss = float(loss)
-        self.best_params = params.copy()
+        self.best.record(loss, params.copy())
         self.best_hessian = hessian.copy()
         self.best_grad = grad.copy()
         self._decrease_damping()
@@ -152,7 +155,7 @@ class LevenbergMarquardtOptimiser:
             # Report convergence so the caller stops rather than re-evaluating a
             # point that cannot be evaluated.
             return LevenbergMarquardtUpdate(
-                next_params=self.best_params.copy(),
+                next_params=self.best.value.copy(),
                 accepted=False,
                 converged=True,
                 loss=float(loss),
@@ -164,7 +167,7 @@ class LevenbergMarquardtOptimiser:
             # The step has been shortened to nothing without finding an
             # improvement; the best point is as good as this solve gets.
             return LevenbergMarquardtUpdate(
-                next_params=self.best_params.copy(),
+                next_params=self.best.value.copy(),
                 accepted=False,
                 converged=True,
                 loss=float(loss),
@@ -173,7 +176,7 @@ class LevenbergMarquardtOptimiser:
                 reason="damping_exhausted",
             )
         return LevenbergMarquardtUpdate(
-            next_params=self.best_params + self.solve_step(self.best_hessian, self.best_grad),
+            next_params=self.best.value + self.solve_step(self.best_hessian, self.best_grad),
             accepted=False,
             converged=False,
             loss=float(loss),
@@ -194,13 +197,13 @@ class LevenbergMarquardtOptimiser:
         except np.linalg.LinAlgError:
             return np.linalg.lstsq(damped, -grad, rcond=None)[0]
 
-    def state_to_dict(self) -> dict[str, Any]:
+    def state_dict(self) -> dict[str, Any]:
         """Return optimiser internal state as a serialisable dictionary."""
         return {
             "type": "levenberg_marquardt",
             "damping": float(self.damping),
-            "best_loss": float(self.best_loss),
-            "best_params": self.best_params.tolist(),
+            "best_loss": float(self.best.loss),
+            "best_params": self.best.value.tolist(),
             "best_hessian": None
             if self.best_hessian is None
             else self.best_hessian.tolist(),
@@ -214,8 +217,7 @@ class LevenbergMarquardtOptimiser:
         if state.get("type") != "levenberg_marquardt":
             raise ValueError("State type does not match levenberg_marquardt")
         self.damping = float(state["damping"])
-        self.best_loss = float(state["best_loss"])
-        self.best_params = np.array(state["best_params"], dtype=float)
+        self.best = BestTracker(float(state["best_loss"]), np.array(state["best_params"], dtype=float))
         best_hessian = state.get("best_hessian")
         self.best_hessian = (
             None if best_hessian is None else np.array(best_hessian, dtype=float)

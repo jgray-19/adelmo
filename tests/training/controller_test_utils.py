@@ -556,7 +556,7 @@ def evaluate_controller_worker_losses(
         for knobs in knobs_list:
             screener = OutlierScreener(ctrl.worker_manager.payload_builder)
             diags = screener.request_worker_diagnostics(ctrl.worker_manager.training.channels, knobs)
-            losses.append(sum(float(d["total_loss"]) for d in diags))  # type: ignore[arg-type]
+            losses.append(sum(float(d.loss) for d in diags))
     finally:
         ctrl.worker_manager.terminate_workers()
     return losses

@@ -223,7 +223,7 @@ def test_phase_only_orbit_series_keeps_twiss(seq_psb: Path) -> None:
             absolute_planes=("x", "y") if names[0] == "x" else (),
         )
         worker = ClosedOrbitWorker(
-            child, 0, series, _worker_config(seq_psb), SimulationConfig(num_workers=1, num_batches=1)
+            child, 0, [series], _worker_config(seq_psb), SimulationConfig(num_workers=1, num_batches=1)
         )
         assert worker.closed_solver == expected, names
 

@@ -1,8 +1,9 @@
 """Abstract base class for all worker process types.
 
-This module defines the core worker interface that all specific worker
-implementations must follow. It handles the process lifecycle, MAD-NG
-interface setup, and communication protocol with the main process.
+:meth:`AbstractWorker.run` owns the process lifecycle and the message loop of
+:mod:`aba_optimiser.workers.protocol`; subclasses supply the MAD-NG setup and
+answer :class:`~aba_optimiser.workers.protocol.Evaluate` and
+:class:`~aba_optimiser.workers.protocol.Command` messages.
 """
 
 from __future__ import annotations
@@ -17,16 +18,16 @@ from threadpoolctl import threadpool_limits
 
 from aba_optimiser.mad import GradientDescentMadInterface
 from aba_optimiser.mad.scripts import PYTHON_IN_MAD
+from aba_optimiser.workers.protocol import Command, ErrorReply, Evaluate, Stop
 
 if TYPE_CHECKING:
     from multiprocessing.connection import Connection
 
-    import numpy as np
     from pymadng import MAD
 
     from aba_optimiser.config import SimulationConfig
     from aba_optimiser.workers.common import WorkerConfig
-    from aba_optimiser.workers.protocol import WorkerErrorPayload
+    from aba_optimiser.workers.protocol import Ack, GradReply, LossReply
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,18 +38,9 @@ WorkerDataType = TypeVar("WorkerDataType")
 class AbstractWorker(Process, ABC, Generic[WorkerDataType]):
     """Abstract base class for all worker process implementations.
 
-    This class provides the core infrastructure for running optimisation workers
-    in separate processes. It handles:
-    - Process lifecycle management
-    - MAD-NG interface initialization
-    - Communication with the main process via pipes
-    - Common configuration and logging
-
-    Subclasses must implement:
-    - setup_mad_sequence(): Configure MAD-NG sequence parameters
-    - send_initial_conditions(): Initialize particle states in MAD-NG
-    - compute_gradients_and_loss(): Core computation logic
-    - prepare_data(): Process and prepare input data
+    Subclasses implement :meth:`prepare_data`, :meth:`_setup_da_maps` and
+    :meth:`evaluate`, and override :meth:`on_start`, :meth:`handle_command`,
+    :meth:`on_stop` and :meth:`close` where they need to.
 
     Type Parameters:
         WorkerDataType: The type of data structure this worker uses
@@ -115,45 +107,83 @@ class AbstractWorker(Process, ABC, Generic[WorkerDataType]):
         """
         pass
 
-    @abstractmethod
     def setup_mad_sequence(self, mad: MAD) -> None:
-        """Configure MAD-NG sequence for this worker type.
-
-        This method should set worker-specific MAD-NG variables like
-        number of turns, tracking range, etc.
-
-        Args:
-            mad: MAD-NG interface object
-        """
-        pass
+        """Set worker-specific MAD-NG variables before the DA maps are built."""
 
     @abstractmethod
-    def send_initial_conditions(self, mad: MAD) -> None:
-        """Send initial particle/optics conditions to MAD-NG.
+    def evaluate(self, mad: MAD, message: Evaluate) -> GradReply:
+        """Answer one :class:`~aba_optimiser.workers.protocol.Evaluate` message."""
 
-        Args:
-            mad: MAD-NG interface object
+    def handle_command(self, mad: MAD, command: Command) -> Ack | LossReply:
+        """Answer one :class:`~aba_optimiser.workers.protocol.Command` message."""
+        raise ValueError(f"Worker {self.worker_id}: unsupported command {command.kind.name}")
+
+    def on_start(self, knobs: dict[str, float]) -> MAD:
+        """Build the MAD-NG session from the :class:`~aba_optimiser.workers.protocol.Start` knobs."""
+        mad, _nbpms = self.setup_mad_interface(knobs)
+        return mad
+
+    def on_stop(self, mad: MAD, failed: bool) -> None:
+        """Called once the message loop ends, before the session is closed."""
+
+    def close(self) -> None:
+        """Release resources other than the MAD-NG session."""
+
+    def send_reply(self, reply: object) -> None:
+        """Send one reply to the parent."""
+        self.conn.send(reply)
+
+    def run(self) -> None:
+        """Run the worker: :class:`Start`, then evaluations and commands until :class:`Stop`."""
+        mad: MAD | None = None
+        try:
+            self.configure_python_worker_logging()
+            self.configure_worker_threads()
+            message = self.conn.recv()
+            if isinstance(message, Stop):
+                return
+            mad = self.on_start(message.knobs)
+            failed = False
+            while True:
+                message = self.conn.recv()
+                if isinstance(message, Stop):
+                    LOGGER.debug("Worker %s: received termination signal", self.worker_id)
+                    break
+                if isinstance(message, Command):
+                    self.send_reply(self.handle_command(mad, message))
+                    continue
+                if not isinstance(message, Evaluate):
+                    raise ValueError(f"Worker {self.worker_id}: unexpected message {message!r}")
+                try:
+                    self.send_reply(self.evaluate(mad, message))
+                except Exception as exc:  # noqa: BLE001
+                    self.send_error_payload(exc, phase="computation")
+                    failed = True
+                    break
+            self.on_stop(mad, failed)
+        except Exception as exc:  # noqa: BLE001
+            self.send_error_payload(exc, phase="startup")
+        finally:
+            LOGGER.debug("Worker %s: terminating", self.worker_id)
+            self.close()
+            if mad is not None:
+                mad.send("shush()")
+
+    def send_knobs(self, mad: MAD, knobs: dict[str, float], *, plain: bool = False) -> None:
+        """Set this worker's own knobs; ``pt`` is never a sequence knob.
+
+        Knobs outside the worker's optimisation range are ignored. ``plain`` assigns
+        numbers (a session without knob parameters) instead of setting the constant
+        part of each knob's TPSA.
         """
-        pass
-
-    @abstractmethod
-    def compute_gradients_and_loss(
-        self, mad: MAD, knob_updates: dict[str, float], batch: int
-    ) -> tuple[np.ndarray, float]:
-        """Compute gradients and loss for given knob values.
-
-        This is the core computation method that runs tracking/optics
-        calculations and computes the gradient of the loss function.
-
-        Args:
-            mad: MAD-NG interface object
-            knob_updates: Dictionary of knob names to values
-            batch: Batch index for multi-batch processing
-
-        Returns:
-            Tuple of (gradient_array, loss_value)
-        """
-        pass
+        template = "loaded_sequence['{}'] = {:.15e}" if plain else "loaded_sequence['{}']:set0({:.15e})"
+        commands = [
+            template.format(name, value)
+            for name, value in knobs.items()
+            if name != "pt" and name in self.knob_name_set
+        ]
+        if commands:
+            mad.send("\n".join(commands))
 
     def create_base_damap(self, mad: MAD, knob_order: int = 1) -> None:
         """Create a base differential algebra (DA) map in MAD-NG.
@@ -170,28 +200,18 @@ class AbstractWorker(Process, ABC, Generic[WorkerDataType]):
             f"mo={knob_order}, po={knob_order}, pn=knob_names}}"
         )
 
-    def build_error_payload(self, exc: BaseException, *, phase: str) -> WorkerErrorPayload:
-        """Build a structured error payload for parent-side handling."""
-        return {
-            "worker_id": self.worker_id,
-            "status": "error",
-            "phase": phase,
-            "error_type": type(exc).__name__,
-            "error": str(exc),
-            "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
-        }
-
     def send_error_payload(self, exc: BaseException, *, phase: str) -> None:
-        """Best-effort send of a structured worker failure message."""
-        payload = self.build_error_payload(exc, phase=phase)
-        LOGGER.error(
-            "Worker %s failed during %s: %s",
-            self.worker_id,
-            phase,
-            payload["error"],
+        """Best-effort send of the failure to the parent."""
+        reply = ErrorReply(
+            worker_id=self.worker_id,
+            phase=phase,
+            error_type=type(exc).__name__,
+            error=str(exc),
+            traceback="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
         )
+        LOGGER.error("Worker %s failed during %s: %s", self.worker_id, phase, reply.error)
         try:
-            self.conn.send(payload)
+            self.conn.send(reply)
         except (BrokenPipeError, EOFError, OSError):
             LOGGER.exception(
                 "Worker %s could not send error payload to parent during %s",
@@ -359,31 +379,6 @@ class AbstractWorker(Process, ABC, Generic[WorkerDataType]):
     @abstractmethod
     def _setup_da_maps(self, mad: MAD) -> None:
         """Setup differential algebra maps specific to worker type.
-
-        Args:
-            mad: MAD-NG interface object
-        """
-        pass
-
-    @abstractmethod
-    def run(self) -> None:
-        """Main worker run loop.
-
-        This method handles the communication protocol:
-        1. Wait for initial handshake
-        2. Receive initial knob values
-        3. Setup MAD interface
-        4. Loop: receive knobs -> compute -> send results
-        5. Cleanup on termination signal (None received)
-        """
-        pass
-
-    @abstractmethod
-    def _initialise_mad_computation(self, mad: MAD) -> None:
-        """Initialise MAD-NG environment for computation.
-
-        This method should load any initialisation scripts needed
-        before the main computation loop.
 
         Args:
             mad: MAD-NG interface object

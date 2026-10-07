@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from aba_optimiser.workers.closed_twiss import _weighted_loss_gradient_hessian
+from aba_optimiser.workers.closed_twiss import weighted_loss_gradient_hessian
 from aba_optimiser.workers.common import ObservableKind
 
 SCALE = 5e13
@@ -37,7 +37,7 @@ def _data(rng, n_obs=2, n_bpms=60, n_knobs=25):
 
 def test_matches_direct_formulas() -> None:
     observables, model, jacobian, targets, weights, raw = _data(np.random.default_rng(1))
-    got = _weighted_loss_gradient_hessian(model, jacobian, observables, targets, weights, raw, SCALE)
+    got = weighted_loss_gradient_hessian(model, jacobian, observables, targets, weights, raw, SCALE)
     want = _reference(model, jacobian, targets, weights, raw)
     for g, w in zip(got, want, strict=True):
         np.testing.assert_allclose(g, w, rtol=1e-10)
@@ -46,4 +46,4 @@ def test_matches_direct_formulas() -> None:
 def test_inconsistent_weight_scale_is_rejected() -> None:
     observables, model, jacobian, targets, weights, raw = _data(np.random.default_rng(2))
     with pytest.raises(ValueError, match="raw_weights / weight_scale"):
-        _weighted_loss_gradient_hessian(model, jacobian, observables, targets, weights, raw, 2 * SCALE)
+        weighted_loss_gradient_hessian(model, jacobian, observables, targets, weights, raw, 2 * SCALE)

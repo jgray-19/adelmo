@@ -192,7 +192,7 @@ class TestLBFGSOptimiser:
         grads2 = np.array([-0.1, 0.3, -0.2])
         params_after_second = optim.step(params_after_first, grads2, lr)
 
-        state = optim.state_to_dict()
+        state = optim.state_dict()
         restored = LBFGSOptimiser()
         restored.load_state_dict(state)
 

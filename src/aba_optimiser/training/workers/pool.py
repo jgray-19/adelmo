@@ -8,7 +8,7 @@ import multiprocessing as mp
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from aba_optimiser.workers.protocol import WorkerChannels
+from aba_optimiser.workers.protocol import STOP, WorkerChannels
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -51,11 +51,11 @@ class WorkerPool:
             raise RuntimeError("Worker pool is empty")
         return WorkerChannels(self.conns, self.workers)
 
-    def stop(self, sentinel: object = (None, None)) -> None:
-        """Send the termination sentinel, join (forcing stragglers) and close the pipes."""
+    def stop(self) -> None:
+        """Send :data:`~aba_optimiser.workers.protocol.STOP`, join (forcing stragglers) and close the pipes."""
         for conn in self.conns:
             with contextlib.suppress(OSError, EOFError):
-                conn.send(sentinel)
+                conn.send(STOP)
         for worker in self.workers:
             worker.join(timeout=5.0)
             if worker.is_alive():

@@ -12,7 +12,7 @@ from aba_optimiser.training.config.tracking import (
 )
 from aba_optimiser.training.data_manager import DataManager, _marker_order
 from aba_optimiser.training.workers.turn_planner import (
-    _allocate_batches_per_file,
+    allocate_batches_per_file,
 )
 from aba_optimiser.training.workers.turn_planner import (
     group_turns_by_file as _group_turns_by_file,
@@ -421,7 +421,7 @@ def test_allocate_batches_per_file_balances_equal_files() -> None:
         1: list(range(100, 108)),
     }
 
-    batches_per_file = _allocate_batches_per_file(turns_by_file, num_turn_batches=6)
+    batches_per_file = allocate_batches_per_file(turns_by_file, num_turn_batches=6)
 
     assert sum(batches_per_file.values()) == 6
     assert batches_per_file == {0: 3, 1: 3}

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter, defaultdict
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import numpy as np
 import psutil
@@ -18,19 +18,21 @@ import psutil
 from aba_optimiser.training.workers.payloads import WorkerPayloadBuilder
 from aba_optimiser.training.workers.pool import WorkerPool
 from aba_optimiser.training.workers.screening import OutlierScreener
-from aba_optimiser.workers import (
-    PositionOnlyValidationTrackingWorker,
-    TrackingWorker,
-    ValidationTrackingWorker,
-)
 from aba_optimiser.workers.common import (
     KickPlane,
     UncertaintyPart,
     merge_uncertainty_parts,
     noise_matrix,
 )
-from aba_optimiser.workers.protocol import WorkerChannels
-from aba_optimiser.workers.tracking_position_only import PositionOnlyTrackingWorker
+from aba_optimiser.workers.protocol import (
+    STOP,
+    Command,
+    CommandKind,
+    LossReply,
+    Start,
+    WorkerChannels,
+)
+from aba_optimiser.workers.tracking import TrackingWorker
 
 if TYPE_CHECKING:
     from aba_optimiser.config import SimulationConfig
@@ -41,28 +43,6 @@ if TYPE_CHECKING:
 
 
 LOGGER = logging.getLogger(__name__)
-
-# Maps (optimise_momenta, validation) -> worker class.
-_WORKER_CLASS_REGISTRY: dict[tuple[bool, bool], type] = {
-    (True, False): TrackingWorker,
-    (False, False): PositionOnlyTrackingWorker,
-    (True, True): ValidationTrackingWorker,
-    (False, True): PositionOnlyValidationTrackingWorker,
-}
-
-
-def select_worker_class(kick_plane: str, optimise_momenta: bool, *, validation: bool = False) -> type:
-    """Select the worker implementation for a payload."""
-    if kick_plane not in {"xy", "x", "y"}:
-        raise ValueError(f"Unsupported kick plane {kick_plane!r}")
-    return _WORKER_CLASS_REGISTRY[(optimise_momenta, validation)]
-
-
-def _assert_control_ack(response: object, *, command: str) -> None:
-    response_dict = cast("dict[object, object]", response) if isinstance(response, dict) else None
-    if response_dict is None or response_dict.get("status") != "ok":
-        raise RuntimeError(f"Unexpected worker ack for {command} command: {response!r}")
-
 
 def _summarise_file_usage(
     payloads: list[WorkerPayload],
@@ -217,15 +197,10 @@ class WorkerManager:
         """Start one worker per payload, send it the initial knobs and record its metadata."""
         pool = WorkerPool()
         n_run_turns = self.simulation_config.n_run_turns
-        for worker_id, payload in enumerate(payloads, start=first_id):
-            data, config, file_idx = payload
-            worker_class = select_worker_class(
-                config.kick_plane, self.simulation_config.optimise_momenta, validation=validation
-            )
-            args = ([payload],) if validation else (data, config)
-            pool.spawn(worker_class, worker_id, *args, self.simulation_config).send(
-                (initial_knobs, -1)
-            )
+        for worker_id, (data, config, file_idx) in enumerate(payloads, start=first_id):
+            pool.spawn(
+                TrackingWorker, worker_id, data, config, self.simulation_config, validation
+            ).send(Start(initial_knobs))
             # The config's bad BPMs already exclude every BPM blind to its plane.
             bpm_names = self.setup_helper.get_range_bpm_names(
                 config.tracking_start_bpm, config.tracking_end_bpm, config.sdir, config.bad_bpms
@@ -308,13 +283,15 @@ class WorkerManager:
         for pool in pools:
             for conn, n in zip(pool.conns, pool.particle_counts):
                 chunk = new_coords[offset : offset + n]
-                conn.send({
-                    "cmd": "update_init_coords",
-                    **{
-                        name: chunk[:, [column]]
-                        for column, name in enumerate(("x", "px", "y", "py"))
-                    },
-                })
+                conn.send(
+                    Command(
+                        CommandKind.UPDATE_INIT_COORDS,
+                        {
+                            name: chunk[:, [column]]
+                            for column, name in enumerate(("x", "px", "y", "py"))
+                        },
+                    )
+                )
                 offset += n
             pool.channels.recv_all()
 
@@ -342,21 +319,15 @@ class WorkerManager:
             return None
 
         channels = self.validation.channels
-        channels.send_all({"cmd": "validate", "knobs": current_knobs})
+        channels.send_all(Command(CommandKind.VALIDATE, {"knobs": current_knobs}))
         results = channels.recv_all()
         losses: list[float] = []
         for result in results:
-            result_dict = cast("dict[object, object]", result) if isinstance(result, dict) else None
-            if result_dict is None:
-                raise RuntimeError(f"Unexpected validation payload from worker: {result!r}")
-
-            if result_dict.get("disabled"):
-                # Screened out before the loop started; it holds no usable data.
-                continue
-            loss_value = result_dict.get("loss")
-            if not isinstance(loss_value, int | float | np.floating):
-                raise RuntimeError(f"Validation worker payload missing numeric loss: {result!r}")
-            losses.append(float(loss_value))
+            if not isinstance(result, LossReply):
+                raise RuntimeError(f"Unexpected validation reply from worker: {result!r}")
+            # A worker screened out before the loop holds no usable data.
+            if result.loss is not None:
+                losses.append(float(result.loss))
 
         if not losses:
             if results:
@@ -379,7 +350,7 @@ class WorkerManager:
     def terminate_workers(self) -> None:
         """Kill all workers immediately, for aborting after an error or interrupt.
 
-        Unlike the clean shutdown in ``termination_and_hessian``, this does not
+        Unlike the clean shutdown in ``stop_and_collect_uncertainty``, this does not
         drain payloads or join gracefully. Workers may be stuck in a failed
         simulation and not respond to a termination sentinel, so SIGTERM is sent and
         the processes are reaped.
@@ -390,27 +361,24 @@ class WorkerManager:
 
     def set_training_knobs(self, knobs: dict[str, float]) -> None:
         """Load ``knobs`` into every training worker, e.g. the best knobs before the Hessian."""
-        channels = self.training.channels
-        channels.send_all({"cmd": "set_knobs", "knobs": knobs})
-        for response in channels.recv_all():
-            _assert_control_ack(response, command="set_knobs")
+        self.training.channels.ack_all(Command(CommandKind.SET_KNOBS, {"knobs": knobs}))
 
-    def termination_and_hessian(
+    def stop_and_collect_uncertainty(
         self,
         n_knobs: int,
-        estimate_hessian: bool = True,
+        propagate_uncertainty: bool = True,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Terminate training workers, collect ``(A, B)``, then stop validation.
 
         Feed both matrices to :func:`sandwich_uncertainties`.
         """
         LOGGER.info("Terminating workers...")
-        normal, noise = self._collect_uncertainty(n_knobs, estimate_hessian)
+        normal, noise = self._collect_uncertainty(n_knobs, propagate_uncertainty)
         self.validation.stop()
         return normal, noise
 
     def _collect_uncertainty(
-        self, n_knobs: int, estimate_hessian: bool
+        self, n_knobs: int, propagate_uncertainty: bool
     ) -> tuple[np.ndarray, np.ndarray]:
         """Stop training workers in memory-bounded chunks and fold their parts into ``(A, B)``.
 
@@ -425,14 +393,14 @@ class WorkerManager:
         order = sorted(range(len(self.training)), key=files.__getitem__)
         remaining = Counter(files)
         chunk_size = (
-            self._uncertainty_concurrency(n_knobs) if estimate_hessian else max(1, len(order))
+            self._uncertainty_concurrency(n_knobs) if propagate_uncertainty else max(1, len(order))
         )
 
         pending: dict[int, UncertaintyPart] = {}
         for start in range(0, len(order), chunk_size):
             chunk = order[start : start + chunk_size]
             parts_by_file: dict[int, list[UncertaintyPart]] = defaultdict(list)
-            for idx, part in zip(chunk, self._drain_uncertainty_parts(chunk, estimate_hessian)):
+            for idx, part in zip(chunk, self._drain_uncertainty_parts(chunk, propagate_uncertainty)):
                 parts_by_file[files[idx]].append(part)
             for file_idx, parts in parts_by_file.items():
                 remaining[file_idx] -= len(parts)
@@ -447,23 +415,21 @@ class WorkerManager:
         return normal, noise
 
     def _drain_uncertainty_parts(
-        self, indices: list[int], estimate_hessian: bool
+        self, indices: list[int], propagate_uncertainty: bool
     ) -> list[UncertaintyPart]:
         """Send the termination sentinel to the given workers and return their parts in order."""
         workers = [self.training.workers[idx] for idx in indices]
         channels = WorkerChannels([self.training.conns[idx] for idx in indices], workers)
-        if not estimate_hessian:
-            channels.send_all({"cmd": "set_hessian_mode", "enabled": False})
-            for response in channels.recv_all():
-                _assert_control_ack(response, command="set_hessian_mode")
-        channels.send_all((None, None))
+        if not propagate_uncertainty:
+            channels.ack_all(Command(CommandKind.SET_UNCERTAINTY_MODE, {"enabled": False}))
+        channels.send_all(STOP)
         parts = channels.recv_all()
         for part in parts:
             if not isinstance(part, UncertaintyPart):
                 raise RuntimeError(f"Unexpected uncertainty payload from worker: {part!r}")
         for worker in workers:
             worker.join()
-        return cast("list[UncertaintyPart]", parts)
+        return parts
 
     def _uncertainty_concurrency(self, n_knobs: int) -> int:
         """Return how many workers may send uncertainty parts at once within half the free memory.

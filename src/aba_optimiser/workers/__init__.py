@@ -5,8 +5,7 @@ of accelerator physics simulations and optimisations. Workers communicate with
 the main process via pipes and compute gradients and loss functions.
 
 Available Workers:
-    - TrackingWorker: Particle tracking (supports 'multi-turn' and 'arc-by-arc' modes)
-    - PositionOnlyTrackingWorker: Position-only tracking (no momentum)
+    - TrackingWorker: Particle tracking; with ``validation=True`` it scores held-out turns
     - ClosedTwissWorker: Parametric closed-twiss matching (orbit, beta, phase,
       dispersion) via twiss/cofind and normal-form optical functions
 
@@ -29,20 +28,12 @@ from aba_optimiser.workers.common import (
     WorkerConfig,
 )
 from aba_optimiser.workers.tracking import TrackingWorker
-from aba_optimiser.workers.tracking_position_only import PositionOnlyTrackingWorker
-from aba_optimiser.workers.tracking_validation import (
-    PositionOnlyValidationTrackingWorker,
-    ValidationTrackingWorker,
-)
 
 __all__ = [
     # Abstract base
     "AbstractWorker",
     # Worker implementations
     "TrackingWorker",
-    "PositionOnlyTrackingWorker",
-    "ValidationTrackingWorker",
-    "PositionOnlyValidationTrackingWorker",
     "ClosedTwissWorker",
     # Data structures
     "TrackingData",

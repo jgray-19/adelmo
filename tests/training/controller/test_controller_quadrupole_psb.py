@@ -225,7 +225,8 @@ def test_controller_quad_opt_psb_ring3(
         true_loss = evaluate_controller_worker_loss(ctrl, magnet_strengths)
         assert true_loss < initial_loss * 1e-3
         return
-    estimate, unc = ctrl.run()
+    result = ctrl.run()
+    estimate, unc = result.knobs, result.uncertainties
 
     psb_abs_tol = 1e-4
     # These knobs sit outside the recorded BPM response for the tracked turn, so their

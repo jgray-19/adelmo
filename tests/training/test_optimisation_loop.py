@@ -12,7 +12,7 @@ from aba_optimiser.optimisers.adam import AdamOptimiser
 from aba_optimiser.training.config.models import CheckpointConfig
 from aba_optimiser.training.optimisation.checkpointing import OptimisationCheckpointer
 from aba_optimiser.training.optimisation.loop import OptimisationLoop
-from aba_optimiser.workers.protocol import WorkerChannels
+from aba_optimiser.workers.protocol import Evaluate, GradReply, Start, WorkerChannels
 
 
 def _make_loop(knob_names: list[str]) -> OptimisationLoop:
@@ -79,8 +79,8 @@ def test_load_checkpoint_allows_current_knob_superset(tmp_path) -> None:
     assert checkpoint_state["current_knobs"] == {"k1": 1.5, "k2": -2.0, "k3": 30.0}
     assert checkpoint_state["prev_loss"] == 0.3
 
-    assert loop.best_knobs == {"k1": 1.0, "k2": -1.0, "k3": 30.0}
-    assert loop.best_loss == 0.25
+    assert loop.best.value == {"k1": 1.0, "k2": -1.0, "k3": 30.0}
+    assert loop.best.loss == 0.25
 
     # Optimiser state should be remapped and padded for the extra knob.
     assert isinstance(loop.optimiser, AdamOptimiser)
@@ -152,7 +152,7 @@ def test_load_checkpoint_remaps_and_pads_in_current_knob_order(tmp_path) -> None
         "k2": 20.0,
         "k4": 99.0,
     }
-    assert loop.best_knobs == {
+    assert loop.best.value == {
         "k3": 3.0,
         "k1": 1.0,
         "k2": 2.0,
@@ -171,16 +171,12 @@ def test_load_checkpoint_remaps_and_pads_in_current_knob_order(tmp_path) -> None
 def _run_fake_worker(conn, n_epochs: int, n_batches: int, grad: np.ndarray, loss: float) -> None:
     """Thread target: act as a gradient-descent worker for n_epochs * n_batches rounds."""
     worker_id = 0
-    # Receive startup handshake (initial_knobs, -1)
-    conn.recv()
+    conn.recv()  # Start
     for _ in range(n_epochs * n_batches):
         msg = conn.recv()
-        if not isinstance(msg, tuple) or msg[0] is None:
+        if not isinstance(msg, Evaluate):
             break
-        conn.send((worker_id, grad.copy(), loss))
-    # Hessian on exit
-    n = len(grad)
-    conn.send(np.zeros((n, n)))
+        conn.send(GradReply(worker_id, loss, grad.copy()))
 
 
 def _make_real_channels(n_knobs: int, n_epochs: int, n_batches: int) -> WorkerChannels:
@@ -194,7 +190,7 @@ def _make_real_channels(n_knobs: int, n_epochs: int, n_batches: int) -> WorkerCh
     worker_thread.start()
 
     # Send the startup handshake that the worker expects before the loop begins.
-    parent.send(({f"k{i}": 0.0 for i in range(n_knobs)}, -1))
+    parent.send(Start({f"k{i}": 0.0 for i in range(n_knobs)}))
 
     from types import SimpleNamespace
 
@@ -217,7 +213,7 @@ def _make_real_channels_nonzero_grad(n_knobs: int, n_epochs: int, n_batches: int
         args=(child, n_epochs, n_batches, np.ones(n_knobs), 1.0),
         daemon=True,
     ).start()
-    parent.send(({f"k{i}": 0.0 for i in range(n_knobs)}, -1))
+    parent.send(Start({f"k{i}": 0.0 for i in range(n_knobs)}))
 
     proc = SimpleNamespace(pid=0, exitcode=None)
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import dataclasses
-from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -21,32 +20,13 @@ from aba_optimiser.workers.common import (
     noise_matrix,
     sandwich_uncertainties,
 )
+from aba_optimiser.workers.protocol import Evaluate
 
 
-def test_finalise_results_uses_finite_non_negative_uncertainties_for_indefinite_hessian() -> None:
-    ctrl = TrackingFitter.__new__(TrackingFitter)
-    ctrl.output_config = OutputConfig(include_uncertainty=True)
-    ctrl.final_knobs = {"kq1": 1.0, "kq2": 2.0}
-    ctrl.filtered_true_strengths = {"kq1": 1.1, "kq2": 2.1}
-    ctrl.accelerator = SimpleNamespace(optimise_energy=False)
-    ctrl.config_manager = SimpleNamespace(
-        knob_names=["kq1", "kq2"],
-        mad_iface=SimpleNamespace(
-            convert_uncertainties_to_absolute=lambda knob_names, uncertainties: np.asarray(
-                uncertainties,
-                dtype=np.float64,
-            )
-        ),
-    )
-    ctrl.output_knob_names = ["kq1", "kq2"]
-
-    ctrl.final_knobs = {"kq1": 0.9, "kq2": 1.9}
-    uncertainties = ctrl._finalise_results(
-        (
-            np.array([[4.0, 0.0], [0.0, -1e-12]], dtype=np.float64),
-            np.diag([4.0, HESSIAN_MIN_EIGENVALUE]),
-        ),
-        writer=None,
+def test_sandwich_uncertainties_are_finite_and_non_negative_for_an_indefinite_normal_matrix() -> None:
+    uncertainties = sandwich_uncertainties(
+        np.array([[4.0, 0.0], [0.0, -1e-12]], dtype=np.float64),
+        np.diag([4.0, HESSIAN_MIN_EIGENVALUE]),
     )
 
     assert np.all(np.isfinite(uncertainties))
@@ -128,12 +108,9 @@ def _collect_epoch_gradient(ctrl: TrackingFitter, knob_updates: dict[str, float]
     }
     channels = ctrl.worker_manager.training.channels
     for batch in range(ctrl.simulation_config.num_batches):
-        channels.send_all((knob_updates, batch))
+        channels.send_all(Evaluate(knob_updates, batch))
         for result in channels.recv_all():
-            if not isinstance(result, tuple) or len(result) != 3:
-                raise RuntimeError(f"Unexpected worker result payload: {result!r}")
-            worker_id, grad, _loss = result
-            gradient += points[worker_id] * np.asarray(grad, dtype=np.float64).reshape(-1)
+            gradient += points[result.worker_id] * np.asarray(result.grad, dtype=np.float64).reshape(-1)
     return gradient
 
 
@@ -266,8 +243,8 @@ def test_controller_worker_hessian_matches_finite_difference_on_reduced_knob_sub
             grad_minus = _collect_epoch_gradient(ctrl, minus_knobs)
             fd_matrix[:, col] = (grad_plus[subset] - grad_minus[subset]) / (2.0 * step)
 
-        total_hessian, _ = ctrl.worker_manager.termination_and_hessian(
-            n_knobs, estimate_hessian=True
+        total_hessian, _ = ctrl.worker_manager.stop_and_collect_uncertainty(
+            n_knobs, propagate_uncertainty=True
         )
         terminated = True
     finally:
@@ -398,8 +375,8 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
             grad_minus = _collect_epoch_gradient(ctrl, minus_knobs)
             fd_matrix[:, col] = (grad_plus[subset] - grad_minus[subset]) / (2.0 * step)
 
-        total_hessian, _ = ctrl.worker_manager.termination_and_hessian(
-            n_knobs, estimate_hessian=True
+        total_hessian, _ = ctrl.worker_manager.stop_and_collect_uncertainty(
+            n_knobs, propagate_uncertainty=True
         )
         terminated = True
     finally:

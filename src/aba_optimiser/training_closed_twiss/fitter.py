@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,12 +10,19 @@ import numpy as np
 import pandas as pd
 
 from aba_optimiser.config import OptimiserConfig, SimulationConfig
-from aba_optimiser.optimisers.levenberg_marquardt import (
-    LevenbergMarquardtConfig,
-    LevenbergMarquardtOptimiser,
-)
+from aba_optimiser.optimisers.levenberg_marquardt import LevenbergMarquardtConfig
 from aba_optimiser.training.base_fitter import BaseFitter
+from aba_optimiser.training.lifecycle import run_with_workers
+from aba_optimiser.training.reduction import reduce_replies
+from aba_optimiser.training.results import FitDiagnostics, FitResult
+from aba_optimiser.training.workers.payloads import global_weight_scale
 from aba_optimiser.training.workers.pool import WorkerPool
+from aba_optimiser.training_closed_twiss.lm_loop import LMPoint, run_levenberg_marquardt
+from aba_optimiser.training_closed_twiss.prior import (
+    apply_prior,
+    prior_alphas,
+    validate_prior_strengths,
+)
 from aba_optimiser.workers import ClosedTwissData, ClosedTwissWorker, Observable, WorkerConfig
 from aba_optimiser.workers.common import (
     ObservableKind,
@@ -24,6 +30,7 @@ from aba_optimiser.workers.common import (
     hessian_uncertainties,
     warn_if_singular,
 )
+from aba_optimiser.workers.protocol import Evaluate, GradReply, Start
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -95,7 +102,7 @@ DEFAULT_OBSERVABLES: tuple[str, ...] = (
 )
 
 
-class _GaussNewtonFitter(BaseFitter):
+class LMFitter(BaseFitter):
     """Shared lifecycle and solve for full-ring Gauss-Newton fitters."""
 
     _defer_managers = True
@@ -123,7 +130,7 @@ class _GaussNewtonFitter(BaseFitter):
             )
 
         self.lm_config = lm_config or LevenbergMarquardtConfig()
-        self.diagnostics: dict[str, object] = {}
+        self.diagnostics: FitDiagnostics | None = None
         #: ``(knobs, loss)`` of every accepted iteration, in order
         self.history: list[tuple[dict[str, float], float]] = []
         simulation_config = SimulationConfig(
@@ -142,7 +149,7 @@ class _GaussNewtonFitter(BaseFitter):
         )
 
         self.use_errors = use_errors
-        self.prior_strengths = _validate_prior_strengths(prior_strengths)
+        self.prior_strengths = validate_prior_strengths(prior_strengths)
 
     def close(self) -> None:
         """Shut down the MAD process of the model; call once the fit (and any use of its model) is done."""
@@ -150,217 +157,96 @@ class _GaussNewtonFitter(BaseFitter):
         if mad_iface is not None:
             mad_iface.close()
 
-    def run(self) -> tuple[dict[str, float], dict[str, float]]:
-        """Execute the closed-twiss optimisation with a Gauss-Newton solve."""
+    def run(self) -> FitResult:
+        """Run the Levenberg-Marquardt fit on one worker per payload."""
         writer = self.setup_logging(self.log_suffix)
         pool = WorkerPool()
-        self.final_knobs = None
+        knob_names = list(self.config_manager.knob_names)
 
-        try:
+        def body() -> tuple[dict[str, float], np.ndarray | None]:
             for worker_id, (config, data) in enumerate(self.worker_payloads):
-                pool.spawn(self.worker_class, worker_id, data, config, self.simulation_config)
-            self.final_knobs, hessian, knob_names = self._gauss_newton(pool.channels, writer)
-        except KeyboardInterrupt:
-            logger.warning("KeyboardInterrupt: terminating closed-twiss optimisation early.")
-            self.final_knobs = getattr(self, "final_knobs", None) or dict(self.initial_knobs)
-            hessian, knob_names = None, list(self.config_manager.knob_names)
-        finally:
-            pool.stop()
+                pool.spawn(self.worker_class, worker_id, data, config, self.simulation_config).send(
+                    Start(dict(self.initial_knobs))
+                )
+            return self._solve(pool.channels, writer)
 
-        if writer is not None:
-            writer.close()
+        knobs, normal_matrix = run_with_workers(
+            body,
+            fallback=lambda: (dict(self.initial_knobs), None),
+            stop_workers=pool.stop,
+            writer=writer,
+        )
         logger.info("%s optimisation complete.", self.fit_label)
-        uncertainties = _hessian_uncertainties(hessian, knob_names)
-        return (
-            self.accelerator.format_result_knobs(self.final_knobs),
-            self.accelerator.format_result_knobs(uncertainties),
+        return FitResult(
+            knobs=self.accelerator.format_result_knobs(knobs),
+            uncertainties=self.accelerator.format_result_knobs(
+                _hessian_uncertainties(normal_matrix, knob_names)
+            ),
+            diagnostics=self.diagnostics,
+            extra=self._extra_result(),
         )
 
-    def _gauss_newton(
-        self, channels, writer
-    ) -> tuple[dict[str, float], np.ndarray | None, list[str]]:
-        """Levenberg-Marquardt Gauss-Newton solve over the shared knobs.
+    def _extra_result(self) -> dict[str, float]:
+        """Fitted parameters that are not model knobs."""
+        return {}
+
+    def _solve(self, channels, writer) -> tuple[dict[str, float], np.ndarray | None]:
+        """Levenberg-Marquardt solve over the shared knobs; returns the best knobs and the physical normal matrix there.
 
         The closed twiss is close to linear in the knob strengths over the range
-        a fit explores, so a curvature-preconditioned step (solve
-        ``(H + lam·diag H) delta = -g`` with the summed Gauss-Newton Hessian
-        ``H``) converges in a few iterations and, unlike plain gradient descent,
-        resolves the weakly conditioned directions made identifiable by the
-        multi-delta measurements.
+        a fit explores, so a curvature-preconditioned step converges in a few
+        iterations and, unlike plain gradient descent, resolves the weakly
+        conditioned directions made identifiable by the multi-delta measurements.
         """
         knob_names = list(self.config_manager.knob_names)
-        current = np.array([float(self.initial_knobs[name]) for name in knob_names], dtype=float)
+        n_knobs = len(knob_names)
+        initial = np.array([float(self.initial_knobs[name]) for name in knob_names], dtype=float)
         # Error knobs are regularised toward the ideal zero-error lattice. The
         # optimisation start is independent and must not redefine that prior.
-        prior_mean = np.zeros_like(current)
-        prior_alphas: np.ndarray | None = None
-        run_start = time.time()
+        prior_mean = np.zeros_like(initial)
+        alphas: list[np.ndarray] = []
 
-        optimiser = LevenbergMarquardtOptimiser(self.lm_config, initial_params=current)
-        last_update = None
-        completed_iterations = 0
-        accepted_evaluations = 0
+        def evaluate(params: np.ndarray, iteration: int) -> LMPoint:
+            knobs = dict(zip(knob_names, (float(v) for v in params), strict=False))
+            reduced = reduce_replies(self._evaluate_workers(channels, knobs), n_knobs)
+            loss, grad, hessian = reduced.loss, reduced.grad, reduced.hessian
+            if iteration == 0 and not reduced.particle_lost:
+                warn_if_singular(reduced.normal, knob_names)  # before the prior is added
+            if self.prior_strengths and not reduced.particle_lost:
+                if not alphas:
+                    alphas.append(prior_alphas(self.prior_strengths, hessian, knob_names, log=True))
+                loss, grad, hessian = apply_prior(loss, grad, hessian, params, prior_mean, alphas[0])
+            return LMPoint(loss, grad, hessian, reduced.particle_lost)
 
-        for iteration in range(self.lm_config.max_iterations):
-            completed_iterations = iteration + 1
-            current_knobs = dict(zip(knob_names, (float(v) for v in current), strict=False))
-            loss, grad, hessian, hessian_phys, particle_loss = self._collect_gn(
-                channels, current_knobs, knob_names
-            )
-            if iteration == 0 and not particle_loss:
-                warn_if_singular(hessian_phys, knob_names)  # before the prior is added
-            if self.prior_strengths and not particle_loss:
-                if prior_alphas is None:
-                    prior_alphas = _prior_alphas(
-                        self.prior_strengths,
-                        hessian,
-                        knob_names,
-                        log=True,
-                    )
-                loss, grad, hessian = _apply_prior(
-                    loss, grad, hessian, current, prior_mean, prior_alphas
-                )
-            update = optimiser.update(current, loss, grad, hessian, particle_loss)
-            last_update = update
-            if update.accepted:
-                accepted_evaluations += 1
-                self.history.append((current_knobs, float(loss)))
-            current = update.next_params
-
-            # A rejected step is not a no-op: the optimiser has already retried
-            # from its best point with more damping, so ``current`` is a new,
-            # shorter step that still needs evaluating. Only the terminal
-            # reasons (no curvature to retry from, or damping driven to the
-            # ceiling without improvement) end the solve.
-            if update.converged and not update.accepted:
-                logger.warning(
-                    "Levenberg-Marquardt stopped at iter %d (%s, lam=%.1e)",
-                    iteration,
-                    update.reason,
-                    update.damping,
-                )
-                break
-            if update.reason == "failed":
-                logger.warning(
-                    "Iter %d: closed orbit lost; retrying from best (lam=%.1e)",
-                    iteration,
-                    update.damping,
-                )
-                continue
-            if not update.accepted:
-                logger.info(
-                    "Iter %d: step rejected (loss %.6e >= best %.6e); retrying from best "
-                    "(lam=%.1e)",
-                    iteration,
-                    update.loss,
-                    optimiser.best_loss,
-                    update.damping,
-                )
-                continue
-
-            self._log_gn_iteration(
-                writer, iteration, update.loss, update.grad_norm, update.damping, run_start
+        def on_accept(params: np.ndarray, point: LMPoint) -> None:
+            self.history.append(
+                (dict(zip(knob_names, (float(v) for v in params), strict=False)), float(point.loss))
             )
 
-            if update.converged:
-                logger.info(
-                    "Levenberg-Marquardt converged (%s) at iter %d", update.reason, iteration
-                )
-                break
-
-        best_knobs = dict(zip(knob_names, (float(v) for v in optimiser.best_params), strict=False))
-        self.diagnostics = {
-            "converged": bool(last_update is not None and last_update.converged),
-            "reason": None if last_update is None else last_update.reason,
-            "iterations": completed_iterations,
-            "best_loss": float(optimiser.best_loss),
-            "gradient_norm": (
-                None if last_update is None else float(last_update.grad_norm)
-            ),
-            "damping": None if last_update is None else float(last_update.damping),
-            "accepted_evaluations": accepted_evaluations,
-        }
+        optimiser, self.diagnostics = run_levenberg_marquardt(
+            initial, evaluate, self.lm_config, on_accept=on_accept, writer=writer
+        )
+        best_knobs = dict(zip(knob_names, (float(v) for v in optimiser.best.value), strict=False))
         # The optimiser's Hessian is in the worker's normalised weight space, so
         # its inverse is not a covariance in physical knob units. Re-evaluate the
         # physical normal matrix ``JᵀWJ`` (true inverse-variance weights) at the
         # solution and regularise it with the same isotropic prior the fit used,
         # so the reported 1-sigma is the MAP posterior width in real units.
-        _l, _g, _h, normal_matrix, particle_loss = self._collect_gn(
-            channels, best_knobs, knob_names
-        )
-        if not particle_loss and self.prior_strengths:
+        reduced = reduce_replies(self._evaluate_workers(channels, best_knobs), n_knobs)
+        normal_matrix = reduced.normal
+        if not reduced.particle_lost and self.prior_strengths:
             normal_matrix = normal_matrix + np.diag(
-                _prior_alphas(
-                    self.prior_strengths,
-                    normal_matrix,
-                    knob_names,
-                )
+                prior_alphas(self.prior_strengths, normal_matrix, knob_names)
             )
-        return best_knobs, normal_matrix, knob_names
+        return best_knobs, normal_matrix
 
-    def _collect_gn(
-        self, channels, knobs: dict[str, float], knob_names: list[str]
-    ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, bool]:
-        """Send knobs to every worker and sum their loss, gradient and Hessians.
-
-        Returns both the normalised Hessian the optimiser steps with and the
-        physical (un-normalised, true inverse-variance) Hessian whose inverse is
-        the parameter covariance in real knob units.
-        """
-        return self._sum_gn(self._exchange(channels, knobs), len(knob_names))
-
-    def _exchange(self, channels, knobs: dict[str, float]) -> list:
-        """Send ``knobs`` to the workers and return their replies (the summed workers' replies, in order)."""
-        channels.send_all((knobs, 0))
+    def _evaluate_workers(self, channels, knobs: dict[str, float]) -> list[GradReply]:
+        """Send ``knobs`` to the workers and return the replies to be summed, in order."""
+        channels.send_all(Evaluate(knobs))
         return channels.recv_all()
 
-    @staticmethod
-    def _sum_gn(results: list, n: int) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, bool]:
-        """Sum the ``(id, grad, loss, hessian, hessian_phys)`` replies of the workers (see :meth:`_collect_gn`)."""
-        if not results:
-            raise RuntimeError("No closed-twiss workers returned results")
 
-        total_loss = 0.0
-        agg_grad = np.zeros(n)
-        agg_hess = np.zeros((n, n))
-        agg_hess_phys = np.zeros((n, n))
-        particle_loss = False
-        for result in results:
-            if not isinstance(result, tuple) or len(result) != 5:
-                raise RuntimeError(f"Unexpected closed-twiss worker payload: {result!r}")
-            _, grad, loss, hessian, hessian_phys = result
-            if loss == float("inf"):
-                raise RuntimeError("Worker error detected during closed-twiss optimisation")
-            if np.isnan(loss):
-                particle_loss = True
-                continue
-            agg_grad += np.asarray(grad, dtype=float)
-            agg_hess += np.asarray(hessian, dtype=float)
-            agg_hess_phys += np.asarray(hessian_phys, dtype=float)
-            total_loss += float(loss)
-
-        return total_loss, agg_grad, agg_hess, agg_hess_phys, particle_loss
-
-    def _log_gn_iteration(
-        self, writer, iteration: int, loss: float, grad_norm: float, lam: float, run_start: float
-    ) -> None:
-        """Log one Gauss-Newton iteration to the console and TensorBoard."""
-        logger.info(
-            "GN iter %d: loss=%.3e, |g|=%.3e, lam=%.1e, tt=%.1fs",
-            iteration,
-            loss,
-            grad_norm,
-            lam,
-            time.time() - run_start,
-        )
-        if writer is not None:
-            writer.add_scalar("loss", loss, iteration)
-            writer.add_scalar("grad_norm", grad_norm, iteration)
-            writer.add_scalar("lm_lambda", lam, iteration)
-            writer.flush()
-
-
-class ClosedTwissFitter(_GaussNewtonFitter):
+class ClosedTwissFitter(LMFitter):
     """Optimise knobs so periodic model optics match measured closed twiss."""
 
     worker_class = ClosedTwissWorker
@@ -438,87 +324,6 @@ def _base_optimiser_config(lm_config: LevenbergMarquardtConfig) -> OptimiserConf
         gradient_converged_value=lm_config.gradient_converged_value,
         optimiser_type="lbfgs",
     )
-
-
-def _validate_prior_strengths(
-    strengths: Mapping[str, float] | None,
-) -> dict[str, float]:
-    """Validate exact terminal knob-family prior strengths."""
-    result: dict[str, float] = {}
-    for family, value in (strengths or {}).items():
-        family = str(family)
-        if not family or "." in family:
-            raise ValueError(
-                f"Prior family {family!r} must be an exact terminal attribute such as 'dk1l'"
-            )
-        value = float(value)
-        if value < 0.0:
-            raise ValueError("prior strengths must be >= 0")
-        result[family] = value
-    return result
-
-
-def _prior_alphas(
-    strengths: Mapping[str, float],
-    data_hessian: np.ndarray,
-    knob_names: list[str],
-    *,
-    log: bool = False,
-) -> np.ndarray:
-    """Return one independently scaled Tikhonov precision per knob family."""
-    strengths = _validate_prior_strengths(strengths)
-    diagonal = np.abs(np.diag(np.asarray(data_hessian, dtype=float)))
-    alphas = np.zeros(len(knob_names))
-    knob_families = [name.rpartition(".")[2] for name in knob_names]
-    missing = sorted(set(knob_families) - set(strengths))
-    unused = sorted(set(strengths) - set(knob_families))
-    if missing or unused:
-        raise ValueError(
-            f"Prior families must exactly cover optimised knobs; missing={missing}, unused={unused}"
-        )
-    families = np.asarray(knob_families)
-    for family, strength in strengths.items():
-        indices = np.flatnonzero(families == family)
-        positive = diagonal[indices][diagonal[indices] > 0.0]
-        scale = float(np.median(positive)) if positive.size else 0.0
-        alphas[indices] = float(strength) * scale
-        if log:
-            logger.info(
-                "Knob prior for %s: %d knobs, alpha=%.3e "
-                "(strength=%.3e x median diag H=%.3e)",
-                family,
-                len(indices),
-                alphas[indices[0]],
-                strength,
-                scale,
-            )
-
-    return alphas
-
-
-def _apply_prior(
-    loss: float,
-    grad: np.ndarray,
-    hessian: np.ndarray,
-    params: np.ndarray,
-    prior_mean: np.ndarray,
-    coefficients: np.ndarray,
-) -> tuple[float, np.ndarray, np.ndarray]:
-    """Add a diagonal Gaussian knob prior to the loss, gradient and Hessian.
-
-    Implements the MAP term ``0.5·alpha·||theta - theta0||²`` consistently with
-    the worker convention (``grad = dL/dtheta``, ``hessian = d²L/dtheta²``): the
-    gradient and Hessian gain the corresponding fixed diagonal precision. This
-    allows families with different units to use independent curvature scales.
-    """
-    delta = params - prior_mean
-    coefficients = np.asarray(coefficients, dtype=float)
-    if coefficients.shape != delta.shape:
-        raise ValueError("Prior coefficients must have one entry per optimisation knob")
-    grad = grad + coefficients * delta
-    hessian = hessian + np.diag(coefficients)
-    loss = loss + 0.5 * float(delta @ (coefficients * delta))
-    return loss, grad, hessian
 
 
 def _hessian_uncertainties(
@@ -618,10 +423,10 @@ def create_worker_payloads(
 
     The loss normalisation is stamped on afterwards, from every worker's
     observables at once: it has to be one common constant, or the workers are not
-    minimising the same objective. See :func:`_stamp_global_normalisation`.
+    minimising the same objective. See :func:`stamp_global_normalisation`.
     """
     payloads = [
-        _create_worker_payload(
+        build_worker_payload(
             pt,
             measurement,
             observables,
@@ -636,11 +441,11 @@ def create_worker_payloads(
         )
         for pt, measurement in measurements.items()
     ]
-    _stamp_global_normalisation(payloads)
+    stamp_global_normalisation(payloads)
     return payloads
 
 
-def _stamp_global_normalisation(payloads: list[tuple[WorkerConfig, ClosedTwissData]]) -> None:
+def stamp_global_normalisation(payloads: list[tuple[WorkerConfig, ClosedTwissData]]) -> None:
     """Give every worker the same weight scale and point count.
 
     The workers' losses are summed by the fitter, so any per-worker scaling of a
@@ -665,10 +470,9 @@ def _stamp_global_normalisation(payloads: list[tuple[WorkerConfig, ClosedTwissDa
     weights = [
         WeightProcessor.variance_to_weight(np.asarray(observable.variances, dtype=float))
         for _config, data in payloads
-        for observable in data.all_observables
+        for observable in data.observables
     ]
-    largest = max((float(np.max(w)) for w in weights if w.size), default=0.0)
-    scale = largest if largest > 0.0 else 1.0
+    scale = global_weight_scale(weights)
     points = max(1, sum(int(np.count_nonzero(w)) for w in weights))
     logger.info(
         "Global loss normalisation over %d worker(s): weight scale %.6e, %d weighted points",
@@ -681,7 +485,7 @@ def _stamp_global_normalisation(payloads: list[tuple[WorkerConfig, ClosedTwissDa
         data.total_points = points
 
 
-def _create_worker_payload(
+def build_worker_payload(
     pt: float,
     measurement: pd.DataFrame,
     observables: tuple[str, ...],

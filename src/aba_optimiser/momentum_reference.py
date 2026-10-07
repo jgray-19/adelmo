@@ -50,6 +50,7 @@ with the measurement momentum offset only.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -262,7 +263,8 @@ def fit_momentum_reference(
         output_config=output_config,
     )
     try:
-        magnet_strengths, uncertainties = fitter.run()
+        result = fitter.run()
+        magnet_strengths, uncertainties = result.knobs, result.uncertainties
     finally:
         # The workers are stopped by ``run``; this is the independent setup MAD
         # interface owned by the configuration manager.
@@ -306,7 +308,7 @@ def fit_momentum_reference(
             "machine_state": None if machine_state is None else dict(sorted(resolve_machine_state(machine_state).items())),
             "lm_config": repr(lm_config or fitter.lm_config),
         },
-        diagnostics={**fitter.diagnostics, "n_knobs": len(magnet_strengths)},
+        diagnostics={**dataclasses.asdict(result.diagnostics), "n_knobs": len(magnet_strengths)},
     )
 
 

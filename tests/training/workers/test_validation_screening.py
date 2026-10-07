@@ -119,16 +119,44 @@ def test_disabled_worker_does_not_donate_its_masked_bpms() -> None:
     assert disabled == [False]
 
 
-def test_validation_worker_has_worker_disabled_before_any_mask_arrives() -> None:
-    """``worker_disabled`` must exist without ``apply_mask`` ever being sent.
+def test_validation_worker_has_worker_disabled_before_any_mask_arrives(tmp_path) -> None:
+    """``worker_disabled`` must exist without ``APPLY_MASK`` ever being sent.
 
     Screening is optional (``enable_preloop_outlier_screening=False``), so the
     validation command loop reads this attribute on runs where no mask is ever
-    pushed. It is declared at class level precisely because
-    ``ValidationTrackingWorker.prepare_data`` overrides without calling super.
+    pushed.
     """
+    from aba_optimiser.accelerators import PSB
+    from aba_optimiser.config import SimulationConfig
+    from aba_optimiser.workers import TrackingData, WorkerConfig
+    from aba_optimiser.workers.common import PrecomputedTrackingWeights
     from aba_optimiser.workers.tracking import TrackingWorker
-    from aba_optimiser.workers.tracking_validation import ValidationTrackingWorker
 
-    assert TrackingWorker.worker_disabled is False
-    assert ValidationTrackingWorker.worker_disabled is False
+    seq_file = tmp_path / "psb.seq"
+    seq_file.write_text("! placeholder sequence\n")
+    shape = (2, 3)
+    data = TrackingData(
+        position_comparisons=np.zeros((*shape, 2)),
+        momentum_comparisons=np.zeros((*shape, 2)),
+        position_variances=np.ones((*shape, 2)),
+        momentum_variances=np.ones((*shape, 2)),
+        init_coords=np.zeros((2, 6)),
+        init_pts=np.zeros(2),
+        reading_ids=np.zeros(shape, dtype=np.int64),
+        init_reading_ids=np.zeros(2, dtype=np.int64),
+        init_variances=np.ones((2, 2)),
+        precomputed_weights=PrecomputedTrackingWeights(
+            x=np.ones(shape), y=np.ones(shape), px=np.ones(shape), py=np.ones(shape), scale=1.0
+        ),
+    )
+    config = WorkerConfig(
+        accelerator=PSB(ring=3, sequence_file=seq_file),
+        tracking_start_bpm="BR3.BPM1L3",
+        tracking_end_bpm="BR3.BPM3L3",
+        magnet_range="$start/$end",
+    )
+    for validation in (False, True):
+        worker = TrackingWorker(
+            None, 0, data, config, SimulationConfig(num_workers=1, num_batches=1), validation
+        )
+        assert worker.worker_disabled is False

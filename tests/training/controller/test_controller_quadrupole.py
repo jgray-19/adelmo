@@ -127,7 +127,7 @@ def test_controller_quad_opt_simple(
         true_loss = evaluate_controller_worker_loss(ctrl, true_values)
         assert true_loss < initial_loss * 1e-6
         return
-    estimate, _unc = ctrl.run()
+    estimate = ctrl.run().knobs
     _assert_estimate_matches_true(estimate, true_values, max_rel_diff=1e-5)
 
 
@@ -154,7 +154,7 @@ def test_controller_quad_opt_simple_without_early_stopping_reaches_truth(
     )
     ctrl.optimisation_loop.gradient_converged_value = -1.0
 
-    estimate, _unc = ctrl.run()
+    estimate = ctrl.run().knobs
     _assert_estimate_matches_true(estimate, true_values, max_rel_diff=1e-5)
 
 
