@@ -19,13 +19,19 @@ from aba_optimiser.calibration import (
     reduce_blocks,
 )
 from aba_optimiser.mad.machine_state import resolve_machine_state
-from aba_optimiser.training_closed_twiss.closed_orbit import ClosedOrbitFitter
-from aba_optimiser.training_closed_twiss.lm_loop import LMPoint, run_levenberg_marquardt
+from aba_optimiser.poco.closed_orbit import CLOSED_ORBIT_OBSERVABLES, ClosedOrbitFitter
+from aba_optimiser.poco.lm_loop import LMPoint, run_levenberg_marquardt
 from aba_optimiser.workers.calibrated_closed_orbit import CalibratedClosedOrbitWorker
 from aba_optimiser.workers.protocol import Evaluate, GradReply, distribute
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
+
+    from aba_optimiser.accelerators import Accelerator
+    from aba_optimiser.optimisers.levenberg_marquardt import LevenbergMarquardtConfig
+    from aba_optimiser.poco.closed_orbit import ClosedOrbitSeries
+    from aba_optimiser.training.config.models import OutputConfig, SequenceConfig
 
 LOGGER = logging.getLogger(__name__)
 
@@ -45,12 +51,23 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
 
     def __init__(
         self,
-        *args,
+        accelerator: Accelerator,
+        sequence_config: SequenceConfig,
+        series: list[ClosedOrbitSeries] | tuple[ClosedOrbitSeries, ...],
+        observables: tuple[str, ...] = CLOSED_ORBIT_OBSERVABLES,
+        lm_config: LevenbergMarquardtConfig | None = None,
+        initial_knob_strengths: dict[str, float] | None = None,
+        machine_state: Path | Mapping[str, float] | None = None,
+        true_strengths: Path | dict[str, float] | None = None,
+        use_errors: bool = True,
+        prior_strengths: Mapping[str, float] | None = None,
+        output_config: OutputConfig | None = None,
+        max_workers: int | None = None,
+        *,
         sigma_bpm: float = 1e-2,
         sigma_corrector: float = 1e-2,
         knob_sigmas: Mapping[str, float] | None = None,
         loss_only_trials: bool = True,
-        **kwargs,
     ) -> None:
         self.knob_sigmas = {name.lower(): float(sigma) for name, sigma in (knob_sigmas or {}).items()}
         if any(sigma <= 0 for sigma in self.knob_sigmas.values()):
@@ -63,7 +80,21 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
         self._part: CalibrationBlocks | None = None  # receive buffer of _collect_calibrated
         self.calibration_result: dict[str, float] = {}
         self.calibration_spec: CalibrationSpec | None = None
-        super().__init__(*args, **kwargs)
+        # The gains are grouped into every worker's batch, so the shared-reference worker never applies.
+        super().__init__(
+            accelerator,
+            sequence_config,
+            series,
+            observables=observables,
+            lm_config=lm_config,
+            initial_knob_strengths=initial_knob_strengths,
+            machine_state=machine_state,
+            true_strengths=true_strengths,
+            use_errors=use_errors,
+            prior_strengths=prior_strengths,
+            output_config=output_config,
+            max_workers=max_workers,
+        )
 
     def _group_payloads(self, payloads):
         """Always batch workers, each series tagged with the global gain layout."""
@@ -139,7 +170,7 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
 
     def _solve(self, channels, writer):
         spec = self.calibration_spec
-        knob_names = list(self.config_manager.knob_names)
+        knob_names = list(self.machine.knob_names)
         n_q, n_g, n_b = len(knob_names), len(spec.correctors), len(PLANES) * len(spec.bpms)
         g_names = [corrector_gain_name(c) for c in spec.correctors]
         b_names = [bpm_gain_name(plane, bpm) for plane in PLANES for bpm in spec.bpms]
@@ -150,7 +181,7 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
         sigma_q = np.array([self.knob_sigmas.get(name.lower(), 0.0) for name in knob_names])
 
         u = np.zeros(n_q + n_g)
-        u[:n_q] = [float(self.initial_knobs[name]) for name in knob_names]
+        u[:n_q] = [float(self.machine.initial_knobs[name]) for name in knob_names]
         #: The BPM gains: eliminated from each solve, then back-substituted from the best point's blocks.
         gains = {"b": np.zeros(n_b), "best_b": np.zeros(n_b), "best_blocks": None}
 

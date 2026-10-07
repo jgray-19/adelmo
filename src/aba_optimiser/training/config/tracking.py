@@ -446,7 +446,7 @@ class ACDArcByArcTrackingPlan(_AcdPlan):
 class TrackingModeSetup:
     """Resolved tracking mode: the plan plus the inputs it rewrote.
 
-    Each :class:`~aba_optimiser.training.tracking_fitter.TrackingFitter` entry point
+    Each :class:`~aba_optimiser.training.tracking.fitter.TrackingFitter` entry point
     builds one of these (via the ``*_setup`` helpers below) to fix the parts of the
     simulation config and BPM points that are not free choices for its mode.
     """

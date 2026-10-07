@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from multiprocessing.connection import Connection
 
-    from aba_optimiser.training.workers.setup import WorkerRuntimeMetadata
+    from aba_optimiser.training.tracking.workers.setup import WorkerRuntimeMetadata
 
 LOGGER = logging.getLogger(__name__)
 

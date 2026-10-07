@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from aba_optimiser.training.workers.turn_planner import WorkerTurnPlanner
+from aba_optimiser.training.tracking.workers.turn_planner import WorkerTurnPlanner
 
 
 class _TwoSpecPlan:

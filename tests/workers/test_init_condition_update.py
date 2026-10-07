@@ -3,8 +3,8 @@
 Covers:
 - TrackingWorker._send_init_condition_update updates _init_coords_np in Python
 - TrackingWorker.handle_command dispatches UPDATE_INIT_COORDS
-- WorkerManager.send_init_condition_updates validates shape and sends per-worker slices
-- TrackingFitter._make_epoch_end_hook dispatches the callback's coordinates
+- TrackingSession.send_init_condition_updates validates shape and sends per-worker slices
+- initial_conditions_hook dispatches the callback's coordinates
 """
 
 from __future__ import annotations
@@ -145,7 +145,7 @@ def test_handle_command_update_init_coords_updates_arrays_and_acks() -> None:
 
 
 # ---------------------------------------------------------------------------
-# WorkerManager.send_init_condition_updates — real pipes + threads
+# TrackingSession.send_init_condition_updates — real pipes + threads
 # ---------------------------------------------------------------------------
 
 def _recv_and_ack(child_conn, received_store: list, idx: int) -> None:
@@ -157,7 +157,7 @@ def _recv_and_ack(child_conn, received_store: list, idx: int) -> None:
 
 def _make_pool(counts: list[int], id_offset: int = 0):
     """A WorkerPool backed by real mp.Pipe() connections; returns it and the child ends."""
-    from aba_optimiser.training.workers.pool import WorkerPool
+    from aba_optimiser.training.pool import WorkerPool
 
     parent_conns, child_conns = zip(*[mp.Pipe() for _ in counts])
     pool = WorkerPool(
@@ -170,18 +170,21 @@ def _make_pool(counts: list[int], id_offset: int = 0):
 
 
 def _make_real_channels(counts: list[int]):
-    """Build a WorkerManager stub with real training pipe connections."""
+    """Build a session with real training pipe connections."""
     return _make_real_channels_with_validation(counts, [])[:2]
 
 
 def _make_real_channels_with_validation(
     training_counts: list[int], validation_counts: list[int]
 ):
-    """Build a WorkerManager stub with both training and validation pipe connections."""
-    from aba_optimiser.training.workers.manager import WorkerManager
-    from aba_optimiser.training.workers.pool import WorkerPool
+    """Build a session with both training and validation pipe connections.
 
-    wm = object.__new__(WorkerManager)
+    Only its pools are set: pushing coordinates touches nothing else.
+    """
+    from aba_optimiser.training.pool import WorkerPool
+    from aba_optimiser.training.tracking.session import TrackingSession
+
+    wm = object.__new__(TrackingSession)
     wm.training, trn_children = _make_pool(training_counts)
     wm.validation, val_children = (
         _make_pool(validation_counts, id_offset=len(training_counts))
@@ -280,105 +283,76 @@ def test_send_init_condition_updates_also_updates_validation_workers() -> None:
 
 
 # ---------------------------------------------------------------------------
-# TrackingFitter._make_epoch_end_hook — no subprocess needed
+# initial_conditions_hook -- no subprocess needed
 # ---------------------------------------------------------------------------
 
 
-def test_make_epoch_end_hook_calls_callback_and_dispatches() -> None:
-    from aba_optimiser.training.tracking_fitter import TrackingFitter
+def test_initial_conditions_hook_pushes_the_callbacks_coordinates() -> None:
+    from aba_optimiser.training.tracking.fitter import initial_conditions_hook
 
-    dispatched: list[np.ndarray] = []
+    pushed: list[np.ndarray] = []
+    new_coords = np.zeros((5, 4))
+    hook = initial_conditions_hook(lambda knobs, best: new_coords, {}, pushed.append)
 
-    class FakeWorkerManager:
-        def send_init_condition_updates(self, arr: np.ndarray) -> None:
-            dispatched.append(arr)
+    note = hook({"k1": 1.0}, {"k1": 1.0})
 
-    ctrl = object.__new__(TrackingFitter)
-    ctrl.worker_manager = FakeWorkerManager()
-    ctrl.config_manager = SimpleNamespace(initial_model_values={})
-
-    new_coords = np.zeros((5, 2))
-    ctrl.initial_conditions_callback = lambda knobs, best: new_coords
-
-    hook = ctrl._make_epoch_end_hook()
-    assert hook is not None
-
-    hook({"k1": 1.0}, {"k1": 1.0})
-    assert len(dispatched) == 1
-    assert dispatched[0] is new_coords
+    assert len(pushed) == 1
+    assert pushed[0] is new_coords
+    assert note == "dic=0.00e+00, dic0=0.00e+00"
 
 
-def test_make_epoch_end_hook_skips_dispatch_when_callback_returns_none() -> None:
-    from aba_optimiser.training.tracking_fitter import TrackingFitter
+def test_initial_conditions_hook_pushes_nothing_when_the_callback_returns_none() -> None:
+    from aba_optimiser.training.tracking.fitter import initial_conditions_hook
 
-    dispatched: list = []
+    pushed: list[np.ndarray] = []
+    hook = initial_conditions_hook(lambda knobs, best: None, {}, pushed.append)
 
-    class FakeWorkerManager:
-        def send_init_condition_updates(self, arr: np.ndarray) -> None:
-            dispatched.append(arr)
-
-    ctrl = object.__new__(TrackingFitter)
-    ctrl.worker_manager = FakeWorkerManager()
-    ctrl.config_manager = SimpleNamespace(initial_model_values={})
-    ctrl.initial_conditions_callback = lambda knobs, best: None
-
-    hook = ctrl._make_epoch_end_hook()
-    assert hook is not None
-
-    hook({"k1": 1.0}, {"k1": 1.0})
-    assert len(dispatched) == 0
+    assert hook({"k1": 1.0}, {"k1": 1.0}) is None
+    assert pushed == []
 
 
-def test_make_epoch_end_hook_includes_non_optimised_strengths() -> None:
+def test_initial_conditions_hook_reports_step_and_drift() -> None:
+    from aba_optimiser.training.tracking.fitter import initial_conditions_hook
+
+    coords = iter([np.zeros((2, 4)), np.ones((2, 4)), np.full((2, 4), 3.0)])
+    hook = initial_conditions_hook(lambda knobs, best: next(coords), {}, lambda _: None)
+
+    hook({}, {})
+    assert hook({}, {}) == "dic=1.00e+00, dic0=1.00e+00"
+    assert hook({}, {}) == "dic=2.00e+00, dic0=3.00e+00"
+
+
+def test_initial_conditions_hook_includes_non_optimised_strengths() -> None:
     """The callback must see fixed strengths, not just this stage's knobs.
 
     The optimisation loop rebuilds ``current_knobs`` from the knob names alone, so
     strengths supplied via ``initial_knob_strengths`` but not optimised only survive
-    in ``config_manager.initial_model_values``. A callback that rebuilds a model from
+    in ``MachineSetup.initial_model_values``. A callback that rebuilds a model from
     the knobs it is handed would otherwise fall back to the bare model defaults.
     """
-    from aba_optimiser.training.tracking_fitter import TrackingFitter
+    from aba_optimiser.training.tracking.fitter import initial_conditions_hook
 
     seen: list[dict[str, float]] = []
 
-    class FakeWorkerManager:
-        def send_init_condition_updates(self, arr: np.ndarray) -> None:
-            pass
-
-    ctrl = object.__new__(TrackingFitter)
-    ctrl.worker_manager = FakeWorkerManager()
-    ctrl.config_manager = SimpleNamespace(
-        initial_model_values={"kfixed": 3.0, "kopt": 0.0, "pt": 1e-3}
-    )
-
     def callback(current: dict[str, float], best: dict[str, float]) -> None:
-        seen.append(current)
-        seen.append(best)
-        return
+        seen.extend((current, best))
 
-    ctrl.initial_conditions_callback = callback
-    hook = ctrl._make_epoch_end_hook()
+    fixed = {"kfixed": 3.0, "kopt": 0.0, "pt": 1e-3}
+    initial_conditions_hook(callback, fixed, lambda _: None)({"kopt": 1.0}, {"kopt": 2.0})
 
-    hook({"kopt": 1.0}, {"kopt": 2.0})
     current, best = seen
     assert current == {"kfixed": 3.0, "kopt": 1.0, "pt": 1e-3}
     assert best == {"kfixed": 3.0, "kopt": 2.0, "pt": 1e-3}
 
 
-def test_make_epoch_end_hook_keeps_empty_best_knobs_empty() -> None:
+def test_initial_conditions_hook_keeps_empty_best_knobs_empty() -> None:
     """An empty ``best_knobs`` must stay empty so callbacks can skip early epochs."""
-    from aba_optimiser.training.tracking_fitter import TrackingFitter
+    from aba_optimiser.training.tracking.fitter import initial_conditions_hook
 
     seen: list[dict[str, float]] = []
+    hook = initial_conditions_hook(
+        lambda current, best: seen.append(best), {"kfixed": 3.0}, lambda _: None
+    )
 
-    class FakeWorkerManager:
-        def send_init_condition_updates(self, arr: np.ndarray) -> None:
-            pass
-
-    ctrl = object.__new__(TrackingFitter)
-    ctrl.worker_manager = FakeWorkerManager()
-    ctrl.config_manager = SimpleNamespace(initial_model_values={"kfixed": 3.0})
-    ctrl.initial_conditions_callback = lambda current, best: seen.append(best)
-
-    ctrl._make_epoch_end_hook()({"kopt": 1.0}, {})
+    hook({"kopt": 1.0}, {})
     assert seen == [{}]

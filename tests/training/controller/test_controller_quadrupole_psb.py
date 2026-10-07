@@ -16,7 +16,7 @@ from aba_optimiser.training.config.models import (
     OutputConfig,
     SequenceConfig,
 )
-from aba_optimiser.training.tracking_fitter import ArcByArcFitter
+from aba_optimiser.training.tracking.fitter import ArcByArcFitter, FitterOptions
 from tests.training.controller_test_utils import (
     _generate_nonoise_track,
     _make_simulation_config_quad,
@@ -87,12 +87,14 @@ def _build_psb_arc_quad_controller(
         ),
         bpm_start_points=PSB_BPM_START_POINTS,
         bpm_end_points=PSB_BPM_END_POINTS,
-        output_config=OutputConfig(
-            mad_logfile=tmp_path / "controller_quad_opt_psb_val.log",
-            write_tensorboard_logs=False,
+        options=FitterOptions(
+            output_config=OutputConfig(
+                mad_logfile=tmp_path / "controller_quad_opt_psb_val.log",
+                write_tensorboard_logs=False,
+            ),
+            true_strengths=magnet_strengths,
+            debug=False,
         ),
-        true_strengths=magnet_strengths,
-        debug=False,
     )
     return ctrl, magnet_strengths
 
@@ -105,7 +107,7 @@ def test_controller_quad_psb_validation_loss_is_real_out_of_sample(
     """Arc-by-arc PSB fit yields a genuine held-out validation loss (not None).
 
     The arc-by-arc plan enables validation, so DataManager reserves a disjoint
-    set of turns. compute_validation_loss evaluates the validation workers, which
+    set of turns. TrackingSession.validation_loss evaluates the validation workers, which
     track ONLY those held-out turns, and must return a real number. Because the
     held-out turns are noise-free samples of the same machine, the out-of-sample
     loss must strongly prefer the true quadrupole strengths over the perturbed
@@ -125,23 +127,12 @@ def test_controller_quad_psb_validation_loss_is_real_out_of_sample(
     }
     assert training_turns.isdisjoint(validation_turns)
 
-    ctrl.worker_manager.start_workers(
-        ctrl.data_manager.tracks,
-        ctrl.data_manager.turn_batches,
-        ctrl.data_manager.validation_turn_batches,
-        ctrl.data_manager.file_map,
-        ctrl.config_manager.start_bpms,
-        ctrl.config_manager.end_bpms,
-        ctrl.simulation_config,
-        ctrl.machine_deltaps,
-        ctrl.initial_knobs,
-        enable_validation=True,
-    )
+    ctrl.start_session(ctrl.machine.initial_knobs, enable_validation=True)
     try:
-        val_initial = ctrl.worker_manager.compute_validation_loss(ctrl.initial_knobs)
-        val_true = ctrl.worker_manager.compute_validation_loss(true_values)
+        val_initial = ctrl.session.validation_loss(ctrl.machine.initial_knobs)
+        val_true = ctrl.session.validation_loss(true_values)
     finally:
-        ctrl.worker_manager.terminate_workers()
+        ctrl.session.terminate()
 
     # A genuine out-of-sample number, never None when validation is enabled.
     assert val_initial is not None and math.isfinite(val_initial)
@@ -213,15 +204,17 @@ def test_controller_quad_opt_psb_ring3(
         measurement_config,
         bpm_start_points=PSB_BPM_START_POINTS,
         bpm_end_points=PSB_BPM_END_POINTS,
-        output_config=OutputConfig(
-            mad_logfile=tmp_path / "controller_quad_opt_psb.log",
-            write_tensorboard_logs=False,
+        options=FitterOptions(
+            output_config=OutputConfig(
+                mad_logfile=tmp_path / "controller_quad_opt_psb.log",
+                write_tensorboard_logs=False,
+            ),
+            true_strengths=magnet_strengths,
+            debug=False,
         ),
-        true_strengths=magnet_strengths,
-        debug=False,
     )
     if controller_test_mode == "loss_regression":
-        initial_loss = evaluate_controller_worker_loss(ctrl, ctrl.initial_knobs)
+        initial_loss = evaluate_controller_worker_loss(ctrl, ctrl.machine.initial_knobs)
         true_loss = evaluate_controller_worker_loss(ctrl, magnet_strengths)
         assert true_loss < initial_loss * 1e-3
         return

@@ -1,6 +1,6 @@
 """Worker payload construction.
 
-Turns :class:`~aba_optimiser.training.data_manager.FileTracks` grids and
+Turns :class:`~aba_optimiser.training.tracking.data_manager.FileTracks` grids and
 observation plans into the immutable arrays a tracking worker receives.
 """
 
@@ -23,8 +23,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from aba_optimiser.accelerators import Accelerator
-    from aba_optimiser.training.data_manager import FileTracks
-    from aba_optimiser.training.workers.setup import WorkerObservationPlan
+    from aba_optimiser.training.tracking.data_manager import FileTracks
+    from aba_optimiser.training.tracking.workers.setup import WorkerObservationPlan
     from aba_optimiser.workers import WorkerConfig
 
 LOGGER = logging.getLogger(__name__)

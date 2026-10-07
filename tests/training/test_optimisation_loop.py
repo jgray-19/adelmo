@@ -7,39 +7,30 @@ import threading
 import numpy as np
 import pytest
 
-from aba_optimiser.config import OptimiserConfig, SimulationConfig
+from aba_optimiser.config import OptimiserConfig
 from aba_optimiser.optimisers.adam import AdamOptimiser
 from aba_optimiser.training.config.models import CheckpointConfig
-from aba_optimiser.training.optimisation.checkpointing import OptimisationCheckpointer
-from aba_optimiser.training.optimisation.loop import OptimisationLoop
+from aba_optimiser.training.sgd.checkpointing import OptimisationCheckpointer
+from aba_optimiser.training.sgd.loop import SGDLoop
 from aba_optimiser.workers.protocol import Evaluate, GradReply, Start, WorkerChannels
 
 
-def _make_loop(knob_names: list[str]) -> OptimisationLoop:
+def _make_loop(
+    knob_names: list[str], *, max_epochs: int = 2, gradient_converged_value: float = 1e-6
+) -> SGDLoop:
     optimiser_config = OptimiserConfig(
-        max_epochs=2,
+        max_epochs=max_epochs,
         warmup_epochs=1,
         warmup_lr_start=1e-3,
         max_lr=1e-3,
         min_lr=1e-3,
-        gradient_converged_value=1e-6,
+        gradient_converged_value=gradient_converged_value,
         optimiser_type="adam",
     )
-    simulation_config = SimulationConfig(
-        num_workers=1,
-        num_batches=1,
-    )
-    initial_strengths = np.zeros(len(knob_names), dtype=float)
-    return OptimisationLoop(
-        initial_strengths=initial_strengths,
-        knob_names=knob_names,
-        true_strengths={},
-        optimiser_config=optimiser_config,
-        simulation_config=simulation_config,
-    )
+    return SGDLoop(knob_names, true_strengths={}, config=optimiser_config, num_batches=1)
 
 
-def _make_checkpointer(loop: OptimisationLoop, checkpoint_path) -> OptimisationCheckpointer:
+def _make_checkpointer(loop: SGDLoop, checkpoint_path) -> OptimisationCheckpointer:
     return OptimisationCheckpointer(loop, CheckpointConfig(checkpoint_path=checkpoint_path))
 
 
@@ -227,21 +218,17 @@ def _make_real_channels_nonzero_grad(n_knobs: int, n_epochs: int, n_batches: int
 def test_epoch_end_hook_called_once_per_epoch() -> None:
     """epoch_end_hook must be invoked exactly once after each completed epoch."""
     n_epochs, n_batches = 2, 1
-    loop = _make_loop(["k1"])
     # Pin the loop to exactly n_epochs and disable gradient-norm early stopping.
-    loop.max_epochs = n_epochs
-    loop.gradient_converged_value = -1.0
+    loop = _make_loop(["k1"], max_epochs=n_epochs, gradient_converged_value=-1.0)
 
     hook_calls: list[dict[str, float]] = []
 
     def hook(knobs: dict[str, float], _best: dict[str, float]) -> None:
         hook_calls.append(knobs.copy())
 
-    loop.run_optimisation(
-        current_knobs={"k1": 0.0},
-        channels=_make_real_channels(1, n_epochs, n_batches),
-        writer=None,
-        run_start=0.0,
+    loop.run(
+        {"k1": 0.0},
+        _make_real_channels(1, n_epochs, n_batches),
         total_turns=1,
         epoch_end_hook=hook,
     )
@@ -253,20 +240,16 @@ def test_epoch_end_hook_called_once_per_epoch() -> None:
 def test_epoch_end_hook_receives_updated_knobs() -> None:
     """The hook must receive knob values *after* the gradient update for that epoch."""
     n_epochs, n_batches = 2, 1
-    loop = _make_loop(["k1"])
-    loop.max_epochs = n_epochs
-    loop.gradient_converged_value = -1.0
+    loop = _make_loop(["k1"], max_epochs=n_epochs, gradient_converged_value=-1.0)
 
     seen_knobs: list[float] = []
 
     def hook(knobs: dict[str, float], _best: dict[str, float]) -> None:
         seen_knobs.append(knobs["k1"])
 
-    loop.run_optimisation(
-        current_knobs={"k1": 0.0},
-        channels=_make_real_channels_nonzero_grad(1, n_epochs, n_batches),
-        writer=None,
-        run_start=0.0,
+    loop.run(
+        {"k1": 0.0},
+        _make_real_channels_nonzero_grad(1, n_epochs, n_batches),
         total_turns=1,
         epoch_end_hook=hook,
     )
@@ -284,21 +267,17 @@ def test_epoch_end_hook_note_is_appended_to_the_epoch_log_line(caplog) -> None:
     import logging
 
     n_epochs, n_batches = 2, 1
-    loop = _make_loop(["k1"])
-    loop.max_epochs = n_epochs
-    loop.gradient_converged_value = -1.0
+    loop = _make_loop(["k1"], max_epochs=n_epochs, gradient_converged_value=-1.0)
 
     notes = iter(["dic=1.00e-09", "dic=2.00e-09"])
 
     def hook(_knobs: dict[str, float], _best: dict[str, float]) -> str:
         return next(notes)
 
-    with caplog.at_level(logging.INFO, logger="aba_optimiser.training.optimisation.loop"):
-        loop.run_optimisation(
-            current_knobs={"k1": 0.0},
-            channels=_make_real_channels(1, n_epochs, n_batches),
-            writer=None,
-            run_start=0.0,
+    with caplog.at_level(logging.INFO, logger="aba_optimiser.training.sgd.loop"):
+        loop.run(
+            {"k1": 0.0},
+            _make_real_channels(1, n_epochs, n_batches),
             total_turns=1,
             epoch_end_hook=hook,
         )
@@ -317,16 +296,12 @@ def test_epoch_line_omits_the_note_when_the_hook_returns_none(caplog) -> None:
     """A hook that did nothing this epoch must not leave an empty field behind."""
     import logging
 
-    loop = _make_loop(["k1"])
-    loop.max_epochs = 1
-    loop.gradient_converged_value = -1.0
+    loop = _make_loop(["k1"], max_epochs=1, gradient_converged_value=-1.0)
 
-    with caplog.at_level(logging.INFO, logger="aba_optimiser.training.optimisation.loop"):
-        loop.run_optimisation(
-            current_knobs={"k1": 0.0},
-            channels=_make_real_channels(1, 1, 1),
-            writer=None,
-            run_start=0.0,
+    with caplog.at_level(logging.INFO, logger="aba_optimiser.training.sgd.loop"):
+        loop.run(
+            {"k1": 0.0},
+            _make_real_channels(1, 1, 1),
             total_turns=1,
             epoch_end_hook=lambda _knobs, _best: None,
         )
@@ -342,15 +317,11 @@ def test_epoch_line_omits_the_note_when_the_hook_returns_none(caplog) -> None:
 def test_epoch_end_hook_none_does_not_raise() -> None:
     """Passing epoch_end_hook=None (the default) must not raise."""
     n_epochs, n_batches = 1, 1
-    loop = _make_loop(["k1"])
-    loop.max_epochs = n_epochs
-    loop.gradient_converged_value = -1.0
+    loop = _make_loop(["k1"], max_epochs=n_epochs, gradient_converged_value=-1.0)
 
-    loop.run_optimisation(
-        current_knobs={"k1": 0.0},
-        channels=_make_real_channels(1, n_epochs, n_batches),
-        writer=None,
-        run_start=0.0,
+    loop.run(
+        {"k1": 0.0},
+        _make_real_channels(1, n_epochs, n_batches),
         total_turns=1,
         epoch_end_hook=None,
     )

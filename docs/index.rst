@@ -21,8 +21,8 @@ Two families of fit are provided:
        :class:`~aba_optimiser.training.KickerFitter`
    * - Closed twiss
      - Closed orbit, phase advance, beta and dispersion
-     - :class:`~aba_optimiser.training_closed_twiss.ClosedOrbitFitter`,
-       :class:`~aba_optimiser.training_closed_twiss.ClosedTwissFitter`
+     - :class:`~aba_optimiser.poco.ClosedOrbitFitter`,
+       :class:`~aba_optimiser.poco.ClosedTwissFitter`
 
 Installation
 ------------

@@ -11,7 +11,7 @@ from aba_optimiser.measurements.acd_pipeline import (
     long_frame_to_tbt_data,
     run_driven_and_compensated_optics,
 )
-from aba_optimiser.training.data_manager import FileTracks
+from aba_optimiser.training.tracking.data_manager import FileTracks
 
 
 def test_long_frame_to_tbt_data_preserves_name_and_turn_order() -> None:

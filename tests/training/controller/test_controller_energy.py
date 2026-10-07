@@ -57,7 +57,7 @@ def test_controller_energy_opt(
             mad_log_name="controller_energy_opt.log",
         )
         initial_loss, true_loss = evaluate_controller_worker_losses(
-            ctrl, [ctrl.initial_knobs, true_knobs]
+            ctrl, [ctrl.machine.initial_knobs, true_knobs]
         )
         assert true_loss < initial_loss * 1e-2
         return

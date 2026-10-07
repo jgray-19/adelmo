@@ -25,7 +25,7 @@ import pytest
 
 from aba_optimiser.accelerators import PSB
 from aba_optimiser.config import SimulationConfig
-from aba_optimiser.training_closed_twiss.fitter import stamp_global_normalisation
+from aba_optimiser.poco.fitter import stamp_global_normalisation
 from aba_optimiser.workers import ClosedTwissData, ClosedTwissWorker, Observable, WorkerConfig
 from aba_optimiser.workers.closed_twiss import align_observables
 

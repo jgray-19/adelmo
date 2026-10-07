@@ -34,7 +34,7 @@ Package layout
     Tracking fitters, configuration, data management and the worker-management layer
     (``training.workers``: worker pool, payload construction, turn planning and
     outlier screening) and the optimisation loop (``training.optimisation``).
-``aba_optimiser.training_closed_twiss``
+``aba_optimiser.poco``
     Gauss-Newton fitters for closed-orbit and closed-twiss data.
 ``aba_optimiser.workers``
     Worker process implementations: tracking, validation tracking, closed twiss,

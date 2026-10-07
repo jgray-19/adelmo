@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from aba_optimiser.training.data_manager import infer_kick_plane
+from aba_optimiser.training.tracking.data_manager import infer_kick_plane
 from aba_optimiser.workers.tracking import active_observables
 
 

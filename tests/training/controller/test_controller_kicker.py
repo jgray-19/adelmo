@@ -16,7 +16,7 @@ from aba_optimiser.training.config.models import (
     OutputConfig,
     SequenceConfig,
 )
-from aba_optimiser.training.tracking_fitter import KickerFitter
+from aba_optimiser.training.tracking.fitter import FitterOptions, KickerFitter
 from tests.training.controller_test_utils import (
     _generate_kicker_track,
     _make_simulation_config_quad,
@@ -75,11 +75,13 @@ def _build_kicker_controller(
             kicker_name=kicker_name,
             turns_after_kicker=flattop_turns,
         ),
-        output_config=OutputConfig(
-            mad_logfile=tmp_path / "mad_logfile_kicker.log",
-            write_tensorboard_logs=False,
+        options=FitterOptions(
+            output_config=OutputConfig(
+                mad_logfile=tmp_path / "mad_logfile_kicker.log",
+                write_tensorboard_logs=False,
+            ),
+            true_strengths=magnet_strengths.copy(),
         ),
-        true_strengths=magnet_strengths.copy(),
     )
     return ctrl, magnet_strengths.copy()
 
@@ -92,7 +94,7 @@ def test_controller_kicker_has_no_held_out_validation(
     """The kicker plan disables validation, so no turns are held out.
 
     KickerTrackingPlan sets enable_validation=False: DataManager reserves no
-    validation turns and compute_validation_loss returns None (the caller then
+    validation turns and TrackingSession.validation_loss returns None (the caller then
     falls back to training loss). This asserts the real behaviour of a Kicker-style
     run, complementing the arc-by-arc case where validation returns a real number.
     """
@@ -105,22 +107,11 @@ def test_controller_kicker_has_no_held_out_validation(
     assert not ctrl.tracking_plan.enable_validation
     assert ctrl.data_manager.validation_turn_batches == []
 
-    ctrl.worker_manager.start_workers(
-        ctrl.data_manager.tracks,
-        ctrl.data_manager.turn_batches,
-        ctrl.data_manager.validation_turn_batches,
-        ctrl.data_manager.file_map,
-        ctrl.config_manager.start_bpms,
-        ctrl.config_manager.end_bpms,
-        ctrl.simulation_config,
-        ctrl.machine_deltaps,
-        ctrl.initial_knobs,
-        enable_validation=ctrl.tracking_plan.enable_validation,
-    )
+    ctrl.start_session(ctrl.machine.initial_knobs)
     try:
-        assert ctrl.worker_manager.compute_validation_loss(ctrl.initial_knobs) is None
+        assert ctrl.session.validation_loss(ctrl.machine.initial_knobs) is None
     finally:
-        ctrl.worker_manager.terminate_workers()
+        ctrl.session.terminate()
 
 
 def test_controller_quad_opt_with_kicker(
@@ -141,7 +132,7 @@ def test_controller_quad_opt_with_kicker(
         tmp_path / "mad_logfile_kicker.log",
     )
 
-    initial_loss = evaluate_controller_worker_loss(ctrl, ctrl.initial_knobs)
+    initial_loss = evaluate_controller_worker_loss(ctrl, ctrl.machine.initial_knobs)
 
     if loss_regression:
         true_loss = evaluate_controller_worker_loss(ctrl, magnet_strengths)
@@ -156,7 +147,7 @@ def test_controller_quad_opt_with_kicker(
         return
 
     initial_sum_true_diff = sum(
-        abs(ctrl.initial_knobs[magnet] - magnet_strengths[magnet])
+        abs(ctrl.machine.initial_knobs[magnet] - magnet_strengths[magnet])
         for magnet in magnet_strengths
     )
     estimate = ctrl.run().knobs

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from aba_optimiser.mad.machine_state import resolve_machine_state
-from aba_optimiser.training_closed_twiss.fitter import (
+from aba_optimiser.poco.fitter import (
     LevenbergMarquardtConfig,
     LMFitter,
     build_worker_payload,
@@ -225,7 +225,7 @@ class ClosedOrbitFitter(LMFitter):
             ]
             common_bpms = [
                 bpm
-                for bpm in self.config_manager.all_bpms
+                for bpm in self.machine.all_bpms
                 if all(bpm in frame.index for frame in frames)
             ]
             if len(common_bpms) < 2:
@@ -241,14 +241,14 @@ class ClosedOrbitFitter(LMFitter):
                     float(measurement.pt),
                     frame.loc[common_bpms],
                     item_observables,
-                    self.config_manager.all_bpms,
+                    self.machine.all_bpms,
                     sequence_config.magnet_range,
                     sequence_config.bad_bpms,
                     accelerator,
                     {},
                     self.use_errors,
-                    self.mad_logfile,
-                    self.python_logfile,
+                    self.machine.output_config.mad_logfile,
+                    self.machine.output_config.python_logfile,
                 )
                 config = config or worker_config
                 measurement_data.append(

@@ -31,11 +31,12 @@ from aba_optimiser.training.config.models import (
     OutputConfig,
     SequenceConfig,
 )
-from aba_optimiser.training.tracking_fitter import (
+from aba_optimiser.training.tracking.fitter import (
     ArcByArcFitter,
+    FitterOptions,
     TrackingFitter,
 )
-from aba_optimiser.training.workers.screening import OutlierScreener
+from aba_optimiser.training.tracking.workers.screening import OutlierScreener
 from tests.training.helpers import TRACK_COLUMNS, generate_xsuite_env_with_errors
 
 # Measurement noise assigned to the synthetic tracks' variance columns.
@@ -448,7 +449,9 @@ def _build_energy_optimisation_case(
         measurement_config,
         bpm_start_points,
         bpm_end_points,
-        output_config=output_config,
+        options=FitterOptions(
+            output_config=output_config,
+        ),
     )
     true_knobs = {
         "pt": loaded_interface.accelerator.dp2pt(dpp_value)
@@ -531,34 +534,15 @@ def evaluate_controller_worker_losses(
     enable_validation: bool | None = None,
 ) -> list[float]:
     """Return worker diagnostic losses for several knob settings using one worker startup."""
-    if enable_validation is None:
-        enable_validation = ctrl.tracking_plan.enable_validation
-    if not hasattr(ctrl, "data_manager"):
-        ctrl._init_data_manager()
-    initial_worker_values = {
-        **ctrl.config_manager.initial_model_values,
-        **ctrl.initial_knobs,
-    }
-    ctrl.worker_manager.start_workers(
-        ctrl.data_manager.tracks,
-        ctrl.data_manager.turn_batches,
-        ctrl.data_manager.validation_turn_batches,
-        ctrl.data_manager.file_map,
-        ctrl.config_manager.start_bpms,
-        ctrl.config_manager.end_bpms,
-        ctrl.simulation_config,
-        ctrl.machine_deltaps,
-        initial_worker_values,
-        enable_validation=enable_validation,
-    )
+    session = ctrl.start_session(enable_validation=enable_validation)
     try:
         losses = []
         for knobs in knobs_list:
-            screener = OutlierScreener(ctrl.worker_manager.payload_builder)
-            diags = screener.request_worker_diagnostics(ctrl.worker_manager.training.channels, knobs)
+            screener = OutlierScreener(session.payload_builder)
+            diags = screener.request_worker_diagnostics(session.training.channels, knobs)
             losses.append(sum(float(d.loss) for d in diags))
     finally:
-        ctrl.worker_manager.terminate_workers()
+        session.terminate()
     return losses
 
 

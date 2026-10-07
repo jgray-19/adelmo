@@ -25,8 +25,8 @@ import pytest
 from aba_optimiser.config import OptimiserConfig, SimulationConfig
 from aba_optimiser.mad import merge_machine_states
 from aba_optimiser.training.config.helpers import create_arc_measurement_config
-from aba_optimiser.training.config.models import OutputConfig, SequenceConfig
-from aba_optimiser.training.tracking_fitter import ArcByArcFitter
+from aba_optimiser.training.config.models import MeasurementConfig, OutputConfig, SequenceConfig
+from aba_optimiser.training.tracking.fitter import ArcByArcFitter, FitterOptions
 from aba_optimiser.workers.common import sandwich_uncertainties
 from tests.training.controller_test_utils import (
     DPP_VALUE,
@@ -71,27 +71,17 @@ def _make_fitter(
         create_arc_measurement_config(track, machine_state=merge_machine_states(corrector, tune_knobs)),
         BPM_START_POINTS,
         BPM_END_POINTS,
-        output_config=OutputConfig(mad_logfile=log, write_tensorboard_logs=False),
+        options=FitterOptions(
+            output_config=OutputConfig(mad_logfile=log, write_tensorboard_logs=False),
+        ),
     )
 
 
 def _reported_sigma(ctrl: ArcByArcFitter, true_knobs: dict[str, float]) -> float:
-    ctrl._init_data_manager()
-    ctrl.worker_manager.start_workers(
-        ctrl.data_manager.tracks,
-        ctrl.data_manager.turn_batches,
-        ctrl.data_manager.validation_turn_batches,
-        ctrl.data_manager.file_map,
-        ctrl.config_manager.start_bpms,
-        ctrl.config_manager.end_bpms,
-        ctrl.simulation_config,
-        ctrl.machine_deltaps,
-        {**ctrl.config_manager.initial_model_values, **true_knobs},
-        enable_validation=False,
-    )
-    knob_names = list(ctrl.config_manager.knob_names)
-    ctrl.worker_manager.set_training_knobs(true_knobs)
-    normal, noise = ctrl.worker_manager.stop_and_collect_uncertainty(
+    ctrl.start_session({**ctrl.machine.initial_model_values, **true_knobs}, enable_validation=False)
+    knob_names = list(ctrl.machine.knob_names)
+    ctrl.session.set_training_knobs(true_knobs)
+    normal, noise = ctrl.session.stop_and_collect_uncertainty(
         len(knob_names), propagate_uncertainty=True
     )
     return float(sandwich_uncertainties(normal, noise)[knob_names.index("pt")])
@@ -139,8 +129,8 @@ def _sigma_and_scatter(
         noisy_track = tmp_path / f"track_seed{seed}.parquet"
         noisy.to_parquet(noisy_track, index=False)
 
-        ctrl.measurement_files = [noisy_track]
-        del ctrl.data_manager
+        ctrl.measurement_config = MeasurementConfig({noisy_track: ctrl.measurement_config.details[0]})
+        ctrl.data_manager = None
         low, mid, high = evaluate_controller_worker_losses(
             ctrl,
             [{"pt": pt_true - STEP}, true_knobs, {"pt": pt_true + STEP}],

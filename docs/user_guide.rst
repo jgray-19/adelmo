@@ -126,12 +126,12 @@ is applied to the validation workers.
 Closed-twiss fits
 -----------------
 
-:class:`~aba_optimiser.training_closed_twiss.ClosedTwissFitter` fits knobs so that the
+:class:`~aba_optimiser.poco.ClosedTwissFitter` fits knobs so that the
 periodic model optics match a measured closed twiss. Closed orbit, beta, phase and
 dispersion are all obtained from one parametric MAD-NG ``twiss``, so they are fitted
 simultaneously and no starting point is taken from the measurement. The solver is
 Levenberg-Marquardt, configured by
-:class:`~aba_optimiser.training_closed_twiss.LevenbergMarquardtConfig`.
+:class:`~aba_optimiser.poco.LevenbergMarquardtConfig`.
 
 ``measurements`` maps each measurement's ``pt`` to a file or dataframe. Parameters are
 weighted by the inverse measurement variance; ``use_errors=False`` normalises every
@@ -140,8 +140,8 @@ observable family identically instead. ``prior_strengths`` adds a Gaussian prior
 Closed-orbit fits
 -----------------
 
-:class:`~aba_optimiser.training_closed_twiss.ClosedOrbitFitter` fits knobs to one or
-more :class:`~aba_optimiser.training_closed_twiss.ClosedOrbitSeries`.
+:class:`~aba_optimiser.poco.ClosedOrbitFitter` fits knobs to one or
+more :class:`~aba_optimiser.poco.ClosedOrbitSeries`.
 
 ``machine_state``
     MAD-X globals (quadrupole strengths, corrector kicks, tune knobs) at which a

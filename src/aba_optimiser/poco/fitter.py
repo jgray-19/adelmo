@@ -9,20 +9,20 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from aba_optimiser.config import OptimiserConfig, SimulationConfig
+from aba_optimiser.config import SimulationConfig
 from aba_optimiser.optimisers.levenberg_marquardt import LevenbergMarquardtConfig
-from aba_optimiser.training.base_fitter import BaseFitter
-from aba_optimiser.training.lifecycle import run_with_workers
-from aba_optimiser.training.reduction import reduce_replies
-from aba_optimiser.training.results import FitDiagnostics, FitResult
-from aba_optimiser.training.workers.payloads import global_weight_scale
-from aba_optimiser.training.workers.pool import WorkerPool
-from aba_optimiser.training_closed_twiss.lm_loop import LMPoint, run_levenberg_marquardt
-from aba_optimiser.training_closed_twiss.prior import (
+from aba_optimiser.poco.lm_loop import LMPoint, run_levenberg_marquardt
+from aba_optimiser.poco.prior import (
     apply_prior,
     prior_alphas,
     validate_prior_strengths,
 )
+from aba_optimiser.training.lifecycle import run_with_workers
+from aba_optimiser.training.machine_setup import MachineSetup
+from aba_optimiser.training.pool import WorkerPool
+from aba_optimiser.training.reduction import reduce_replies
+from aba_optimiser.training.results import FitDiagnostics, FitResult
+from aba_optimiser.training.tracking.workers.payloads import global_weight_scale
 from aba_optimiser.workers import ClosedTwissData, ClosedTwissWorker, Observable, WorkerConfig
 from aba_optimiser.workers.common import (
     ObservableKind,
@@ -102,10 +102,13 @@ DEFAULT_OBSERVABLES: tuple[str, ...] = (
 )
 
 
-class LMFitter(BaseFitter):
-    """Shared lifecycle and solve for full-ring Gauss-Newton fitters."""
+class LMFitter:
+    """Shared lifecycle and Levenberg-Marquardt solve of the full-ring closed-orbit/closed-twiss fitters.
 
-    _defer_managers = True
+    Subclasses set ``worker_class`` and build :attr:`worker_payloads`, one
+    ``(WorkerConfig, data)`` per worker, in their own ``__init__``.
+    """
+
     worker_class: type
     log_suffix: str
     fit_label: str
@@ -133,53 +136,49 @@ class LMFitter(BaseFitter):
         self.diagnostics: FitDiagnostics | None = None
         #: ``(knobs, loss)`` of every accepted iteration, in order
         self.history: list[tuple[dict[str, float], float]] = []
-        simulation_config = SimulationConfig(
-            num_workers=num_workers, num_batches=1, use_fixed_bpm=True
-        )
-        super().__init__(
-            accelerator=accelerator,
-            optimiser_config=_base_optimiser_config(self.lm_config),
-            simulation_config=simulation_config,
-            sequence_config=sequence_config,
+        self.machine = MachineSetup(
+            accelerator,
+            SimulationConfig(num_workers=num_workers, num_batches=1, use_fixed_bpm=True),
+            sequence_config,
             bpm_start_points=["$start"],
             bpm_end_points=["$end"],
+            output_config=output_config,
             initial_knob_strengths=initial_knob_strengths,
             true_strengths=true_strengths,
-            output_config=output_config,
         )
+        self.worker_payloads: list = []
 
         self.use_errors = use_errors
         self.prior_strengths = validate_prior_strengths(prior_strengths)
 
     def close(self) -> None:
         """Shut down the MAD process of the model; call once the fit (and any use of its model) is done."""
-        mad_iface = getattr(self.config_manager, "mad_iface", None)
-        if mad_iface is not None:
-            mad_iface.close()
+        self.machine.close()
 
     def run(self) -> FitResult:
         """Run the Levenberg-Marquardt fit on one worker per payload."""
-        writer = self.setup_logging(self.log_suffix)
+        writer = self.machine.make_writer(self.log_suffix)
         pool = WorkerPool()
-        knob_names = list(self.config_manager.knob_names)
+        knob_names = list(self.machine.knob_names)
+        initial_knobs = self.machine.initial_knobs
 
         def body() -> tuple[dict[str, float], np.ndarray | None]:
             for worker_id, (config, data) in enumerate(self.worker_payloads):
-                pool.spawn(self.worker_class, worker_id, data, config, self.simulation_config).send(
-                    Start(dict(self.initial_knobs))
-                )
+                pool.spawn(
+                    self.worker_class, worker_id, data, config, self.machine.simulation_config
+                ).send(Start(dict(initial_knobs)))
             return self._solve(pool.channels, writer)
 
         knobs, normal_matrix = run_with_workers(
             body,
-            fallback=lambda: (dict(self.initial_knobs), None),
+            fallback=lambda: (dict(initial_knobs), None),
             stop_workers=pool.stop,
             writer=writer,
         )
         logger.info("%s optimisation complete.", self.fit_label)
         return FitResult(
-            knobs=self.accelerator.format_result_knobs(knobs),
-            uncertainties=self.accelerator.format_result_knobs(
+            knobs=self.machine.accelerator.format_result_knobs(knobs),
+            uncertainties=self.machine.accelerator.format_result_knobs(
                 _hessian_uncertainties(normal_matrix, knob_names)
             ),
             diagnostics=self.diagnostics,
@@ -198,9 +197,11 @@ class LMFitter(BaseFitter):
         iterations and, unlike plain gradient descent, resolves the weakly
         conditioned directions made identifiable by the multi-delta measurements.
         """
-        knob_names = list(self.config_manager.knob_names)
+        knob_names = list(self.machine.knob_names)
         n_knobs = len(knob_names)
-        initial = np.array([float(self.initial_knobs[name]) for name in knob_names], dtype=float)
+        initial = np.array(
+            [float(self.machine.initial_knobs[name]) for name in knob_names], dtype=float
+        )
         # Error knobs are regularised toward the ideal zero-error lattice. The
         # optimisation start is independent and must not redefine that prior.
         prior_mean = np.zeros_like(initial)
@@ -298,32 +299,15 @@ class ClosedTwissFitter(LMFitter):
         self.worker_payloads = create_worker_payloads(
             self.measurements,
             observables,
-            self.config_manager.all_bpms,
+            self.machine.all_bpms,
             sequence_config.magnet_range,
             sequence_config.bad_bpms,
             accelerator,
             interface_options,
             self.use_errors,
-            self.mad_logfile,
-            self.python_logfile,
+            self.machine.output_config.mad_logfile,
+            self.machine.output_config.python_logfile,
         )
-
-
-def _base_optimiser_config(lm_config: LevenbergMarquardtConfig) -> OptimiserConfig:
-    """Build the minimal config required by BaseFitter setup.
-
-    The Gauss-Newton fitters defer the shared optimisation-loop manager and run
-    their own LM solve, so only the logging/configuration-manager path uses this.
-    """
-    return OptimiserConfig(
-        max_epochs=lm_config.max_iterations,
-        warmup_epochs=0,
-        warmup_lr_start=1.0,
-        max_lr=1.0,
-        min_lr=1.0,
-        gradient_converged_value=lm_config.gradient_converged_value,
-        optimiser_type="lbfgs",
-    )
 
 
 def _hessian_uncertainties(

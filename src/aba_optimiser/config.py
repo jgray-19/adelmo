@@ -32,8 +32,16 @@ class OptimiserConfig:
     gradient_converged_value: float
     optimiser_type: str = field(default="adam")  # Options: "adam", "lbfgs"
 
-    # Gradient smoothing for loss tracking
+    # Smoothing factor of the moving averages of the gradient norm and the
+    # relative loss change that the stopping rules use.
     grad_norm_alpha: float = field(default=0.2)
+    # Stop once the smoothed relative loss change falls below this, after at least
+    # loss_change_min_epoch_fraction * max_epochs epochs. 0 disables the rule.
+    loss_change_tolerance: float = field(default=1e-6)
+    loss_change_min_epoch_fraction: float = field(default=0.2)
+    # Below this relative loss improvement a new best is only taken if its knobs
+    # are no further from the true strengths than the current best's.
+    best_min_relative_improvement: float = field(default=1e-4)
 
     # L-BFGS-specific parameters (ignored for adam)
     lbfgs_history_size: int = field(default=10)

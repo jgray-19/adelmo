@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pandas as pd
 import pytest
 
@@ -10,11 +8,11 @@ from aba_optimiser.training.config.tracking import (
     TrackingPlan,
     _boundary_turns_for_track,
 )
-from aba_optimiser.training.data_manager import DataManager, _marker_order
-from aba_optimiser.training.workers.turn_planner import (
+from aba_optimiser.training.tracking.data_manager import DataManager, _marker_order
+from aba_optimiser.training.tracking.workers.turn_planner import (
     allocate_batches_per_file,
 )
-from aba_optimiser.training.workers.turn_planner import (
+from aba_optimiser.training.tracking.workers.turn_planner import (
     group_turns_by_file as _group_turns_by_file,
 )
 
@@ -48,10 +46,6 @@ def _single_bunch_by_file(*turn_lists: list[int]) -> dict[int, dict[int, list[in
     return {file_idx: {0: turns} for file_idx, turns in enumerate(turn_lists)}
 
 
-def _config_manager(start_bpms: list[str], end_bpms: list[str]) -> SimpleNamespace:
-    return SimpleNamespace(start_bpms=start_bpms, end_bpms=end_bpms)
-
-
 def _batch_turn_set(batches: list[list[int]]) -> set[int]:
     return {turn for batch in batches for turn in batch}
 
@@ -81,7 +75,7 @@ def test_prepare_turn_batches_distributes_all_training_turns_across_workers() ->
     data_manager.bunch_turns_by_file = _single_bunch_by_file(list(range(12)))
     data_manager.file_map = dict.fromkeys(range(12), 0)
 
-    data_manager.prepare_turn_batches(_config_manager(["BPM.1"], []))
+    data_manager.prepare_turn_batches(num_starts=1, num_ends=0)
 
     assert len(data_manager.turn_batches) == 6
     assert data_manager.validation_turn_batches == []
@@ -111,7 +105,7 @@ def test_prepare_turn_batches_keeps_batches_within_their_file() -> None:
     data_manager.bunch_turns_by_file = _single_bunch_by_file(file0_turns, file1_turns)
     data_manager.file_map = dict.fromkeys(file0_turns, 0) | dict.fromkeys(file1_turns, 1)
 
-    data_manager.prepare_turn_batches(_config_manager(["BPM.1"], []))
+    data_manager.prepare_turn_batches(num_starts=1, num_ends=0)
 
     # num_workers=8 / rspb=1 -> 8 turn batches split evenly across the two files.
     assert len(data_manager.turn_batches) == 8
@@ -143,7 +137,7 @@ def test_prepare_turn_batches_caps_batches_at_num_workers() -> None:
     data_manager.bunch_turns_by_file = _single_bunch_by_file(list(range(total_turns)))
     data_manager.file_map = dict.fromkeys(range(total_turns), 0)
 
-    data_manager.prepare_turn_batches(_config_manager(["BPM.1"], []))
+    data_manager.prepare_turn_batches(num_starts=1, num_ends=0)
 
     range_specs_per_batch, _ = _range_spec_plan(
         use_fixed_bpm=True, num_starts=1, num_ends=0
@@ -173,7 +167,7 @@ def test_prepare_turn_batches_num_batches_does_not_inflate_worker_groups() -> No
     data_manager.bunch_turns_by_file = _single_bunch_by_file(list(range(400)))
     data_manager.file_map = dict.fromkeys(range(400), 0)
 
-    data_manager.prepare_turn_batches(_config_manager(["BPM.1", "BPM.2"], []))
+    data_manager.prepare_turn_batches(num_starts=2, num_ends=0)
 
     range_specs_per_batch, _ = _range_spec_plan(
         use_fixed_bpm=True, num_starts=2, num_ends=0
@@ -205,7 +199,7 @@ def test_prepare_turn_batches_holds_out_disjoint_validation_turns() -> None:
     data_manager.bunch_turns_by_file = _single_bunch_by_file(turns)
     data_manager.file_map = dict.fromkeys(turns, 0)
 
-    data_manager.prepare_turn_batches(_config_manager(["BPM.1"], []))
+    data_manager.prepare_turn_batches(num_starts=1, num_ends=0)
 
     training_turns = _batch_turn_set(data_manager.turn_batches)
     validation_turns = _batch_turn_set(data_manager.validation_turn_batches)
@@ -242,7 +236,7 @@ def test_prepare_turn_batches_data_fraction_samples_training_turns() -> None:
     data_manager.bunch_turns_by_file = _single_bunch_by_file(turns)
     data_manager.file_map = dict.fromkeys(turns, 0)
 
-    data_manager.prepare_turn_batches(_config_manager(["BPM.1"], []))
+    data_manager.prepare_turn_batches(num_starts=1, num_ends=0)
 
     # Half of the 20 available turns are kept; num_batches=1 means no trimming.
     assert data_manager.get_total_turns() == 10
@@ -277,7 +271,7 @@ def test_prepare_turn_batches_holds_out_disjoint_validation_across_files() -> No
     data_manager.bunch_turns_by_file = _single_bunch_by_file(file0_turns, file1_turns)
     data_manager.file_map = dict.fromkeys(file0_turns, 0) | dict.fromkeys(file1_turns, 1)
 
-    data_manager.prepare_turn_batches(_config_manager(["BPM.1"], []))
+    data_manager.prepare_turn_batches(num_starts=1, num_ends=0)
 
     training_turns = _batch_turn_set(data_manager.turn_batches)
     validation_turns = _batch_turn_set(data_manager.validation_turn_batches)
@@ -321,7 +315,7 @@ def test_prepare_turn_batches_keeps_all_turns_when_too_little_to_hold_out() -> N
     data_manager.bunch_turns_by_file = _single_bunch_by_file(turns)
     data_manager.file_map = dict.fromkeys(turns, 0)
 
-    data_manager.prepare_turn_batches(_config_manager(["BPM.1"], []))
+    data_manager.prepare_turn_batches(num_starts=1, num_ends=0)
 
     assert data_manager.available_turns == [1]  # only the interior turn survives
     assert data_manager.validation_turn_batches == []

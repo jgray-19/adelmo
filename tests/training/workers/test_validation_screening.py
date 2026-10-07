@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from aba_optimiser.training.workers.screening import OutlierScreener
-from aba_optimiser.training.workers.setup import WorkerRuntimeMetadata
+from aba_optimiser.training.tracking.workers.screening import OutlierScreener
+from aba_optimiser.training.tracking.workers.setup import WorkerRuntimeMetadata
 from aba_optimiser.workers.common import KickPlane
 
 

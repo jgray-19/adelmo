@@ -1,11 +1,11 @@
 """Pre-optimisation outlier screening for tracking workers.
 
 :class:`OutlierScreener` is the cohesive algorithm that the
-:class:`~aba_optimiser.training.workers.manager.WorkerManager` runs once before
+:class:`~aba_optimiser.training.tracking.session.TrackingSession` runs once before
 optimisation begins: it asks each worker for per-BPM diagnostics, flags BPMs and
 whole workers whose loss is an outlier (positive-side z-score above a sigma
 threshold), and pushes the resulting keep-masks back to the workers. It operates
-purely on the :class:`~aba_optimiser.training.workers.pool.WorkerPool` passed in, so it holds
+purely on the :class:`~aba_optimiser.training.pool.WorkerPool` passed in, so it holds
 no worker-process state of its own.
 """
 
@@ -20,9 +20,9 @@ import numpy as np
 from aba_optimiser.workers.protocol import Ack, Command, CommandKind, LossReply
 
 if TYPE_CHECKING:
-    from aba_optimiser.training.workers.payloads import WorkerPayloadBuilder
-    from aba_optimiser.training.workers.pool import WorkerPool
-    from aba_optimiser.training.workers.setup import WorkerRuntimeMetadata
+    from aba_optimiser.training.pool import WorkerPool
+    from aba_optimiser.training.tracking.workers.payloads import WorkerPayloadBuilder
+    from aba_optimiser.training.tracking.workers.setup import WorkerRuntimeMetadata
     from aba_optimiser.workers.protocol import WorkerChannels
 
 LOGGER = logging.getLogger(__name__)

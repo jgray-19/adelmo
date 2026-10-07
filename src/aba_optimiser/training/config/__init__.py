@@ -1,7 +1,6 @@
 """Configuration models and planning helpers for training fitters."""
 
 from aba_optimiser.training.config.helpers import create_arc_measurement_config
-from aba_optimiser.training.config.manager import ConfigurationManager
 from aba_optimiser.training.config.models import (
     CheckpointConfig,
     KickerConfig,
@@ -27,7 +26,6 @@ __all__ = [
     "ACDArcByArcTrackingPlan",
     "ACDTrackingPlan",
     "CheckpointConfig",
-    "ConfigurationManager",
     "KickerConfig",
     "KickerTrackingPlan",
     "MeasurementConfig",

@@ -11,11 +11,11 @@ import pytest
 from aba_optimiser.accelerators import PSB
 from aba_optimiser.config import SimulationConfig
 from aba_optimiser.mad import GradientDescentMadInterface
-from aba_optimiser.training_closed_twiss import (
+from aba_optimiser.poco import (
     ClosedOrbitMeasurement,
     ClosedOrbitSeries,
 )
-from aba_optimiser.training_closed_twiss.fitter import (
+from aba_optimiser.poco.fitter import (
     apply_prior,
     prior_alphas,
     validate_prior_strengths,

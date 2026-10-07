@@ -57,11 +57,11 @@ from typing import TYPE_CHECKING, Any
 
 from aba_optimiser.mad import GradientDescentMadInterface
 from aba_optimiser.mad.machine_state import resolve_machine_state
-from aba_optimiser.training.config.models import SequenceConfig
-from aba_optimiser.training_closed_twiss import (
+from aba_optimiser.poco import (
     ClosedTwissFitter,
     LevenbergMarquardtConfig,
 )
+from aba_optimiser.training.config.models import SequenceConfig
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -266,9 +266,9 @@ def fit_momentum_reference(
         result = fitter.run()
         magnet_strengths, uncertainties = result.knobs, result.uncertainties
     finally:
-        # The workers are stopped by ``run``; this is the independent setup MAD
-        # interface owned by the configuration manager.
-        fitter.config_manager.mad_iface.close()
+        # The workers are stopped by ``run``; this closes the fitter's own MAD
+        # model (its ``MachineSetup``).
+        fitter.close()
 
     LOGGER.info(
         "Fitted %d knobs against %s at momenta %s (prior %g)",

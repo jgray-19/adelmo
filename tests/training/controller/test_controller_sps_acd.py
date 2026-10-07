@@ -41,7 +41,7 @@ def data(study, tmp_path_factory):
 def test_true_quadrupole_errors_minimise_the_acd_loss(study, data, case, tmp_path) -> None:
     """Both excitation schemes must single out the true errors through single-plane BPMs."""
     fitter = study.build_fitter(data, case, tmp_path, max_epochs=1)
-    initial = fitter.initial_knobs
+    initial = fitter.machine.initial_knobs
     true = {name: data.magnet_strengths[name] for name in initial}
 
     initial_loss, true_loss = evaluate_controller_worker_losses(fitter, [initial, true])

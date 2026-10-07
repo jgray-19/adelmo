@@ -9,11 +9,13 @@ import numpy as np
 from aba_optimiser.accelerators import PSB
 from aba_optimiser.config import SimulationConfig
 from aba_optimiser.training.config.tracking import TrackingPlan
-from aba_optimiser.training.data_manager import FileTracks
-from aba_optimiser.training.workers.manager import WorkerManager
-from aba_optimiser.training.workers.pool import WorkerPool
-from aba_optimiser.training.workers.screening import OutlierScreener
-from aba_optimiser.training.workers.setup import WorkerRuntimeMetadata, WorkerSetupHelper
+from aba_optimiser.training.pool import WorkerPool
+from aba_optimiser.training.tracking.data_manager import FileTracks
+from aba_optimiser.training.tracking.session import TrackingSession
+from aba_optimiser.training.tracking.workers.payloads import WorkerPayloadBuilder
+from aba_optimiser.training.tracking.workers.screening import OutlierScreener
+from aba_optimiser.training.tracking.workers.setup import WorkerRuntimeMetadata, WorkerSetupHelper
+from aba_optimiser.training.tracking.workers.uncertainty_drain import drain_uncertainty
 from aba_optimiser.workers import TrackingData, WorkerConfig
 from aba_optimiser.workers.common import KickPlane, PrecomputedTrackingWeights, UncertaintyPart
 from aba_optimiser.workers.protocol import STOP, Ack, CommandKind, LossReply
@@ -104,31 +106,33 @@ def _make_psb(tmp_path: Path) -> PSB:
     return PSB(ring=3, sequence_file=seq_file)
 
 
-def _make_manager(
+def _make_setup_helper(
     tmp_path: Path,
     *,
     all_bpms: list[str] | None = None,
     interface_options_per_file: list[dict] | None = None,
-) -> WorkerManager:
+) -> WorkerSetupHelper:
     bpms = all_bpms or BPMS
-    return WorkerManager(
-        WorkerSetupHelper(
-            accelerator=_make_psb(tmp_path),
-            all_bpms=bpms,
-            fixed_start=bpms[0],
-            fixed_end=bpms[-1],
-            use_fixed_bpm=True,
-            bad_bpms=None,
-            file_kick_planes=dict.fromkeys(range(4), "xy"),
-            magnet_range="$start/$end",
-            interface_options_per_file=interface_options_per_file
-            or [{"machine_state": tmp_path / "correctors_state.txt"}],
-            debug=False,
-            mad_logfile=None,
-            python_logfile=None,
-            tracking_plan=TrackingPlan(),
-        )
+    return WorkerSetupHelper(
+        accelerator=_make_psb(tmp_path),
+        all_bpms=bpms,
+        fixed_start=bpms[0],
+        fixed_end=bpms[-1],
+        use_fixed_bpm=True,
+        bad_bpms=None,
+        file_kick_planes=dict.fromkeys(range(4), "xy"),
+        magnet_range="$start/$end",
+        interface_options_per_file=interface_options_per_file
+        or [{"machine_state": tmp_path / "correctors_state.txt"}],
+        debug=False,
+        mad_logfile=None,
+        python_logfile=None,
+        tracking_plan=TrackingPlan(),
     )
+
+
+def _screener(tmp_path: Path) -> OutlierScreener:
+    return OutlierScreener(WorkerPayloadBuilder(_make_psb(tmp_path)))
 
 
 def _make_tracks(all_bpms: list[str], turns: list[int]) -> FileTracks:
@@ -150,25 +154,26 @@ def _make_tracks(all_bpms: list[str], turns: list[int]) -> FileTracks:
     )
 
 
-def test_create_worker_payloads_assigns_per_file_artifacts_from_file_turn_map(tmp_path: Path) -> None:
-    manager = _make_manager(
-        tmp_path,
-        all_bpms=BPMS[:3],
-        interface_options_per_file=[
-            {"machine_state": tmp_path / "corr0_state.txt"},
-            {"machine_state": tmp_path / "corr1_state.txt"},
-        ],
+def test_session_payloads_take_per_file_artifacts_from_the_file_turn_map(tmp_path: Path) -> None:
+    session = TrackingSession(
+        _make_setup_helper(
+            tmp_path,
+            all_bpms=BPMS[:3],
+            interface_options_per_file=[
+                {"machine_state": tmp_path / "corr0_state.txt"},
+                {"machine_state": tmp_path / "corr1_state.txt"},
+            ],
+        ),
+        SimulationConfig(num_workers=2, num_batches=1, optimise_momenta=False),
+        turn_batches=[[2], [202]],
+        validation_turn_batches=[],
+        file_turn_map={2: 0, 202: 1},
+        start_bpms=[BPMS[0]],
+        end_bpms=[BPMS[1]],
+        machine_deltaps=[0.0, 1e-3],
     )
 
-    manager.file_turn_map = {2: 0, 202: 1}
-    manager.start_bpms = [BPMS[0]]
-    manager.end_bpms = [BPMS[1]]
-    manager.simulation_config = SimulationConfig(
-        num_workers=2, num_batches=1, optimise_momenta=False
-    )
-    manager.machine_deltaps = [0.0, 1e-3]
-
-    payloads = manager.create_worker_payloads(
+    payloads = session.create_worker_payloads(
         tracks={
             0: _make_tracks(BPMS[:3], [1, 2, 3]),
             1: _make_tracks(BPMS[:3], [201, 202, 203]),
@@ -191,8 +196,7 @@ def test_create_worker_payloads_assigns_per_file_artifacts_from_file_turn_map(tm
 
 
 def test_build_bpm_masks_from_diagnostics_aggregates_multi_turn_losses(tmp_path: Path) -> None:
-    manager = _make_manager(tmp_path)
-    manager.training.metadata = [
+    metadata = [
         WorkerRuntimeMetadata(
             worker_id=0,
             file_idx=0,
@@ -205,9 +209,9 @@ def test_build_bpm_masks_from_diagnostics_aggregates_multi_turn_losses(tmp_path:
         )
     ]
 
-    masks = OutlierScreener(manager.payload_builder).build_bpm_masks_from_diagnostics(
+    masks = _screener(tmp_path).build_bpm_masks_from_diagnostics(
         diagnostics=[LossReply(0, 102.0, np.array([1.0, 50.0, 1.0, 50.0]))],
-        worker_metadata=manager.training.metadata,
+        worker_metadata=metadata,
         bpm_sigma_threshold=0.5,
     )
 
@@ -216,11 +220,11 @@ def test_build_bpm_masks_from_diagnostics_aggregates_multi_turn_losses(tmp_path:
 
 
 def test_apply_screening_actions_expands_masks_across_turns(tmp_path: Path) -> None:
-    manager = _make_manager(tmp_path)
+    pool = WorkerPool()
     received: list[list[object]] = [[], []]
-    manager.training.conns = [_start_recording_worker(sink) for sink in received]
-    manager.training.workers = [_FakeWorker(), _FakeWorker()]  # type: ignore[list-item]
-    manager.training.metadata = [
+    pool.conns = [_start_recording_worker(sink) for sink in received]
+    pool.workers = [_FakeWorker(), _FakeWorker()]  # type: ignore[list-item]
+    pool.metadata = [
         WorkerRuntimeMetadata(
             worker_id=0,
             file_idx=0,
@@ -243,8 +247,8 @@ def test_apply_screening_actions_expands_masks_across_turns(tmp_path: Path) -> N
         ),
     ]
 
-    OutlierScreener(manager.payload_builder).apply_screening_actions(
-        manager.training,
+    _screener(tmp_path).apply_screening_actions(
+        pool,
         bpm_masks=[np.array([True, False]), np.array([False, True])],
         worker_disabled=[False, True],
     )
@@ -258,8 +262,7 @@ def test_apply_screening_actions_expands_masks_across_turns(tmp_path: Path) -> N
         assert command.payload["disable_worker"] is disabled
 
 def test_summarise_screening_losses_logs_pre_and_projected_loss(tmp_path: Path, caplog) -> None:
-    manager = _make_manager(tmp_path)
-    manager.training.metadata = [
+    metadata = [
         WorkerRuntimeMetadata(
             worker_id=0,
             file_idx=0,
@@ -273,11 +276,11 @@ def test_summarise_screening_losses_logs_pre_and_projected_loss(tmp_path: Path, 
     ]
 
     with caplog.at_level("INFO"):
-        OutlierScreener(manager.payload_builder).summarise_screening_losses(
+        _screener(tmp_path).summarise_screening_losses(
             diagnostics=[LossReply(0, 20.0, np.array([1.0, 9.0, 1.0, 9.0]))],
             bpm_masks=[np.array([True, False])],
             worker_disabled=[False],
-            worker_metadata=manager.training.metadata,
+            worker_metadata=metadata,
         )
 
     assert "Pre-screening loss summary" in caplog.text
@@ -335,17 +338,15 @@ def test_validation_worker_keeps_all_held_out_turns_with_nondividing_batch_count
     assert [len(batch) for batch in worker.init_coords] == [2, 2, 2, 2, 2]
 
 
-def _uncertainty_manager(
-    tmp_path: Path, file_indices: list[int], responses: list[list[object]]
-) -> WorkerManager:
-    """A manager whose training workers are pipe threads, one per entry of ``file_indices``."""
-    manager = _make_manager(tmp_path)
+def _uncertainty_pool(file_indices: list[int], responses: list[list[object]]) -> WorkerPool:
+    """A pool whose workers are pipe threads, one per entry of ``file_indices``."""
+    pool = WorkerPool()
     for worker_responses in responses:
         parent, child = multiprocessing.Pipe()
         _start_pipe_worker(child, worker_responses)
-        manager.training.conns.append(parent)
-    manager.training.workers = [_FakeWorker() for _ in file_indices]  # type: ignore[misc]
-    manager.training.metadata = [
+        pool.conns.append(parent)
+    pool.workers = [_FakeWorker() for _ in file_indices]  # type: ignore[misc]
+    pool.metadata = [
         WorkerRuntimeMetadata(
             worker_id=idx,
             file_idx=file_idx,
@@ -358,11 +359,11 @@ def _uncertainty_manager(
         )
         for idx, file_idx in enumerate(file_indices)
     ]
-    manager.training.particle_counts = [1 for _ in file_indices]
-    return manager
+    pool.particle_counts = [1 for _ in file_indices]
+    return pool
 
 
-def test_stop_and_collect_uncertainty_merges_shared_readings_per_file(tmp_path: Path) -> None:
+def test_drain_uncertainty_merges_shared_readings_per_file() -> None:
     # Workers 0 and 2 share reading 7 of file 0; worker 1 (file 1) is drained between them.
     g_a, g_b, g_c = np.array([1.0, 2.0]), np.array([3.0, -1.0]), np.array([0.5, 0.5])
     parts = [
@@ -370,24 +371,33 @@ def test_stop_and_collect_uncertainty_merges_shared_readings_per_file(tmp_path: 
         UncertaintyPart(2.0 * np.eye(2), np.array([8]), g_c[None, :], np.array([0.2])),
         UncertaintyPart(3.0 * np.eye(2), np.array([7]), g_b[None, :], np.array([0.1])),
     ]
-    manager = _uncertainty_manager(tmp_path, [0, 1, 0], [[part] for part in parts])
+    pool = _uncertainty_pool([0, 1, 0], [[part] for part in parts])
 
-    normal, noise = manager.stop_and_collect_uncertainty(2)
+    normal, noise = drain_uncertainty(pool, 2, propagate_uncertainty=True)
 
     shared = g_a + g_b
     np.testing.assert_allclose(normal, 6.0 * np.eye(2))
     np.testing.assert_allclose(noise, 0.1 * np.outer(shared, shared) + 0.2 * np.outer(g_c, g_c))
-    assert [worker.join_calls for worker in manager.training.workers] == [1, 1, 1]
+    assert [worker.join_calls for worker in pool.workers] == [1, 1, 1]
 
 
-def test_terminate_workers_kills_training_and_validation_workers(tmp_path: Path) -> None:
-    manager = _make_manager(tmp_path)
+def test_terminate_kills_training_and_validation_workers(tmp_path: Path) -> None:
+    session = TrackingSession(
+        _make_setup_helper(tmp_path),
+        SimulationConfig(num_workers=1, num_batches=1),
+        turn_batches=[],
+        validation_turn_batches=[],
+        file_turn_map={},
+        start_bpms=[],
+        end_bpms=[],
+        machine_deltaps=[],
+    )
     training = [_FakeWorker(), _FakeWorker()]
     validation = [_FakeWorker()]
-    manager.training = WorkerPool(workers=training)  # type: ignore[arg-type]
-    manager.validation = WorkerPool(workers=validation)  # type: ignore[arg-type]
+    session.training = WorkerPool(workers=training)  # type: ignore[arg-type]
+    session.validation = WorkerPool(workers=validation)  # type: ignore[arg-type]
 
-    manager.terminate_workers()
+    session.terminate()
 
     for worker in (*training, *validation):
         assert worker.terminate_calls == 1
@@ -405,13 +415,11 @@ def test_pool_stop_does_not_wait_for_final_payload() -> None:
     assert worker.join_calls == 1
 
 
-def test_stop_and_collect_uncertainty_disables_hessian_before_shutdown(tmp_path: Path) -> None:
+def test_drain_uncertainty_disables_the_hessian_before_shutdown() -> None:
     # Two messages: ack for set_uncertainty_mode, then the empty part on termination
-    manager = _uncertainty_manager(
-        tmp_path, [0], [[Ack(0), UncertaintyPart.empty(2)]]
-    )
+    pool = _uncertainty_pool([0], [[Ack(0), UncertaintyPart.empty(2)]])
 
-    total, _ = manager.stop_and_collect_uncertainty(2, propagate_uncertainty=False)
+    total, _ = drain_uncertainty(pool, 2, propagate_uncertainty=False)
 
     np.testing.assert_allclose(total, np.zeros((2, 2), dtype=np.float64))
-    assert manager.training.workers[0].join_calls == 1
+    assert pool.workers[0].join_calls == 1

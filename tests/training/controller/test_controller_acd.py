@@ -17,7 +17,7 @@ from aba_optimiser.training.config.models import (
     OutputConfig,
     SequenceConfig,
 )
-from aba_optimiser.training.tracking_fitter import ACDMarkerFitter
+from aba_optimiser.training.tracking.fitter import ACDMarkerFitter, FitterOptions
 from tests.training.controller_test_utils import (
     _load_mad_twiss_for_tracking,
     _make_simulation_config_quad,
@@ -236,11 +236,13 @@ def _build_acd_controller(
         create_arc_measurement_config(
             off_magnet_path, machine_state=merge_machine_states(corrector_file, tune_knobs)
         ),
-        output_config=OutputConfig(
-            mad_logfile=tmp_path / "mad_logfile_acd.log",
-            write_tensorboard_logs=False,
+        options=FitterOptions(
+            output_config=OutputConfig(
+                mad_logfile=tmp_path / "mad_logfile_acd.log",
+                write_tensorboard_logs=False,
+            ),
+            true_strengths=magnet_strengths.copy(),
         ),
-        true_strengths=magnet_strengths.copy(),
     )
     return ctrl, magnet_strengths.copy()
 
@@ -263,7 +265,7 @@ def test_controller_quad_opt_with_acd(
         tmp_path / "mad_logfile_acd.log",
     )
 
-    initial_loss = evaluate_controller_worker_loss(ctrl, ctrl.initial_knobs)
+    initial_loss = evaluate_controller_worker_loss(ctrl, ctrl.machine.initial_knobs)
 
     if loss_regression:
         true_loss = evaluate_controller_worker_loss(ctrl, magnet_strengths)
@@ -278,7 +280,7 @@ def test_controller_quad_opt_with_acd(
         return
 
     initial_sum_true_diff = sum(
-        abs(ctrl.initial_knobs[magnet] - magnet_strengths[magnet])
+        abs(ctrl.machine.initial_knobs[magnet] - magnet_strengths[magnet])
         for magnet in magnet_strengths
     )
     estimate = ctrl.run().knobs

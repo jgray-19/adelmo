@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 from aba_optimiser.config import FILE_COLUMNS
-from aba_optimiser.training.workers.turn_planner import (
+from aba_optimiser.training.tracking.workers.turn_planner import (
     WorkerTurnPlanner,
     group_turns_by_file,
 )
@@ -30,7 +30,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from aba_optimiser.config import SimulationConfig
-    from aba_optimiser.training.config.manager import ConfigurationManager
     from aba_optimiser.training.config.tracking import TrackingPlan
 
     ShuffleTurns = Callable[[list[int]], None]
@@ -374,8 +373,8 @@ class DataManager:
 
     # ---------- Turn batching ----------
 
-    def prepare_turn_batches(self, config_manager: ConfigurationManager) -> None:
-        """Build the list of turns to be processed and validate availability."""
+    def prepare_turn_batches(self, num_starts: int, num_ends: int) -> None:
+        """Split the turns into training and validation batches for ``num_starts`` x ``num_ends`` ranges."""
         LOGGER.info("Preparing turn batches for worker distribution")
 
         self.boundary_turns_by_file, self.available_turns = (
@@ -409,8 +408,8 @@ class DataManager:
             available_turns=train_turns,
             file_map=self.file_map,
             num_files=len(self.tracks),
-            num_starts=len(config_manager.start_bpms),
-            num_ends=len(config_manager.end_bpms),
+            num_starts=num_starts,
+            num_ends=num_ends,
         )
         self.turn_batches = batch_plan.turn_batches
 

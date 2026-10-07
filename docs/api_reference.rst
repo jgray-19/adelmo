@@ -58,10 +58,10 @@ Closed-Orbit Fitting
 .. autosummary::
    :toctree: _autosummary
 
-   aba_optimiser.training_closed_twiss
-   aba_optimiser.training_closed_twiss.closed_orbit
-   aba_optimiser.training_closed_twiss.calibrated
-   aba_optimiser.training_closed_twiss.fitter
+   aba_optimiser.poco
+   aba_optimiser.poco.closed_orbit
+   aba_optimiser.poco.calibrated
+   aba_optimiser.poco.fitter
    aba_optimiser.workers.closed_orbit
    aba_optimiser.workers.closed_twiss
    aba_optimiser.workers.calibrated_closed_orbit
@@ -75,21 +75,21 @@ Optimisation Runtime
 
    aba_optimiser.training
    aba_optimiser.training.base_fitter
-   aba_optimiser.training.tracking_fitter
+   aba_optimiser.training.tracking.fitter
    aba_optimiser.training.config
    aba_optimiser.training.config.helpers
    aba_optimiser.training.config.manager
    aba_optimiser.training.config.models
    aba_optimiser.training.config.tracking
-   aba_optimiser.training.data_manager
+   aba_optimiser.training.tracking.data_manager
    aba_optimiser.training.optimisation
-   aba_optimiser.training.optimisation.loop
-   aba_optimiser.training.optimisation.scheduler
+   aba_optimiser.training.sgd.loop
+   aba_optimiser.training.sgd.scheduler
    aba_optimiser.training.workers
    aba_optimiser.training.workers.manager
-   aba_optimiser.training.workers.payloads
-   aba_optimiser.training.workers.setup
-   aba_optimiser.training.workers.pool
+   aba_optimiser.training.tracking.workers.payloads
+   aba_optimiser.training.tracking.workers.setup
+   aba_optimiser.training.pool
 
 
 Workers

@@ -8,8 +8,9 @@ import pytest
 
 from aba_optimiser.mad import merge_machine_states
 from aba_optimiser.training.config.models import OutputConfig
-from aba_optimiser.training.tracking_fitter import (
+from aba_optimiser.training.tracking.fitter import (
     ArcByArcFitter,
+    FitterOptions,
     TrackingFitter,
 )
 from aba_optimiser.workers.common import (
@@ -101,13 +102,13 @@ def _collect_epoch_gradient(ctrl: TrackingFitter, knob_updates: dict[str, float]
     Workers divide their gradient by their own point count, which differs between
     ranges; multiplying it back makes the sum comparable with the Hessian parts.
     """
-    gradient = np.zeros(len(ctrl.config_manager.knob_names), dtype=np.float64)
+    gradient = np.zeros(len(ctrl.machine.knob_names), dtype=np.float64)
     points = {
         meta.worker_id: len(meta.bpm_names) * meta.n_run_turns
-        for meta in ctrl.worker_manager.training.metadata
+        for meta in ctrl.session.training.metadata
     }
-    channels = ctrl.worker_manager.training.channels
-    for batch in range(ctrl.simulation_config.num_batches):
+    channels = ctrl.session.training.channels
+    for batch in range(ctrl.machine.simulation_config.num_batches):
         channels.send_all(Evaluate(knob_updates, batch))
         for result in channels.recv_all():
             gradient += points[result.worker_id] * np.asarray(result.grad, dtype=np.float64).reshape(-1)
@@ -118,17 +119,15 @@ def _compute_training_weight_normaliser(ctrl: TrackingFitter) -> float:
     """Rebuild the worker payload weights and return the global gradient normaliser.
 
     Production normalises weights over the training *and* validation payloads at once
-    (see ``WorkerManager._build_payloads``), so the normaliser is computed over the
+    (see ``TrackingSession.build_payloads``), so the normaliser is computed over the
     same combined set here.
     """
-    training, validation = ctrl.worker_manager._build_payloads(
-        ctrl.data_manager.tracks, with_validation=True
-    )
+    training, validation = ctrl.session.build_payloads(ctrl.data_manager.tracks)
     payloads = training + validation
     if not payloads:
         raise AssertionError("Expected at least one worker payload")
 
-    optimise_momenta = ctrl.simulation_config.optimise_momenta
+    optimise_momenta = ctrl.machine.simulation_config.optimise_momenta
     global_max = 0.0
     for data, config, _file_idx in payloads:
         planes = {"x": ("x"), "y": ("y")}.get(config.kick_plane, ("x", "y"))
@@ -199,30 +198,22 @@ def test_controller_worker_hessian_matches_finite_difference_on_reduced_knob_sub
         ),
         bpm_start_points,
         bpm_end_points,
-        output_config=OutputConfig(
-            mad_logfile=tmp_path / "controller_hessian.log",
-            write_tensorboard_logs=False,
+        options=FitterOptions(
+            output_config=OutputConfig(
+                mad_logfile=tmp_path / "controller_hessian.log",
+                write_tensorboard_logs=False,
+            ),
+            true_strengths=magnet_strengths.copy(),
         ),
-        true_strengths=magnet_strengths.copy(),
     )
 
     terminated = False
     try:
-        ctrl.worker_manager.start_workers(
-            ctrl.data_manager.tracks,
-            ctrl.data_manager.turn_batches,
-            ctrl.data_manager.validation_turn_batches,
-            ctrl.data_manager.file_map,
-            ctrl.config_manager.start_bpms,
-            ctrl.config_manager.end_bpms,
-            ctrl.simulation_config,
-            ctrl.machine_deltaps,
-            ctrl.initial_knobs,
-        )
+        ctrl.start_session(ctrl.machine.initial_knobs)
         weight_normaliser = _compute_training_weight_normaliser(ctrl)
-        base_knobs = ctrl.filtered_true_strengths.copy()
+        base_knobs = ctrl.machine.true_strengths.copy()
         base_vec = np.array(
-            [base_knobs[name] for name in ctrl.config_manager.knob_names],
+            [base_knobs[name] for name in ctrl.machine.knob_names],
             dtype=np.float64,
         )
         n_knobs = len(base_vec)
@@ -231,7 +222,7 @@ def test_controller_worker_hessian_matches_finite_difference_on_reduced_knob_sub
 
         fd_matrix = np.zeros((subset.size, subset.size), dtype=np.float64)
         for col, knob_idx in enumerate(subset):
-            knob_name = ctrl.config_manager.knob_names[knob_idx]
+            knob_name = ctrl.machine.knob_names[knob_idx]
             step = max(1e-6, 1e-2 * max(abs(base_vec[knob_idx]), 1e-4))
 
             plus_knobs = base_knobs.copy()
@@ -243,13 +234,13 @@ def test_controller_worker_hessian_matches_finite_difference_on_reduced_knob_sub
             grad_minus = _collect_epoch_gradient(ctrl, minus_knobs)
             fd_matrix[:, col] = (grad_plus[subset] - grad_minus[subset]) / (2.0 * step)
 
-        total_hessian, _ = ctrl.worker_manager.stop_and_collect_uncertainty(
+        total_hessian, _ = ctrl.session.stop_and_collect_uncertainty(
             n_knobs, propagate_uncertainty=True
         )
         terminated = True
     finally:
         if not terminated:
-            ctrl.worker_manager.terminate_workers()
+            ctrl.session.terminate()
 
     assert total_hessian.shape == (n_knobs, n_knobs)
     assert np.all(np.isfinite(total_hessian))
@@ -331,30 +322,22 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
         ),
         bpm_start_points,
         bpm_end_points,
-        output_config=OutputConfig(
-            mad_logfile=tmp_path / "controller_psb_hessian.log",
-            write_tensorboard_logs=False,
+        options=FitterOptions(
+            output_config=OutputConfig(
+                mad_logfile=tmp_path / "controller_psb_hessian.log",
+                write_tensorboard_logs=False,
+            ),
+            true_strengths=magnet_strengths.copy(),
         ),
-        true_strengths=magnet_strengths.copy(),
     )
     weight_normaliser = _compute_training_weight_normaliser(ctrl)
 
     terminated = False
     try:
-        ctrl.worker_manager.start_workers(
-            ctrl.data_manager.tracks,
-            ctrl.data_manager.turn_batches,
-            ctrl.data_manager.validation_turn_batches,
-            ctrl.data_manager.file_map,
-            ctrl.config_manager.start_bpms,
-            ctrl.config_manager.end_bpms,
-            ctrl.simulation_config,
-            ctrl.machine_deltaps,
-            ctrl.initial_knobs,
-        )
-        base_knobs = ctrl.filtered_true_strengths.copy()
+        ctrl.start_session(ctrl.machine.initial_knobs)
+        base_knobs = ctrl.machine.true_strengths.copy()
         base_vec = np.array(
-            [base_knobs[name] for name in ctrl.config_manager.knob_names],
+            [base_knobs[name] for name in ctrl.machine.knob_names],
             dtype=np.float64,
         )
         n_knobs = len(base_vec)
@@ -363,7 +346,7 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
 
         fd_matrix = np.zeros((subset.size, subset.size), dtype=np.float64)
         for col, knob_idx in enumerate(subset):
-            knob_name = ctrl.config_manager.knob_names[knob_idx]
+            knob_name = ctrl.machine.knob_names[knob_idx]
             step = max(1e-6, 1e-2 * max(abs(base_vec[knob_idx]), 1e-4))
 
             plus_knobs = base_knobs.copy()
@@ -375,13 +358,13 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
             grad_minus = _collect_epoch_gradient(ctrl, minus_knobs)
             fd_matrix[:, col] = (grad_plus[subset] - grad_minus[subset]) / (2.0 * step)
 
-        total_hessian, _ = ctrl.worker_manager.stop_and_collect_uncertainty(
+        total_hessian, _ = ctrl.session.stop_and_collect_uncertainty(
             n_knobs, propagate_uncertainty=True
         )
         terminated = True
     finally:
         if not terminated:
-            ctrl.worker_manager.terminate_workers()
+            ctrl.session.terminate()
 
     assert total_hessian.shape == (n_knobs, n_knobs)
     assert np.all(np.isfinite(total_hessian))
@@ -393,7 +376,7 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
     # the first BPM, QDE16 and QFO162 after the last) are never observed.
     row_norms = np.linalg.norm(sym_hessian, axis=1)
     zero_row_knobs = {
-        ctrl.config_manager.knob_names[idx] for idx in np.where(row_norms == 0.0)[0]
+        ctrl.machine.knob_names[idx] for idx in np.where(row_norms == 0.0)[0]
     }
     assert zero_row_knobs == {
         "BR.QFO11.dk1l",

@@ -1,7 +1,7 @@
 """Checkpoint persistence and knob-remapping for the optimisation loop.
 
 The :class:`OptimisationCheckpointer` owns everything related to saving and
-restoring an :class:`~aba_optimiser.training.optimisation.loop.OptimisationLoop`:
+restoring an :class:`~aba_optimiser.training.sgd.loop.SGDLoop`:
 serialising loop/optimiser state to JSON, deciding when a checkpoint is due, and
 remapping a saved optimiser state onto the loop's current knob layout when the
 two differ. It reads and writes the loop's state directly through a back
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from aba_optimiser.training.config.models import CheckpointConfig
-    from aba_optimiser.training.optimisation.loop import OptimisationLoop
+    from aba_optimiser.training.sgd.loop import SGDLoop
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class OptimisationCheckpointer:
 
     def __init__(
         self,
-        loop: OptimisationLoop,
+        loop: SGDLoop,
         checkpoint_config: CheckpointConfig | None = None,
     ) -> None:
         self._loop = loop

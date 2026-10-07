@@ -4,6 +4,7 @@ Quadrupole-focused integration tests for controller logic.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import TYPE_CHECKING
 
@@ -17,7 +18,7 @@ from aba_optimiser.training.config.models import (
     OutputConfig,
     SequenceConfig,
 )
-from aba_optimiser.training.tracking_fitter import ArcByArcFitter
+from aba_optimiser.training.tracking.fitter import ArcByArcFitter, FitterOptions
 from tests.training.controller_test_utils import (
     _generate_nonoise_track,
     _make_optimiser_config_quad,
@@ -28,6 +29,7 @@ from tests.training.controller_test_utils import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from aba_optimiser.config import OptimiserConfig
     from aba_optimiser.mad.aba_mad_interface import AbaMadInterface
 
 
@@ -41,6 +43,7 @@ def _build_lhc_quad_controller(
     seq_b1: Path,
     loaded_interface: AbaMadInterface,
     start_marker: str,
+    optimiser_config: OptimiserConfig | None = None,
 ) -> tuple[ArcByArcFitter, dict[str, float]]:
     magnet_range = "BPM.13R1.B1/BPM.13L2.B1"
     bpm_start_points = [f"BPM.{i}R1.B1" for i in range(13, 14)]
@@ -65,7 +68,7 @@ def _build_lhc_quad_controller(
             sequence_file=seq_b1,
             errors={"quad": {"k1"}},
         ),
-        _make_optimiser_config_quad(),
+        optimiser_config or _make_optimiser_config_quad(),
         _make_simulation_config_quad(),
         SequenceConfig(magnet_range=magnet_range),
         create_arc_measurement_config(
@@ -73,11 +76,13 @@ def _build_lhc_quad_controller(
         ),
         bpm_start_points,
         bpm_end_points,
-        output_config=OutputConfig(
-            mad_logfile=tmp_path / "mad_logfile.log",
-            write_tensorboard_logs=False,
+        options=FitterOptions(
+            output_config=OutputConfig(
+                mad_logfile=tmp_path / "mad_logfile.log",
+                write_tensorboard_logs=False,
+            ),
+            true_strengths=magnet_strengths.copy(),
         ),
-        true_strengths=magnet_strengths.copy(),
     )
     return ctrl, magnet_strengths.copy()
 
@@ -123,7 +128,7 @@ def test_controller_quad_opt_simple(
     )
     logger.info("Starting controller with logfile at %s", tmp_path / "mad_logfile.log")
     if controller_test_mode == "loss_regression":
-        initial_loss = evaluate_controller_worker_loss(ctrl, ctrl.initial_knobs)
+        initial_loss = evaluate_controller_worker_loss(ctrl, ctrl.machine.initial_knobs)
         true_loss = evaluate_controller_worker_loss(ctrl, true_values)
         assert true_loss < initial_loss * 1e-6
         return
@@ -142,17 +147,16 @@ def test_controller_quad_opt_simple_without_early_stopping_reaches_truth(
         seq_b1=seq_b1,
         loaded_interface=loaded_interface,
         start_marker="MSIA.EXIT.B1",
+        # Never stop early: run every epoch.
+        optimiser_config=dataclasses.replace(
+            _make_optimiser_config_quad(), loss_change_tolerance=0.0, gradient_converged_value=-1.0
+        ),
     )
     if controller_test_mode == "loss_regression":
-        initial_loss = evaluate_controller_worker_loss(ctrl, ctrl.initial_knobs)
+        initial_loss = evaluate_controller_worker_loss(ctrl, ctrl.machine.initial_knobs)
         true_loss = evaluate_controller_worker_loss(ctrl, true_values)
         assert true_loss < initial_loss * 1e-6
         return
-
-    ctrl.optimisation_loop._should_stop_for_loss_change = (  # type: ignore[method-assign]
-        lambda epoch, epoch_loss, prev_loss: False
-    )
-    ctrl.optimisation_loop.gradient_converged_value = -1.0
 
     estimate = ctrl.run().knobs
     _assert_estimate_matches_true(estimate, true_values, max_rel_diff=1e-5)

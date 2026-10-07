@@ -58,14 +58,14 @@ import pytest
 from aba_optimiser.accelerators import PSB
 from aba_optimiser.mad import GradientDescentMadInterface
 from aba_optimiser.mad.scripts import CLOSED_TWISS_INIT, PYTHON_IN_MAD
-from aba_optimiser.training.config.models import SequenceConfig
-from aba_optimiser.training.reduction import reduce_replies
-from aba_optimiser.training.workers.pool import WorkerPool
-from aba_optimiser.training_closed_twiss import (
+from aba_optimiser.poco import (
     DEFAULT_OBSERVABLES,
     ClosedTwissFitter,
     LevenbergMarquardtConfig,
 )
+from aba_optimiser.training.config.models import SequenceConfig
+from aba_optimiser.training.pool import WorkerPool
+from aba_optimiser.training.reduction import reduce_replies
 from aba_optimiser.workers import ClosedTwissWorker
 from aba_optimiser.workers.closed_twiss import read_orbit_only
 from aba_optimiser.workers.protocol import Start
@@ -366,17 +366,15 @@ def _normal_matrix(
     pool = WorkerPool()
     try:
         for worker_id, (config, data) in enumerate(fitter.worker_payloads):
-            pool.spawn(ClosedTwissWorker, worker_id, data, config, fitter.simulation_config)
-        names = list(fitter.config_manager.knob_names)
+            pool.spawn(ClosedTwissWorker, worker_id, data, config, fitter.machine.simulation_config)
+        names = list(fitter.machine.knob_names)
         knobs = dict.fromkeys(names, 0.0)
         pool.channels.send_all(Start(knobs))
         replies = fitter._evaluate_workers(pool.channels, knobs)
         return reduce_replies(replies, len(names)).normal, names
     finally:
         pool.stop()
-        iface = getattr(fitter.config_manager, "mad_iface", None)
-        if iface is not None:
-            iface.close()
+        fitter.close()
 
 
 def _identifiable_rank(normal_matrix: np.ndarray, tolerance: float) -> int:

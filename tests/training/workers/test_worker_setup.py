@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from aba_optimiser.accelerators import PSB, SPS
 from aba_optimiser.training.config.tracking import ACDTrackingPlan, TrackingPlan
-from aba_optimiser.training.workers.setup import WorkerRangeSpec, WorkerSetupHelper
+from aba_optimiser.training.tracking.workers.setup import WorkerRangeSpec, WorkerSetupHelper
 
 if TYPE_CHECKING:
     from pathlib import Path

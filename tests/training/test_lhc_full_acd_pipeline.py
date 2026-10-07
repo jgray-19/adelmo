@@ -52,7 +52,7 @@ from aba_optimiser.training.config.models import (
     OutputConfig,
     SequenceConfig,
 )
-from aba_optimiser.training.tracking_fitter import ACDMarkerFitter
+from aba_optimiser.training.tracking.fitter import ACDMarkerFitter, FitterOptions
 
 pytest.importorskip("tmom_recon")
 
@@ -395,12 +395,14 @@ def test_lhc_acd_reconstruction_and_fitter_setup(
         measurement_config=MeasurementConfig(
             {output: MeasurementDetails(interface_options={}, machine_deltap=REFERENCE_DPP)}
         ),
-        initial_knob_strengths={},
-        true_strengths=machine.truth,
-        output_config=OutputConfig(
-            write_tensorboard_logs=False,
-            include_uncertainty=False,
-            mad_logfile=tmp_path / "acd_mad.log",
+        options=FitterOptions(
+            initial_knob_strengths={},
+            true_strengths=machine.truth,
+            output_config=OutputConfig(
+                write_tensorboard_logs=False,
+                include_uncertainty=False,
+                mad_logfile=tmp_path / "acd_mad.log",
+            ),
         ),
     )
 
@@ -411,7 +413,7 @@ def test_lhc_acd_reconstruction_and_fitter_setup(
     # strengths are a subset of the full injected truth, not equal to it.
     quad_truth = {name for name in machine.truth if name.lower().endswith(".dk1l")}
     assert quad_truth, "expected at least one truth quadrupole knob"
-    fitted_truth = set(fitter.optimisation_loop.true_strengths)
+    fitted_truth = set(fitter.machine.true_strengths)
     assert fitted_truth, "fitter found no true strengths within its optimisation range"
     assert fitted_truth <= quad_truth
-    assert set(fitter.initial_knobs) == fitted_truth
+    assert set(fitter.machine.initial_knobs) == fitted_truth

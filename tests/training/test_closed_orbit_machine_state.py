@@ -55,13 +55,13 @@ from pymadng_utils.io.utils import save_knobs
 
 from aba_optimiser.accelerators import PSB
 from aba_optimiser.mad import GradientDescentMadInterface
-from aba_optimiser.training.config.models import SequenceConfig
-from aba_optimiser.training_closed_twiss import (
+from aba_optimiser.poco import (
     ClosedOrbitFitter,
     ClosedOrbitMeasurement,
     ClosedOrbitSeries,
     LevenbergMarquardtConfig,
 )
+from aba_optimiser.training.config.models import SequenceConfig
 
 from .test_closed_twiss_fitter import _knob_names
 
