@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from aba_optimiser.workers.protocol import WorkerChannels
 
 LOGGER = logging.getLogger(__name__)
+#: Starting value for a ``pt`` knob that starts at exactly zero.
+PT_SEED = 1e-6
 
 
 @dataclass
@@ -111,8 +113,8 @@ class SGDLoop:
         run_start = time.time()
         checkpointer = OptimisationCheckpointer(self, checkpoint_config)
 
-        if "pt" in knobs and knobs["pt"] == 0.0:
-            knobs["pt"] = 1e-6  # Initialise pt to non-zero
+        if knobs.get("pt") == 0.0:
+            knobs = {**knobs, "pt": PT_SEED}
 
         prev_loss = None
         start_epoch = 0
@@ -137,21 +139,22 @@ class SGDLoop:
             state.true_diff = self._true_diff(knobs)
             if validation_loss_fn is not None:
                 state.validation_loss = validation_loss_fn(knobs)
-            state.new_best = self._select_best(state, prev_loss)
+            state.new_best = self._select_best(state)
             if epoch_end_hook is not None:
                 state.note = epoch_end_hook(knobs, self.best.value)
 
             stop = self._should_stop(state, prev_loss)
-            if stop != "loss_converged":
-                prev_loss = state.selection_loss
-                last_completed_epoch = epoch
+            prev_loss = state.selection_loss
+            last_completed_epoch = epoch
             if stop is None and checkpointer.should_save_periodic(epoch):
                 checkpointer.save(epoch, knobs, prev_loss)
                 state.saved_checkpoint = True
 
             self._log_epoch(writer, state, run_start)
             if loss_callback is not None:
-                loss_callback(epoch, state.loss, state.validation_loss, state.grad_norm, state.true_diff)
+                loss_callback(
+                    epoch, state.loss, state.validation_loss, state.grad_norm, state.true_diff
+                )
             if stop is not None:
                 LOGGER.info(
                     "\nStopping early at epoch %d (%s): smoothed loss change %.3e, smoothed grad norm %.3e.",
@@ -194,7 +197,7 @@ class SGDLoop:
         for batch in range(self.num_batches):
             channels.send_all(Evaluate(knobs, batch))
             reduced = reduce_replies(channels.recv_all(), len(self.knob_names))
-            loss += reduced.loss / len(channels.workers)
+            loss += reduced.loss / max(1, reduced.n_valid)
             grad += reduced.grad
             particle_lost = particle_lost or reduced.particle_lost
             if not particle_lost:
@@ -220,28 +223,10 @@ class SGDLoop:
         params = np.array([knobs[k] for k in self.knob_names])
         return dict(zip(self.knob_names, self.optimiser.step(params, grad, lr)))
 
-    def _select_best(self, state: EpochState, prev_loss: float | None) -> bool:
-        """Record ``state`` as the best epoch if it is; return whether it was.
-
-        A lower loss that improves on the best by less than
-        ``best_min_relative_improvement`` of the previous loss is only taken when
-        its knobs are no further from the true strengths.
-        """
-        loss = state.selection_loss
-        if self.best.loss != float("inf") and prev_loss is not None:
-            improvement = (self.best.loss - loss) / abs(prev_loss) if prev_loss != 0 else 0
-            if improvement < self.config.best_min_relative_improvement:
-                best_diff = self._true_diff(self.best.value)
-                if state.true_diff > best_diff:
-                    LOGGER.debug(
-                        "Not saving as best: loss improvement %.3e and true diff %.3e > %.3e.",
-                        improvement,
-                        state.true_diff,
-                        best_diff,
-                    )
-                    return False
-        if loss < self.best.loss:
-            self.best.record(loss, state.knobs.copy())
+    def _select_best(self, state: EpochState) -> bool:
+        """Record ``state`` as the best epoch if its loss is the lowest so far."""
+        if state.selection_loss < self.best.loss:
+            self.best.record(state.selection_loss, state.knobs.copy())
             return True
         return False
 
@@ -256,7 +241,8 @@ class SGDLoop:
             self.smoothed_loss_change = self._smooth(self.smoothed_loss_change, change)
             if (
                 self.smoothed_loss_change < self.config.loss_change_tolerance
-                and state.epoch > self.config.loss_change_min_epoch_fraction * self.config.max_epochs
+                and state.epoch
+                > self.config.loss_change_min_epoch_fraction * self.config.max_epochs
             ):
                 return "loss_converged"
         if self.smoothed_grad_norm < self.config.gradient_converged_value:
@@ -276,9 +262,7 @@ class SGDLoop:
             return sum(knobs.values())
         return np.sum([abs(knobs[k] - self.true_strengths[k]) for k in self.knob_names])
 
-    def _log_epoch(
-        self, writer: SummaryWriter | None, state: EpochState, run_start: float
-    ) -> None:
+    def _log_epoch(self, writer: SummaryWriter | None, state: EpochState, run_start: float) -> None:
         """Log the epoch to the console and TensorBoard."""
         if writer is not None:
             loss_scalars = {"train": state.loss}

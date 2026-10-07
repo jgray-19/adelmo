@@ -39,9 +39,6 @@ class OptimiserConfig:
     # loss_change_min_epoch_fraction * max_epochs epochs. 0 disables the rule.
     loss_change_tolerance: float = field(default=1e-6)
     loss_change_min_epoch_fraction: float = field(default=0.2)
-    # Below this relative loss improvement a new best is only taken if its knobs
-    # are no further from the true strengths than the current best's.
-    best_min_relative_improvement: float = field(default=1e-4)
 
     # L-BFGS-specific parameters (ignored for adam)
     lbfgs_history_size: int = field(default=10)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import threading
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -16,7 +17,11 @@ from aba_optimiser.workers.protocol import Evaluate, GradReply, Start, WorkerCha
 
 
 def _make_loop(
-    knob_names: list[str], *, max_epochs: int = 2, gradient_converged_value: float = 1e-6
+    knob_names: list[str],
+    *,
+    max_epochs: int = 2,
+    gradient_converged_value: float = 1e-6,
+    true_strengths: dict[str, float] | None = None,
 ) -> SGDLoop:
     optimiser_config = OptimiserConfig(
         max_epochs=max_epochs,
@@ -27,7 +32,9 @@ def _make_loop(
         gradient_converged_value=gradient_converged_value,
         optimiser_type="adam",
     )
-    return SGDLoop(knob_names, true_strengths={}, config=optimiser_config, num_batches=1)
+    return SGDLoop(
+        knob_names, true_strengths=true_strengths or {}, config=optimiser_config, num_batches=1
+    )
 
 
 def _make_checkpointer(loop: SGDLoop, checkpoint_path) -> OptimisationCheckpointer:
@@ -63,7 +70,9 @@ def test_load_checkpoint_allows_current_knob_superset(tmp_path) -> None:
     checkpoint_path.write_text(json.dumps(checkpoint_payload))
 
     base_current = {"k1": 10.0, "k2": 20.0, "k3": 30.0}
-    checkpoint_state = _make_checkpointer(loop, checkpoint_path).load(base_current_knobs=base_current)
+    checkpoint_state = _make_checkpointer(loop, checkpoint_path).load(
+        base_current_knobs=base_current
+    )
 
     assert checkpoint_state["saved_epoch"] == 3
     assert checkpoint_state["next_epoch"] == 4
@@ -134,7 +143,9 @@ def test_load_checkpoint_remaps_and_pads_in_current_knob_order(tmp_path) -> None
     checkpoint_path.write_text(json.dumps(checkpoint_payload))
 
     base_current = {"k3": -3.0, "k1": -1.0, "k2": -2.0, "k4": 99.0}
-    checkpoint_state = _make_checkpointer(loop, checkpoint_path).load(base_current_knobs=base_current)
+    checkpoint_state = _make_checkpointer(loop, checkpoint_path).load(
+        base_current_knobs=base_current
+    )
 
     # Values should be in current order: [k3, k1, k2, k4].
     assert checkpoint_state["current_knobs"] == {
@@ -159,60 +170,38 @@ def test_load_checkpoint_remaps_and_pads_in_current_knob_order(tmp_path) -> None
     assert loop.optimiser.t == 11
 
 
-def _run_fake_worker(conn, n_epochs: int, n_batches: int, grad: np.ndarray, loss: float) -> None:
-    """Thread target: act as a gradient-descent worker for n_epochs * n_batches rounds."""
-    worker_id = 0
+def _run_fake_worker(conn, rounds: int, grad: np.ndarray, loss: float | list[float]) -> None:
+    """Thread target: answer ``rounds`` evaluations with a fixed gradient.
+
+    ``loss`` is the loss of every round, or a list with one loss per round.
+    """
     conn.recv()  # Start
-    for _ in range(n_epochs * n_batches):
+    for i in range(rounds):
         msg = conn.recv()
         if not isinstance(msg, Evaluate):
             break
-        conn.send(GradReply(worker_id, loss, grad.copy()))
+        conn.send(GradReply(0, loss[i] if isinstance(loss, list) else loss, grad.copy()))
 
 
-def _make_real_channels(n_knobs: int, n_epochs: int, n_batches: int) -> WorkerChannels:
-    """Return real WorkerChannels backed by a thread acting as a single worker."""
-    parent, child = mp.Pipe()
-    worker_thread = threading.Thread(
-        target=_run_fake_worker,
-        args=(child, n_epochs, n_batches, np.zeros(n_knobs), 0.0),
-        daemon=True,
-    )
-    worker_thread.start()
-
-    # Send the startup handshake that the worker expects before the loop begins.
-    parent.send(Start({f"k{i}": 0.0 for i in range(n_knobs)}))
-
-    from types import SimpleNamespace
-
-    proc = SimpleNamespace(pid=0, exitcode=None)
-
-    channels = object.__new__(WorkerChannels)
-    channels.parent_conns = (parent,)
-    channels.workers = (proc,)
-    channels._count = 1
-    return channels
-
-
-def _make_real_channels_nonzero_grad(n_knobs: int, n_epochs: int, n_batches: int) -> WorkerChannels:
-    """Real channels where the fake worker returns a non-zero gradient."""
-    from types import SimpleNamespace
-
-    parent, child = mp.Pipe()
-    threading.Thread(
-        target=_run_fake_worker,
-        args=(child, n_epochs, n_batches, np.ones(n_knobs), 1.0),
-        daemon=True,
-    ).start()
-    parent.send(Start({f"k{i}": 0.0 for i in range(n_knobs)}))
-
-    proc = SimpleNamespace(pid=0, exitcode=None)
-
-    channels = object.__new__(WorkerChannels)
-    channels.parent_conns = (parent,)
-    channels.workers = (proc,)
-    channels._count = 1
-    return channels
+def _make_channels(
+    n_knobs: int,
+    rounds: int,
+    *,
+    losses: tuple[float | list[float], ...] = (0.0,),
+    grad: float = 0.0,
+) -> WorkerChannels:
+    """Real WorkerChannels backed by one thread per entry of ``losses``."""
+    parents = []
+    for loss in losses:
+        parent, child = mp.Pipe()
+        threading.Thread(
+            target=_run_fake_worker,
+            args=(child, rounds, np.full(n_knobs, grad), loss),
+            daemon=True,
+        ).start()
+        parent.send(Start({f"k{i}": 0.0 for i in range(n_knobs)}))
+        parents.append(parent)
+    return WorkerChannels(parents, [SimpleNamespace(pid=0, exitcode=None) for _ in parents])
 
 
 def test_epoch_end_hook_called_once_per_epoch() -> None:
@@ -228,7 +217,7 @@ def test_epoch_end_hook_called_once_per_epoch() -> None:
 
     loop.run(
         {"k1": 0.0},
-        _make_real_channels(1, n_epochs, n_batches),
+        _make_channels(1, n_epochs * n_batches),
         total_turns=1,
         epoch_end_hook=hook,
     )
@@ -249,7 +238,7 @@ def test_epoch_end_hook_receives_updated_knobs() -> None:
 
     loop.run(
         {"k1": 0.0},
-        _make_real_channels_nonzero_grad(1, n_epochs, n_batches),
+        _make_channels(1, n_epochs * n_batches, losses=(1.0,), grad=1.0),
         total_turns=1,
         epoch_end_hook=hook,
     )
@@ -277,14 +266,12 @@ def test_epoch_end_hook_note_is_appended_to_the_epoch_log_line(caplog) -> None:
     with caplog.at_level(logging.INFO, logger="aba_optimiser.training.sgd.loop"):
         loop.run(
             {"k1": 0.0},
-            _make_real_channels(1, n_epochs, n_batches),
+            _make_channels(1, n_epochs * n_batches),
             total_turns=1,
             epoch_end_hook=hook,
         )
 
-    epoch_lines = [
-        record.getMessage() for record in caplog.records if "Ep " in record.getMessage()
-    ]
+    epoch_lines = [record.getMessage() for record in caplog.records if "Ep " in record.getMessage()]
     assert len(epoch_lines) == n_epochs
     assert "dic=1.00e-09" in epoch_lines[0]
     assert "dic=2.00e-09" in epoch_lines[1]
@@ -301,14 +288,12 @@ def test_epoch_line_omits_the_note_when_the_hook_returns_none(caplog) -> None:
     with caplog.at_level(logging.INFO, logger="aba_optimiser.training.sgd.loop"):
         loop.run(
             {"k1": 0.0},
-            _make_real_channels(1, 1, 1),
+            _make_channels(1, 1),
             total_turns=1,
             epoch_end_hook=lambda _knobs, _best: None,
         )
 
-    epoch_lines = [
-        record.getMessage() for record in caplog.records if "Ep " in record.getMessage()
-    ]
+    epoch_lines = [record.getMessage() for record in caplog.records if "Ep " in record.getMessage()]
     assert epoch_lines
     assert ", ," not in epoch_lines[0]
     assert "dic=" not in epoch_lines[0]
@@ -321,7 +306,70 @@ def test_epoch_end_hook_none_does_not_raise() -> None:
 
     loop.run(
         {"k1": 0.0},
-        _make_real_channels(1, n_epochs, n_batches),
+        _make_channels(1, n_epochs * n_batches),
         total_turns=1,
         epoch_end_hook=None,
     )
+
+
+def test_epoch_loss_averages_only_the_workers_with_a_valid_loss() -> None:
+    """A worker that lost its particles (NaN loss) must not dilute the epoch loss."""
+    loop = _make_loop(["k0"], max_epochs=1, gradient_converged_value=-1.0)
+    losses: list[float] = []
+
+    loop.run(
+        {"k0": 0.0},
+        _make_channels(1, 1, losses=(2.0, 4.0, float("nan"))),
+        total_turns=1,
+        loss_callback=lambda _epoch, loss, *_: losses.append(loss),
+    )
+
+    assert losses == [3.0]
+
+
+def test_best_epoch_is_the_lowest_loss_even_when_further_from_the_truth() -> None:
+    """Best-selection uses the loss alone; the true strengths are only diagnostics."""
+    loop = _make_loop(
+        ["k0"], max_epochs=2, gradient_converged_value=-1.0, true_strengths={"k0": 0.0}
+    )
+    epoch_knobs: list[dict[str, float]] = []
+
+    best = loop.run(
+        {"k0": 0.0},
+        # A tiny loss improvement while the gradient pushes k0 away from its truth.
+        _make_channels(1, 2, losses=([1.0, 1.0 - 1e-6],), grad=1.0),
+        total_turns=1,
+        epoch_end_hook=lambda knobs, _best: epoch_knobs.append(knobs.copy()),
+    )
+
+    assert abs(epoch_knobs[1]["k0"]) > abs(epoch_knobs[0]["k0"])
+    assert best == epoch_knobs[1]
+
+
+def test_run_leaves_the_callers_knobs_untouched() -> None:
+    """Seeding a zero ``pt`` must not write into the dict the caller passed."""
+    loop = _make_loop(["k0", "pt"], max_epochs=1, gradient_converged_value=-1.0)
+    knobs = {"k0": 0.0, "pt": 0.0}
+
+    loop.run(knobs, _make_channels(2, 1), total_turns=1)
+
+    assert knobs == {"k0": 0.0, "pt": 0.0}
+
+
+def test_final_checkpoint_records_the_epoch_that_triggered_the_loss_stop(tmp_path) -> None:
+    """The epoch that stops on a converged loss still counts as completed."""
+    loop = _make_loop(["k0"], max_epochs=5, gradient_converged_value=-1.0)
+    checkpoint_path = tmp_path / "checkpoint.json"
+
+    loop.run(
+        {"k0": 0.0},
+        _make_channels(1, 5, losses=(1.0,), grad=1.0),
+        total_turns=1,
+        checkpoint_config=CheckpointConfig(
+            checkpoint_path=checkpoint_path, checkpoint_every_n_epochs=10
+        ),
+    )
+
+    assert loop.diagnostics.reason == "loss_converged"
+    assert loop.diagnostics.iterations == 3
+    assert json.loads(checkpoint_path.read_text())["saved_epoch"] == 2
