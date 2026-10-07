@@ -218,7 +218,7 @@ class TrackingFitter:
         logger.info("Optimisation complete.")
         return FitResult(
             knobs=final_knobs,
-            uncertainties=dict(zip(final_knobs.keys(), uncertainties)),
+            uncertainties=uncertainties,
             diagnostics=self.loop.diagnostics,
         )
 
@@ -308,8 +308,8 @@ class TrackingFitter:
         self,
         final_knobs: dict[str, float],
         normal_and_noise: tuple[np.ndarray, np.ndarray] | None,
-    ) -> np.ndarray:
-        """1-sigma knob uncertainties in the order of ``output_knob_names``; zero when not computed.
+    ) -> dict[str, float]:
+        """1-sigma uncertainty of each optimisation knob; zero when not computed.
 
         ``(A, B)`` are the normal matrix and the measurement noise propagated through
         every observation and start coordinate, ``Cov = A⁻¹ B A⁻¹``.
@@ -318,11 +318,7 @@ class TrackingFitter:
             uncertainties = sandwich_uncertainties(*normal_and_noise)
         else:
             uncertainties = np.zeros(len(final_knobs), dtype=np.float64)
-        uncertainty_by_knob = dict(zip(self.machine.knob_names, uncertainties, strict=True))
-        return np.array(
-            [uncertainty_by_knob[name] for name in self.machine.output_knob_names],
-            dtype=np.float64,
-        )
+        return dict(zip(self.machine.knob_names, uncertainties.tolist(), strict=True))
 
     def _load_data(self) -> DataManager:
         """Load the measurement files, batch their turns and fix ``num_batches`` to fit them."""

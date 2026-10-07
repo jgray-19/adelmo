@@ -107,7 +107,6 @@ class MachineSetup:
         self.true_strengths = (
             self._restrict_true_strengths(true) if true else self.initial_knobs.copy()
         )
-        self.output_knob_names = accelerator.format_result_knob_names(self.knob_names)
 
     @property
     def worker_start_knobs(self) -> dict[str, float]:
