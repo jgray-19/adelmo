@@ -227,5 +227,5 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
         best_u = optimiser.best.value
         self.calibration_result = dict(zip(g_names, best_u[n_q:].tolist(), strict=True))
         self.calibration_result.update(zip(b_names, gains["best_b"].tolist(), strict=True))
-        # No uncertainty yet: the gains' covariance needs the Schur-reduced normal matrix of the physical weights.
+        # TODO: report uncertainties. The gains' covariance needs the Schur-reduced normal matrix of the physical weights.
         return dict(zip(knob_names, best_u[:n_q].tolist(), strict=True)), None

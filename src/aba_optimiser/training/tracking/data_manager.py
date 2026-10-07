@@ -35,6 +35,8 @@ if TYPE_CHECKING:
     ShuffleTurns = Callable[[list[int]], None]
 
 LOGGER = logging.getLogger(__name__)
+#: Seed of the default turn shuffle.
+TURN_SHUFFLE_SEED = 42
 
 #: Attempts (and initial backoff) for a measurement-parquet read. Measurement
 #: parquets live on AFS/NFS, where a transient ``OSError`` clears on its own;
@@ -269,8 +271,9 @@ class DataManager:
         """Create a data manager for one optimisation run.
 
         Args:
-            shuffle_turns: Optional in-place turn ordering strategy forwarded to
-                ``WorkerTurnPlanner``. This primarily supports deterministic tests.
+            shuffle_turns: In-place turn ordering, also used by ``WorkerTurnPlanner``.
+                Defaults to a shuffle seeded with :data:`TURN_SHUFFLE_SEED`, so
+                every run with the same data uses the same turns.
         """
         self.all_bpms = all_bpms
         self.simulation_config = simulation_config
@@ -280,7 +283,7 @@ class DataManager:
         self.observed_markers = list(
             dict.fromkeys(bpms_in_range + (extra_markers or []))
         )
-        self.shuffle_turns = shuffle_turns
+        self.shuffle_turns = shuffle_turns or random.Random(TURN_SHUFFLE_SEED).shuffle
 
         self.tracks: dict[int, FileTracks]
         self.available_turns: list[int]
@@ -483,11 +486,8 @@ class DataManager:
         """Group turns by file and shuffle each group in place."""
         by_file = group_turns_by_file(turns, self.file_map)
         groups = [list(by_file[idx]) for idx in sorted(by_file)]
-        shuffle = (
-            self.shuffle_turns if self.shuffle_turns is not None else random.shuffle
-        )
         for group in groups:
-            shuffle(group)
+            self.shuffle_turns(group)
         return groups
 
     def _batches_per_file(self, turns: list[int]) -> list[list[int]]:

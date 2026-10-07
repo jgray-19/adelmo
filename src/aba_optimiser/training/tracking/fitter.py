@@ -15,7 +15,6 @@ from __future__ import annotations
 import dataclasses
 import gc
 import logging
-import random
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -57,7 +56,6 @@ if TYPE_CHECKING:
     LossCallback = Callable[[int, float, float | None, float, float], None]
 
 logger = logging.getLogger(__name__)
-random.seed(42)  # For reproducibility
 
 
 @dataclass(frozen=True)

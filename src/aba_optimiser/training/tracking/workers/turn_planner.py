@@ -11,7 +11,6 @@ from a single measurement file.
 from __future__ import annotations
 
 import logging
-import random
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -91,19 +90,18 @@ class WorkerTurnPlanner:
         tracking_plan: TrackingPlan,
         simulation_config,
         *,
-        shuffle_turns: ShuffleTurns | None = None,
+        shuffle_turns: ShuffleTurns,
     ) -> None:
         """Create a planner.
 
         Args:
             tracking_plan: Tracking-mode policy for BPM/range expansion.
             simulation_config: Worker and batching configuration.
-            shuffle_turns: Optional in-place turn ordering strategy. Defaults to
-                ``random.shuffle`` and can be overridden for deterministic tests.
+            shuffle_turns: In-place turn ordering.
         """
         self.tracking_plan = tracking_plan
         self.simulation_config = simulation_config
-        self.shuffle_turns = shuffle_turns if shuffle_turns is not None else random.shuffle
+        self.shuffle_turns = shuffle_turns
 
     def build_turn_batches(
         self,

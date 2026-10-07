@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+
 import pandas as pd
 import pytest
 
@@ -139,9 +141,7 @@ def test_prepare_turn_batches_caps_batches_at_num_workers() -> None:
 
     data_manager.prepare_turn_batches(num_starts=1, num_ends=0)
 
-    range_specs_per_batch, _ = _range_spec_plan(
-        use_fixed_bpm=True, num_starts=1, num_ends=0
-    )
+    range_specs_per_batch, _ = _range_spec_plan(use_fixed_bpm=True, num_starts=1, num_ends=0)
     assert len(data_manager.turn_batches) == 60 // range_specs_per_batch
     # Batch sizes are trimmed to an even multiple of num_batches=2.
     assert all(len(batch) % 2 == 0 for batch in data_manager.turn_batches)
@@ -169,9 +169,7 @@ def test_prepare_turn_batches_num_batches_does_not_inflate_worker_groups() -> No
 
     data_manager.prepare_turn_batches(num_starts=2, num_ends=0)
 
-    range_specs_per_batch, _ = _range_spec_plan(
-        use_fixed_bpm=True, num_starts=2, num_ends=0
-    )
+    range_specs_per_batch, _ = _range_spec_plan(use_fixed_bpm=True, num_starts=2, num_ends=0)
     assert len(data_manager.turn_batches) == 60 // range_specs_per_batch
     assert len(data_manager.turn_batches) * range_specs_per_batch == 60
 
@@ -333,9 +331,7 @@ def test_simulation_config_rejects_invalid_validation_fraction(
     bad_validation_fraction: float,
 ) -> None:
     with pytest.raises(ValueError, match="validation_fraction must be in"):
-        SimulationConfig(
-            num_workers=1, num_batches=1, validation_fraction=bad_validation_fraction
-        )
+        SimulationConfig(num_workers=1, num_batches=1, validation_fraction=bad_validation_fraction)
 
 
 def test_get_total_turns_uses_real_batch_sizes() -> None:
@@ -461,3 +457,37 @@ def test_load_track_data_requires_bunch_number_column(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="bunch_number"):
         data_manager.load_track_data()
+
+
+def _shuffled_batches() -> tuple[list[list[int]], list[list[int]]]:
+    """Training and validation batches of 40 turns with the default turn shuffle."""
+    turns = list(range(40))
+    data_manager = DataManager(
+        bpms_in_range=["BPM.1"],
+        all_bpms=["BPM.1"],
+        simulation_config=SimulationConfig(
+            num_workers=4, num_batches=1, n_run_turns=1, validation_fraction=0.25
+        ),
+        measurement_files=["file0.parquet"],
+        tracking_plan=_DEFAULT_TRACKING_PLAN,
+    )
+    data_manager.tracks = {0: None}
+    data_manager.available_turns = turns
+    data_manager.bunch_turns_by_file = _single_bunch_by_file(turns)
+    data_manager.file_map = dict.fromkeys(turns, 0)
+    data_manager.prepare_turn_batches(num_starts=1, num_ends=0)
+    return data_manager.turn_batches, data_manager.validation_turn_batches
+
+
+def test_default_turn_shuffle_is_seeded_and_independent_of_global_random_state() -> None:
+    random.seed(1)
+    first = _shuffled_batches()
+    random.seed(2)
+    random.random()
+    second = _shuffled_batches()
+
+    assert first == second
+    # The turns are shuffled, not left in file order.
+    assert sorted(turn for batch in first[0] for turn in batch) != [
+        turn for batch in first[0] for turn in batch
+    ]
