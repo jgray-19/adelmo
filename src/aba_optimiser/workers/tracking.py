@@ -554,10 +554,13 @@ end
     # ------------------------------------------------------------------
 
     def on_stop(self, mad: MAD, failed: bool) -> None:
-        """A training worker answers :class:`Stop` with its uncertainty part."""
-        if self.validation:
+        """A training worker answers :class:`Stop` with its uncertainty part.
+
+        A failed worker has already sent its :class:`ErrorReply` and sends nothing more.
+        """
+        if self.validation or failed:
             return
-        if not failed and not self.worker_disabled and self.propagate_uncertainty_on_exit:
+        if not self.worker_disabled and self.propagate_uncertainty_on_exit:
             LOGGER.debug(f"Worker {self.worker_id}: Propagating uncertainty")
             try:
                 self.send_reply(self._compute_uncertainty_part(mad, self.n_reply_knobs))
