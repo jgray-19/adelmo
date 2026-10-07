@@ -23,11 +23,16 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
-from aba_optimiser.accelerators import PSB
 from aba_optimiser.config import SimulationConfig
+from aba_optimiser.fitting.worker import WorkerConfig
+from aba_optimiser.machine.accelerators import PSB
 from aba_optimiser.poco.fitter import stamp_global_normalisation
-from aba_optimiser.workers import ClosedTwissData, ClosedTwissWorker, Observable, WorkerConfig
-from aba_optimiser.workers.closed_twiss import align_observables
+from aba_optimiser.poco.workers.closed_twiss import (
+    ClosedTwissData,
+    ClosedTwissWorker,
+    Observable,
+    align_observables,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path

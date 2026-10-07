@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from aba_optimiser.training.tracking.workers.screening import OutlierScreener
-from aba_optimiser.training.tracking.workers.setup import WorkerRuntimeMetadata
-from aba_optimiser.workers.common import KickPlane
+from aba_optimiser.fitting.worker import KickPlane
+from aba_optimiser.tracking.dispatch.screening import OutlierScreener
+from aba_optimiser.tracking.dispatch.setup import WorkerRuntimeMetadata
 
 
 def _meta(worker_id: int, file_idx: int, bpms: list[str], sdir: int = 1) -> WorkerRuntimeMetadata:
@@ -126,11 +126,14 @@ def test_validation_worker_has_worker_disabled_before_any_mask_arrives(tmp_path)
     validation command loop reads this attribute on runs where no mask is ever
     pushed.
     """
-    from aba_optimiser.accelerators import PSB
     from aba_optimiser.config import SimulationConfig
-    from aba_optimiser.workers import TrackingData, WorkerConfig
-    from aba_optimiser.workers.common import PrecomputedTrackingWeights
-    from aba_optimiser.workers.tracking import TrackingWorker
+    from aba_optimiser.fitting.worker import WorkerConfig
+    from aba_optimiser.machine.accelerators import PSB
+    from aba_optimiser.tracking.worker import (
+        PrecomputedTrackingWeights,
+        TrackingData,
+        TrackingWorker,
+    )
 
     seq_file = tmp_path / "psb.seq"
     seq_file.write_text("! placeholder sequence\n")

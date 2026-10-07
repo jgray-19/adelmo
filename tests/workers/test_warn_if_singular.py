@@ -6,7 +6,7 @@ import logging
 
 import numpy as np
 
-from aba_optimiser.workers.common import warn_if_singular
+from aba_optimiser.fitting.uncertainty import warn_if_singular
 
 
 def test_well_conditioned_matrix_is_silent(caplog) -> None:

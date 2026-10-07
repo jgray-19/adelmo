@@ -10,6 +10,15 @@ import numpy as np
 import pandas as pd
 
 from aba_optimiser.config import SimulationConfig
+from aba_optimiser.fitting.lifecycle import run_with_workers
+from aba_optimiser.fitting.pool import WorkerPool
+from aba_optimiser.fitting.protocol import Evaluate, GradReply, Start
+from aba_optimiser.fitting.reduction import reduce_replies
+from aba_optimiser.fitting.results import FitDiagnostics, FitResult
+from aba_optimiser.fitting.setup import MachineSetup
+from aba_optimiser.fitting.uncertainty import hessian_uncertainties, warn_if_singular
+from aba_optimiser.fitting.weights import global_weight_scale, variance_to_weight
+from aba_optimiser.fitting.worker import WorkerConfig
 from aba_optimiser.optimisers.levenberg_marquardt import LevenbergMarquardtConfig
 from aba_optimiser.poco.lm_loop import LMPoint, run_levenberg_marquardt
 from aba_optimiser.poco.prior import (
@@ -17,26 +26,18 @@ from aba_optimiser.poco.prior import (
     prior_alphas,
     validate_prior_strengths,
 )
-from aba_optimiser.training.lifecycle import run_with_workers
-from aba_optimiser.training.machine_setup import MachineSetup
-from aba_optimiser.training.pool import WorkerPool
-from aba_optimiser.training.reduction import reduce_replies
-from aba_optimiser.training.results import FitDiagnostics, FitResult
-from aba_optimiser.training.tracking.workers.payloads import global_weight_scale
-from aba_optimiser.workers import ClosedTwissData, ClosedTwissWorker, Observable, WorkerConfig
-from aba_optimiser.workers.common import (
+from aba_optimiser.poco.workers.closed_twiss import (
+    ClosedTwissData,
+    ClosedTwissWorker,
+    Observable,
     ObservableKind,
-    WeightProcessor,
-    hessian_uncertainties,
-    warn_if_singular,
 )
-from aba_optimiser.workers.protocol import Evaluate, GradReply, Start
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from aba_optimiser.accelerators import Accelerator
-    from aba_optimiser.training.config.models import OutputConfig, SequenceConfig
+    from aba_optimiser.fitting.config import OutputConfig, SequenceConfig
+    from aba_optimiser.machine.accelerators import Accelerator
 
 logger = logging.getLogger(__name__)
 
@@ -140,8 +141,6 @@ class LMFitter:
             accelerator,
             SimulationConfig(num_workers=num_workers, num_batches=1, use_fixed_bpm=True),
             sequence_config,
-            bpm_start_points=["$start"],
-            bpm_end_points=["$end"],
             output_config=output_config,
             initial_knob_strengths=initial_knob_strengths,
             true_strengths=true_strengths,
@@ -452,7 +451,7 @@ def stamp_global_normalisation(payloads: list[tuple[WorkerConfig, ClosedTwissDat
     inverse-variance weights determine the result.
     """
     weights = [
-        WeightProcessor.variance_to_weight(np.asarray(observable.variances, dtype=float))
+        variance_to_weight(np.asarray(observable.variances, dtype=float))
         for _config, data in payloads
         for observable in data.observables
     ]

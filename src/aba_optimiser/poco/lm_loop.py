@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from aba_optimiser.fitting.results import FitDiagnostics
 from aba_optimiser.optimisers.levenberg_marquardt import LevenbergMarquardtOptimiser
-from aba_optimiser.training.results import FitDiagnostics
 
 if TYPE_CHECKING:
     from collections.abc import Callable

@@ -6,20 +6,19 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from aba_optimiser.accelerators import PSB
 from aba_optimiser.config import SimulationConfig
-from aba_optimiser.training.config.tracking import TrackingPlan
-from aba_optimiser.training.pool import WorkerPool
-from aba_optimiser.training.tracking.data_manager import FileTracks
-from aba_optimiser.training.tracking.session import TrackingSession
-from aba_optimiser.training.tracking.workers.payloads import WorkerPayloadBuilder
-from aba_optimiser.training.tracking.workers.screening import OutlierScreener
-from aba_optimiser.training.tracking.workers.setup import WorkerRuntimeMetadata, WorkerSetupHelper
-from aba_optimiser.training.tracking.workers.uncertainty_drain import drain_uncertainty
-from aba_optimiser.workers import TrackingData, WorkerConfig
-from aba_optimiser.workers.common import KickPlane, PrecomputedTrackingWeights, UncertaintyPart
-from aba_optimiser.workers.protocol import STOP, Ack, CommandKind, LossReply
-from aba_optimiser.workers.tracking import TrackingWorker
+from aba_optimiser.fitting.pool import WorkerPool
+from aba_optimiser.fitting.protocol import STOP, Ack, CommandKind, LossReply
+from aba_optimiser.fitting.worker import KickPlane, WorkerConfig
+from aba_optimiser.machine.accelerators import PSB
+from aba_optimiser.tracking.config.tracking import TrackingPlan
+from aba_optimiser.tracking.data_manager import FileTracks
+from aba_optimiser.tracking.dispatch.payloads import WorkerPayloadBuilder
+from aba_optimiser.tracking.dispatch.screening import OutlierScreener
+from aba_optimiser.tracking.dispatch.setup import WorkerRuntimeMetadata, WorkerSetupHelper
+from aba_optimiser.tracking.session import TrackingSession
+from aba_optimiser.tracking.uncertainty import UncertaintyPart, drain_uncertainty
+from aba_optimiser.tracking.worker import PrecomputedTrackingWeights, TrackingData, TrackingWorker
 
 if TYPE_CHECKING:
     from pathlib import Path

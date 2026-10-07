@@ -7,8 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from aba_optimiser.workers.closed_twiss import weighted_loss_gradient_hessian
-from aba_optimiser.workers.common import ObservableKind
+from aba_optimiser.poco.workers.closed_twiss import ObservableKind, weighted_loss_gradient_hessian
 
 SCALE = 5e13
 

@@ -1,18 +1,16 @@
-"""MachineSetup against a real MAD-NG model of the LHC beam-1 arc 12."""
+"""MachineSetup and the tracking BPM ranges against a real MAD-NG model of the LHC beam-1 arc 12."""
 
 from __future__ import annotations
 
 import pytest
 
-from aba_optimiser.accelerators import LHC
 from aba_optimiser.config import SimulationConfig
-from aba_optimiser.training.config.models import (
-    MeasurementConfig,
-    MeasurementDetails,
-    OutputConfig,
-    SequenceConfig,
-)
-from aba_optimiser.training.machine_setup import MachineSetup
+from aba_optimiser.fitting.config import OutputConfig, SequenceConfig
+from aba_optimiser.fitting.setup import MachineSetup
+from aba_optimiser.machine.accelerators import LHC
+from aba_optimiser.tracking.config.models import MeasurementConfig, MeasurementDetails
+from aba_optimiser.tracking.config.tracking import TrackingPlan
+from aba_optimiser.tracking.ranges import resolve_bpm_ranges
 
 START, END = "BPM.9R1.B1", "BPM.9L2.B1"
 KNOB = "MQ.11R1.B1.dk1l"  # a quadrupole inside START/END
@@ -25,13 +23,10 @@ def lhc(seq_b1):
 
 
 def _setup(accelerator, magnet_range=f"{START}/{END}", **kwargs) -> MachineSetup:
-    start, end = magnet_range.split("/")
     return MachineSetup(
         accelerator,
         SimulationConfig(num_workers=1, num_batches=1),
         SequenceConfig(magnet_range),
-        bpm_start_points=[start],
-        bpm_end_points=[end],
         output_config=OutputConfig(write_tensorboard_logs=False),
         **kwargs,
     )
@@ -87,14 +82,15 @@ def test_bpm_points_are_filtered_and_the_fixed_window_set(lhc) -> None:
         lhc,
         SimulationConfig(num_workers=1, num_batches=1, use_fixed_bpm=True),
         SequenceConfig(f"{START}/{END}", bad_bpms=["BPM.10R1.B1"]),
-        bpm_start_points=[START, "BPM.10R1.B1", "BPM.9L1.B1"],
-        bpm_end_points=[END],
         output_config=OutputConfig(write_tensorboard_logs=False),
     )
     try:
+        ranges = resolve_bpm_ranges(
+            setup, TrackingPlan(), [START, "BPM.10R1.B1", "BPM.9L1.B1"], [END]
+        )
         # The bad BPM and the one outside the range are dropped.
-        assert setup.start_bpms == [START]
-        assert (setup.fixed_start, setup.fixed_end) == (START, END)
+        assert ranges.start_bpms == [START]
+        assert (ranges.fixed_start, ranges.fixed_end) == (START, END)
     finally:
         setup.close()
 

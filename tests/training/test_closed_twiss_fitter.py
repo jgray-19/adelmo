@@ -55,20 +55,19 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from aba_optimiser.accelerators import PSB
-from aba_optimiser.mad import GradientDescentMadInterface
-from aba_optimiser.mad.scripts import CLOSED_TWISS_INIT, PYTHON_IN_MAD
+from aba_optimiser.fitting.config import SequenceConfig
+from aba_optimiser.fitting.pool import WorkerPool
+from aba_optimiser.fitting.protocol import Start
+from aba_optimiser.fitting.reduction import reduce_replies
+from aba_optimiser.machine.accelerators import PSB
+from aba_optimiser.machine.mad import GradientDescentMadInterface
+from aba_optimiser.machine.mad.scripts import CLOSED_TWISS_INIT, PYTHON_IN_MAD
 from aba_optimiser.poco import (
     DEFAULT_OBSERVABLES,
     ClosedTwissFitter,
     LevenbergMarquardtConfig,
 )
-from aba_optimiser.training.config.models import SequenceConfig
-from aba_optimiser.training.pool import WorkerPool
-from aba_optimiser.training.reduction import reduce_replies
-from aba_optimiser.workers import ClosedTwissWorker
-from aba_optimiser.workers.closed_twiss import read_orbit_only
-from aba_optimiser.workers.protocol import Start
+from aba_optimiser.poco.workers.closed_twiss import ClosedTwissWorker, read_orbit_only
 
 if TYPE_CHECKING:
     from pathlib import Path

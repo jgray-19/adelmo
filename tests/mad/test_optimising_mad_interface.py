@@ -12,9 +12,9 @@ import numpy as np
 import pytest
 from pymadng_utils.io.utils import read_knobs
 
-from aba_optimiser.accelerators import LHC, PSB
-from aba_optimiser.mad import merge_machine_states
-from aba_optimiser.mad.optimising_mad_interface import (
+from aba_optimiser.machine.accelerators import LHC, PSB
+from aba_optimiser.machine.mad import merge_machine_states
+from aba_optimiser.machine.mad.optimising_mad_interface import (
     GenericMadInterface,
     GradientDescentMadInterface,
 )

@@ -38,22 +38,22 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
-from aba_optimiser.accelerators import PSB
 from aba_optimiser.config import SimulationConfig
-from aba_optimiser.mad import GradientDescentMadInterface
-from aba_optimiser.mad.scripts import CLOSED_TWISS_INIT, PYTHON_IN_MAD
-from aba_optimiser.workers import (
-    ClosedTwissData,
-    ClosedTwissWorker,
-    Observable,
-    WorkerConfig,
-)
-from aba_optimiser.workers.closed_orbit import (
+from aba_optimiser.fitting.worker import WorkerConfig
+from aba_optimiser.machine.accelerators import PSB
+from aba_optimiser.machine.mad import GradientDescentMadInterface
+from aba_optimiser.machine.mad.scripts import CLOSED_TWISS_INIT, PYTHON_IN_MAD
+from aba_optimiser.poco.workers.closed_orbit import (
     ClosedOrbitMeasurementData,
     ClosedOrbitSeriesData,
     ClosedOrbitWorker,
 )
-from aba_optimiser.workers.closed_twiss import read_orbit_only
+from aba_optimiser.poco.workers.closed_twiss import (
+    ClosedTwissData,
+    ClosedTwissWorker,
+    Observable,
+    read_orbit_only,
+)
 
 from .test_closed_twiss_fitter import DELTAS, _fake_measurement, _fit, _knob_names
 

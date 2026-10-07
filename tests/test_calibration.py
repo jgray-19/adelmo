@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from aba_optimiser.calibration import (
+from aba_optimiser.poco.calibration import (
     CalibrationBlocks,
     add_series,
     apply_prior,

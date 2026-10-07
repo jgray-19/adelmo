@@ -8,7 +8,7 @@ import pytest
 from threadpoolctl import threadpool_info, threadpool_limits
 
 from aba_optimiser.config import SimulationConfig
-from aba_optimiser.workers.abstract_worker import AbstractWorker
+from aba_optimiser.fitting.worker import AbstractWorker
 
 
 def _blas_threads() -> set[int]:

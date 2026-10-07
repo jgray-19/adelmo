@@ -6,11 +6,10 @@ import multiprocessing as mp
 
 import numpy as np
 
-from aba_optimiser.accelerators import PSB
 from aba_optimiser.config import SimulationConfig
-from aba_optimiser.workers import TrackingData, WorkerConfig
-from aba_optimiser.workers.common import PrecomputedTrackingWeights
-from aba_optimiser.workers.tracking import TrackingWorker
+from aba_optimiser.fitting.worker import WorkerConfig
+from aba_optimiser.machine.accelerators import PSB
+from aba_optimiser.tracking.worker import PrecomputedTrackingWeights, TrackingData, TrackingWorker
 
 
 def _worker(tmp_path, conn) -> TrackingWorker:

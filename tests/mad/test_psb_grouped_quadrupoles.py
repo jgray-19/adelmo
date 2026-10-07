@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from aba_optimiser.accelerators import PSB
-from aba_optimiser.mad import GradientDescentMadInterface
+from aba_optimiser.machine.accelerators import PSB
+from aba_optimiser.machine.mad import GradientDescentMadInterface
 
 if TYPE_CHECKING:
     from pathlib import Path

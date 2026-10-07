@@ -25,18 +25,11 @@ from xtrack_tools.monitors import (
 from xtrack_tools.tracking import run_tracking, run_tracking_without_ac_dipole
 
 from aba_optimiser.config import OptimiserConfig, SimulationConfig
-from aba_optimiser.mad import merge_machine_states
-from aba_optimiser.training.config.helpers import create_arc_measurement_config
-from aba_optimiser.training.config.models import (
-    OutputConfig,
-    SequenceConfig,
-)
-from aba_optimiser.training.tracking.fitter import (
-    ArcByArcFitter,
-    FitterOptions,
-    TrackingFitter,
-)
-from aba_optimiser.training.tracking.workers.screening import OutlierScreener
+from aba_optimiser.fitting.config import OutputConfig, SequenceConfig
+from aba_optimiser.machine.mad import merge_machine_states
+from aba_optimiser.tracking.config.helpers import create_arc_measurement_config
+from aba_optimiser.tracking.dispatch.screening import OutlierScreener
+from aba_optimiser.tracking.fitter import ArcByArcFitter, FitterOptions, TrackingFitter
 from tests.training.helpers import TRACK_COLUMNS, generate_xsuite_env_with_errors
 
 # Measurement noise assigned to the synthetic tracks' variance columns.
@@ -103,7 +96,7 @@ if TYPE_CHECKING:
 
     import xtrack as xt
 
-    from aba_optimiser.mad.aba_mad_interface import AbaMadInterface
+    from aba_optimiser.machine.mad.aba_mad_interface import AbaMadInterface
 
 
 def _load_mad_twiss_for_tracking(

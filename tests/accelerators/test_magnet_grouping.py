@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from aba_optimiser.accelerators.magnet_grouping import (
+from aba_optimiser.machine.accelerators.magnet_grouping import (
     collapse_psb_grouped_quadrupole_knobs,
     expand_psb_grouped_quadrupole_knobs,
     normalise_lhcbend_magnets,

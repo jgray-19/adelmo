@@ -9,11 +9,11 @@ import numpy as np
 import pytest
 
 from aba_optimiser.config import OptimiserConfig
+from aba_optimiser.fitting.protocol import Evaluate, GradReply, Start, WorkerChannels
 from aba_optimiser.optimisers.adam import AdamOptimiser
-from aba_optimiser.training.config.models import CheckpointConfig
-from aba_optimiser.training.sgd.checkpointing import OptimisationCheckpointer
-from aba_optimiser.training.sgd.loop import SGDLoop
-from aba_optimiser.workers.protocol import Evaluate, GradReply, Start, WorkerChannels
+from aba_optimiser.tracking.config.models import CheckpointConfig
+from aba_optimiser.tracking.sgd.checkpointing import OptimisationCheckpointer
+from aba_optimiser.tracking.sgd.loop import SGDLoop
 
 
 def _make_loop(
@@ -263,7 +263,7 @@ def test_epoch_end_hook_note_is_appended_to_the_epoch_log_line(caplog) -> None:
     def hook(_knobs: dict[str, float], _best: dict[str, float]) -> str:
         return next(notes)
 
-    with caplog.at_level(logging.INFO, logger="aba_optimiser.training.sgd.loop"):
+    with caplog.at_level(logging.INFO, logger="aba_optimiser.tracking.sgd.loop"):
         loop.run(
             {"k1": 0.0},
             _make_channels(1, n_epochs * n_batches),
@@ -285,7 +285,7 @@ def test_epoch_line_omits_the_note_when_the_hook_returns_none(caplog) -> None:
 
     loop = _make_loop(["k1"], max_epochs=1, gradient_converged_value=-1.0)
 
-    with caplog.at_level(logging.INFO, logger="aba_optimiser.training.sgd.loop"):
+    with caplog.at_level(logging.INFO, logger="aba_optimiser.tracking.sgd.loop"):
         loop.run(
             {"k1": 0.0},
             _make_channels(1, 1),

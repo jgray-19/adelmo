@@ -21,7 +21,7 @@ from tests.training.controller_test_utils import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from aba_optimiser.mad.aba_mad_interface import AbaMadInterface
+    from aba_optimiser.machine.mad.aba_mad_interface import AbaMadInterface
 
 
 pytestmark = pytest.mark.serial

@@ -26,8 +26,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from aba_optimiser.accelerators import PSB
-from aba_optimiser.mad import GradientDescentMadInterface
+from aba_optimiser.machine.accelerators import PSB
+from aba_optimiser.machine.mad import GradientDescentMadInterface
 from aba_optimiser.momentum_reference import (
     ORBIT_AND_PHASE,
     closed_orbit_at,

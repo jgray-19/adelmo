@@ -19,7 +19,7 @@ requirements:
    free quadrupole knobs in an orbit-only fit worsen the result by ~2.6x. Phase
    advance responds to gradients; with phase included the same knobs improve it ~4x.
 3. **More than one momentum.** At a single momentum the per-magnet Jacobians are
-   degenerate; see :class:`~aba_optimiser.workers.common.ClosedTwissData`.
+   degenerate; see :class:`~aba_optimiser.poco.workers.closed_twiss.ClosedTwissData`.
 
 Observables
 -----------
@@ -55,13 +55,13 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from aba_optimiser.mad import GradientDescentMadInterface
-from aba_optimiser.mad.machine_state import resolve_machine_state
+from aba_optimiser.fitting.config import SequenceConfig
+from aba_optimiser.machine.mad import GradientDescentMadInterface
+from aba_optimiser.machine.mad.machine_state import resolve_machine_state
 from aba_optimiser.poco import (
     ClosedTwissFitter,
     LevenbergMarquardtConfig,
 )
-from aba_optimiser.training.config.models import SequenceConfig
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -69,8 +69,8 @@ if TYPE_CHECKING:
 
     import pandas as pd
 
-    from aba_optimiser.accelerators.base import Accelerator
-    from aba_optimiser.training.config.models import OutputConfig
+    from aba_optimiser.fitting.config import OutputConfig
+    from aba_optimiser.machine.accelerators.base import Accelerator
 
 LOGGER = logging.getLogger(__name__)
 

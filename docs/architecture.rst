@@ -11,21 +11,22 @@ the main process sums their replies and updates the knobs.
 
 There are two fitting engines, built the same way:
 
-- **Tracking** (``training.tracking``): ``TrackingFitter`` and its subclasses
+- **Tracking** (``tracking``): ``TrackingFitter`` and its subclasses
   ``ArcByArcFitter``, ``KickerFitter`` and ``ACDMarkerFitter`` fit
-  turn-by-turn data with mini-batch gradient descent (Adam or L-BFGS, ``training.sgd``).
+  turn-by-turn data with mini-batch gradient descent (Adam or L-BFGS, ``tracking.sgd``).
 - **POCO** (``poco``): ``ClosedOrbitFitter``, ``ClosedTwissFitter`` and
   ``CalibratedClosedOrbitFitter`` fit closed-orbit and closed-twiss data with
   Levenberg-Marquardt (``poco.lm_loop``).
 
-Both compose a ``MachineSetup`` (``training.machine_setup``): the MAD-NG model, the
-knobs and their starting values, the BPM ranges, the output settings and the one
-``SimulationConfig`` every other part reads.
+Both compose a ``MachineSetup`` (``fitting.setup``): the MAD-NG model and its BPMs,
+the knobs and their starting values, the output settings and the one
+``SimulationConfig`` every other part reads. A tracking fit adds its BPM ranges
+(``tracking.ranges``).
 
 Worker protocol
 ---------------
 
-Messages are typed dataclasses in ``workers.protocol``. Every worker runs the same
+Messages are typed dataclasses in ``fitting.protocol``. Every worker runs the same
 loop, ``AbstractWorker.run``:
 
 1. Receive ``Start(knobs)`` and build the MAD-NG session.
@@ -38,12 +39,12 @@ loop, ``AbstractWorker.run``:
 A worker sends exactly one reply per request. A failure sends one ``ErrorReply``
 instead, and the worker exits without sending anything else; the main process raises
 it. A NaN loss marks a worker that lost its particles or closed orbit: it is left out
-of the sums and of the averaged loss (``training.reduction.reduce_replies``).
+of the sums and of the averaged loss (``fitting.reduction.reduce_replies``).
 
 Run lifecycle
 -------------
 
-``training.lifecycle.run_with_workers`` gives every fitter the same shape: run the
+``fitting.lifecycle.run_with_workers`` gives every fitter the same shape: run the
 body; on Ctrl-C return the best result so far; always stop the workers and close the
 TensorBoard writer. For a tracking fit the body is:
 
@@ -55,7 +56,7 @@ TensorBoard writer. For a tracking fit the body is:
    each; score the held-out validation loss; keep the knobs with the lowest loss
    (validation when available); stop on a converged loss or gradient.
 4. Set the workers to the best knobs and stop them; their uncertainty parts give
-   ``Cov = A⁻¹ B A⁻¹`` (``workers.common.sandwich_uncertainties``).
+   ``Cov = A⁻¹ B A⁻¹`` (``fitting.uncertainty.sandwich_uncertainties``).
 
 Each fit returns a ``FitResult``: knobs, 1-sigma uncertainties keyed by the same knob
 names, and ``FitDiagnostics`` (why and after how many iterations it stopped).
@@ -63,31 +64,39 @@ names, and ``FitDiagnostics`` (why and after how many iterations it stopped).
 Package layout
 --------------
 
-``aba_optimiser.accelerators``
-    Machine definitions (``LHC``, ``PSB``, ``SPS``, ``FCC``): knob families, BPM
-    pattern and tune configuration.
-``aba_optimiser.mad``
-    MAD-NG interfaces. ``GenericMadInterface`` builds the model;
-    ``GradientDescentMadInterface`` adds the optimisation knobs and derivatives;
-    ``machine_state`` handles fixed machine-state inputs.
-``aba_optimiser.training``
-    ``machine_setup``, ``pool``, ``lifecycle``, ``reduction`` and ``results`` are
-    shared by both engines. ``training.tracking`` holds the tracking fitters, the
-    worker session and data manager, and ``training.tracking.workers`` the payload
-    construction, turn planning, outlier screening and uncertainty drain.
-    ``training.sgd`` holds the SGD loop, learning-rate schedule and checkpointing.
+Imports only point down this list; the two engines never import each other
+(``tests/test_package_layers.py`` checks it).
+
+``aba_optimiser.momentum_reference``
+    Momentum reference from blank measurements; uses both engines.
+``aba_optimiser.tracking``
+    The tracking engine: fitters, ``TrackingSession``, BPM ranges, ``DataManager``,
+    the tracking worker and its uncertainty parts. ``tracking.dispatch`` builds the
+    worker payloads, plans turns and screens outliers; ``tracking.sgd`` holds the SGD
+    loop, learning-rate schedule and checkpointing; ``tracking.config`` the
+    measurement, kicker and checkpoint settings and the tracking plans.
 ``aba_optimiser.poco``
-    Levenberg-Marquardt fitters for closed-orbit and closed-twiss data.
-``aba_optimiser.workers``
-    The worker protocol and base class, and the tracking, closed-twiss, closed-orbit
-    and calibrated closed-orbit workers.
+    The POCO engine: Levenberg-Marquardt fitters for closed-orbit and closed-twiss
+    data, priors, BPM-gain and corrector calibration, and their workers
+    (``poco.workers``).
+``aba_optimiser.fitting``
+    What both engines share: ``MachineSetup``, ``SequenceConfig`` and
+    ``OutputConfig``, the worker protocol and base worker, the shared-memory
+    reference, the worker pool, run lifecycle, reply reduction, loss weights,
+    uncertainties and ``FitResult``.
 ``aba_optimiser.optimisers``
     Adam, L-BFGS and Levenberg-Marquardt.
-``aba_optimiser.measurements``, ``aba_optimiser.noise``
+``aba_optimiser.machine``
+    ``machine.accelerators``: machine definitions (``LHC``, ``PSB``, ``SPS``,
+    ``FCC``), knob families, BPM pattern and tune configuration. ``machine.mad``: the
+    MAD-NG interfaces; ``GenericMadInterface`` builds the model,
+    ``GradientDescentMadInterface`` adds the optimisation knobs and derivatives, and
+    ``machine_state`` handles fixed machine-state inputs.
+``aba_optimiser.measurements``
     Measurement preparation shared by the PSB and LHC workflows: reconstruction,
-    ACD marker rows, BPM variances.
-``aba_optimiser.analysis``, ``aba_optimiser.calibration``
-    Degeneracy checks and BPM-gain and corrector calibration.
+    ACD marker rows, BPM noise and variances.
+``aba_optimiser.analysis``
+    Degeneracy checks.
 
 Knob conventions
 ----------------

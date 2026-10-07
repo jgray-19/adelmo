@@ -12,18 +12,20 @@ Primary Entry Points
    :toctree: _autosummary
    :nosignatures:
 
-   aba_optimiser.accelerators.Accelerator
-   aba_optimiser.accelerators.LHC
-   aba_optimiser.accelerators.PSB
-   aba_optimiser.accelerators.SPS
+   aba_optimiser.machine.accelerators.Accelerator
+   aba_optimiser.machine.accelerators.LHC
+   aba_optimiser.machine.accelerators.PSB
+   aba_optimiser.machine.accelerators.SPS
    aba_optimiser.config.OptimiserConfig
    aba_optimiser.config.SimulationConfig
-   aba_optimiser.training.ArcByArcFitter
-   aba_optimiser.training.ACDMarkerFitter
-   aba_optimiser.training.KickerFitter
-   aba_optimiser.training.MeasurementConfig
-   aba_optimiser.training.SequenceConfig
-   aba_optimiser.training.OutputConfig
+   aba_optimiser.tracking.ArcByArcFitter
+   aba_optimiser.tracking.ACDMarkerFitter
+   aba_optimiser.tracking.KickerFitter
+   aba_optimiser.tracking.FitterOptions
+   aba_optimiser.tracking.MeasurementConfig
+   aba_optimiser.fitting.config.SequenceConfig
+   aba_optimiser.fitting.config.OutputConfig
+   aba_optimiser.fitting.results.FitResult
 
 
 Accelerators And Configuration
@@ -32,11 +34,12 @@ Accelerators And Configuration
 .. autosummary::
    :toctree: _autosummary
 
-   aba_optimiser.accelerators
-   aba_optimiser.accelerators.base
-   aba_optimiser.accelerators.lhc
-   aba_optimiser.accelerators.psb
-   aba_optimiser.accelerators.sps
+   aba_optimiser.machine
+   aba_optimiser.machine.accelerators
+   aba_optimiser.machine.accelerators.base
+   aba_optimiser.machine.accelerators.lhc
+   aba_optimiser.machine.accelerators.psb
+   aba_optimiser.machine.accelerators.sps
    aba_optimiser.config
 
 
@@ -46,10 +49,10 @@ MAD Interface Layer
 .. autosummary::
    :toctree: _autosummary
 
-   aba_optimiser.mad
-   aba_optimiser.mad.aba_mad_interface
-   aba_optimiser.mad.optimising_mad_interface
-   aba_optimiser.mad.machine_state
+   aba_optimiser.machine.mad
+   aba_optimiser.machine.mad.aba_mad_interface
+   aba_optimiser.machine.mad.optimising_mad_interface
+   aba_optimiser.machine.mad.machine_state
 
 
 Closed-Orbit Fitting (POCO)
@@ -64,9 +67,11 @@ Closed-Orbit Fitting (POCO)
    aba_optimiser.poco.fitter
    aba_optimiser.poco.lm_loop
    aba_optimiser.poco.prior
-   aba_optimiser.workers.closed_orbit
-   aba_optimiser.workers.closed_twiss
-   aba_optimiser.workers.calibrated_closed_orbit
+   aba_optimiser.poco.calibration
+   aba_optimiser.poco.workers
+   aba_optimiser.poco.workers.closed_orbit
+   aba_optimiser.poco.workers.closed_twiss
+   aba_optimiser.poco.workers.calibrated
 
 
 Tracking Fits
@@ -75,49 +80,45 @@ Tracking Fits
 .. autosummary::
    :toctree: _autosummary
 
-   aba_optimiser.training
-   aba_optimiser.training.tracking.fitter
-   aba_optimiser.training.tracking.session
-   aba_optimiser.training.tracking.data_manager
-   aba_optimiser.training.tracking.workers.payloads
-   aba_optimiser.training.tracking.workers.screening
-   aba_optimiser.training.tracking.workers.setup
-   aba_optimiser.training.tracking.workers.turn_planner
-   aba_optimiser.training.tracking.workers.uncertainty_drain
-   aba_optimiser.training.sgd.loop
-   aba_optimiser.training.sgd.scheduler
-   aba_optimiser.training.sgd.checkpointing
-   aba_optimiser.training.config
-   aba_optimiser.training.config.helpers
-   aba_optimiser.training.config.models
-   aba_optimiser.training.config.tracking
+   aba_optimiser.tracking
+   aba_optimiser.tracking.fitter
+   aba_optimiser.tracking.session
+   aba_optimiser.tracking.ranges
+   aba_optimiser.tracking.data_manager
+   aba_optimiser.tracking.worker
+   aba_optimiser.tracking.dispatch
+   aba_optimiser.tracking.dispatch.payloads
+   aba_optimiser.tracking.dispatch.screening
+   aba_optimiser.tracking.dispatch.setup
+   aba_optimiser.tracking.dispatch.turn_planner
+   aba_optimiser.tracking.uncertainty
+   aba_optimiser.tracking.sgd.loop
+   aba_optimiser.tracking.sgd.scheduler
+   aba_optimiser.tracking.sgd.checkpointing
+   aba_optimiser.tracking.config
+   aba_optimiser.tracking.config.helpers
+   aba_optimiser.tracking.config.models
+   aba_optimiser.tracking.config.tracking
 
 
-Shared Fitting Runtime
-----------------------
-
-.. autosummary::
-   :toctree: _autosummary
-
-   aba_optimiser.training.machine_setup
-   aba_optimiser.training.pool
-   aba_optimiser.training.lifecycle
-   aba_optimiser.training.reduction
-   aba_optimiser.training.results
-
-
-Workers
--------
+Shared Fitting Base
+-------------------
 
 .. autosummary::
    :toctree: _autosummary
 
-   aba_optimiser.workers
-   aba_optimiser.workers.protocol
-   aba_optimiser.workers.abstract_worker
-   aba_optimiser.workers.common
-   aba_optimiser.workers.shared_reference
-   aba_optimiser.workers.tracking
+   aba_optimiser.fitting
+   aba_optimiser.fitting.setup
+   aba_optimiser.fitting.config
+   aba_optimiser.fitting.protocol
+   aba_optimiser.fitting.worker
+   aba_optimiser.fitting.shared_reference
+   aba_optimiser.fitting.pool
+   aba_optimiser.fitting.lifecycle
+   aba_optimiser.fitting.reduction
+   aba_optimiser.fitting.weights
+   aba_optimiser.fitting.uncertainty
+   aba_optimiser.fitting.results
 
 
 Optimisers And Numerical Helpers
@@ -144,3 +145,4 @@ Measurement Preparation
    aba_optimiser.measurements.reconstruction
    aba_optimiser.measurements.reference
    aba_optimiser.measurements.variances
+   aba_optimiser.measurements.noise

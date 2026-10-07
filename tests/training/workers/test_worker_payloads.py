@@ -10,14 +10,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from aba_optimiser.accelerators import PSB
-from aba_optimiser.training.tracking.data_manager import FileTracks
-from aba_optimiser.training.tracking.workers.payloads import (
-    WorkerPayloadBuilder,
-    observation_turn_offsets,
-)
-from aba_optimiser.training.tracking.workers.setup import WorkerObservationPlan, WorkerRangeSpec
-from aba_optimiser.workers.common import KickPlane, TrackingData, WorkerConfig
+from aba_optimiser.fitting.worker import KickPlane, WorkerConfig
+from aba_optimiser.machine.accelerators import PSB
+from aba_optimiser.tracking.data_manager import FileTracks
+from aba_optimiser.tracking.dispatch.payloads import WorkerPayloadBuilder, observation_turn_offsets
+from aba_optimiser.tracking.dispatch.setup import WorkerObservationPlan, WorkerRangeSpec
+from aba_optimiser.tracking.worker import TrackingData
 
 MARKERS = ["BR3.BPM1L3", "BR3.BPM2L3", "BR3.BPM3L3"]
 

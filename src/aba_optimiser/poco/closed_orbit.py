@@ -6,7 +6,8 @@ import logging
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from aba_optimiser.mad.machine_state import resolve_machine_state
+from aba_optimiser.fitting.protocol import Evaluate, GradReply, distribute, machine_worker_limit
+from aba_optimiser.machine.mad.machine_state import resolve_machine_state
 from aba_optimiser.poco.fitter import (
     LevenbergMarquardtConfig,
     LMFitter,
@@ -14,12 +15,11 @@ from aba_optimiser.poco.fitter import (
     load_measurement,
     stamp_global_normalisation,
 )
-from aba_optimiser.workers.closed_orbit import (
+from aba_optimiser.poco.workers.closed_orbit import (
     ClosedOrbitMeasurementData,
     ClosedOrbitSeriesData,
     ClosedOrbitWorker,
 )
-from aba_optimiser.workers.protocol import Evaluate, GradReply, distribute, machine_worker_limit
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -27,8 +27,8 @@ if TYPE_CHECKING:
 
     import pandas as pd
 
-    from aba_optimiser.accelerators import Accelerator
-    from aba_optimiser.training.config.models import OutputConfig, SequenceConfig
+    from aba_optimiser.fitting.config import OutputConfig, SequenceConfig
+    from aba_optimiser.machine.accelerators import Accelerator
 
 LOGGER = logging.getLogger(__name__)
 CLOSED_ORBIT_OBSERVABLES = ("x", "y")

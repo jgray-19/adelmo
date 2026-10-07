@@ -18,14 +18,14 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
-from aba_optimiser.accelerators import PSB
+from aba_optimiser.fitting.config import SequenceConfig
+from aba_optimiser.machine.accelerators import PSB
 from aba_optimiser.poco import (
     ClosedOrbitMeasurement,
     ClosedOrbitSeries,
     LevenbergMarquardtConfig,
 )
 from aba_optimiser.poco.calibrated import CalibratedClosedOrbitFitter
-from aba_optimiser.training.config.models import SequenceConfig
 
 from .test_closed_orbit_machine_state import KWARGS, STATES, TRIM, _orbit, _quad_globals, _truth
 

@@ -60,19 +60,23 @@ pip install git+https://github.com/jgray-19/xtrack_tools.git
 ## Usage
 
 A tracking fit is configured with an accelerator and four configuration objects,
-then run with `fitter.run()`, which returns the fitted knob values and their
-uncertainties.
+then run with `fitter.run()`. It returns a `FitResult`: the fitted knob values,
+their 1-sigma uncertainties under the same knob names, and `diagnostics` saying why
+and after how many epochs the fit stopped. Optional settings (starting knobs, true
+strengths for diagnostics, output and checkpoint settings, callbacks) go in a
+`FitterOptions`.
 
 ```python
 from pathlib import Path
 
-from aba_optimiser.accelerators import LHC
 from aba_optimiser.config import OptimiserConfig, SimulationConfig
-from aba_optimiser.training import (
+from aba_optimiser.fitting.config import OutputConfig, SequenceConfig
+from aba_optimiser.machine.accelerators import LHC
+from aba_optimiser.tracking import (
     ArcByArcFitter,
+    FitterOptions,
     MeasurementConfig,
     MeasurementDetails,
-    SequenceConfig,
 )
 
 accelerator = LHC(beam=1, sequence_file="lhcb1.seq", errors={"quad": {"k1"}})
@@ -92,8 +96,10 @@ fitter = ArcByArcFitter(
     measurement_config=MeasurementConfig({Path("measurement.parquet"): MeasurementDetails()}),
     bpm_start_points=["BPM.12R1.B1"],
     bpm_end_points=["BPM.20R1.B1"],
+    options=FitterOptions(output_config=OutputConfig(write_tensorboard_logs=False)),
 )
-knobs, uncertainties = fitter.run()
+result = fitter.run()
+print(result.knobs, result.uncertainties, result.diagnostics.reason)
 ```
 
 Further examples are in `tests/training/`, which exercise each fitter end to end.
@@ -112,6 +118,9 @@ sequence must include the kicker element.
 
 ### Closed-twiss fits
 
+The closed-twiss and closed-orbit fitters live in `aba_optimiser.poco` (Parametric
+Optimisation of Closed Orbits) and return the same `FitResult` as the tracking fitters.
+
 `ClosedTwissFitter` fits knobs so that the model's periodic optics match measured
 closed orbit, beta, phase and dispersion simultaneously, using a single parametric
 MAD-NG `twiss`. It takes `measurements`, a mapping from the measurement momentum `pt` to a
@@ -128,7 +137,7 @@ misalignments observable.
 
 A series is fitted either as an absolute orbit (`absolute_planes`) or as the change
 from the fitter's own `machine_state` to the series' state. `machine_state` accepts a
-dictionary, a knobs file or a TFS corrector table; `aba_optimiser.mad.merge_machine_states`
+dictionary, a knobs file or a TFS corrector table; `aba_optimiser.machine.mad.merge_machine_states`
 combines several. Accepted iterations are recorded in `fitter.history`, and
 `fitter.close()` shuts down the MAD-NG process.
 

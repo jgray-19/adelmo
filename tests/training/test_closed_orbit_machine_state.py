@@ -53,15 +53,15 @@ import pandas as pd
 import pytest
 from pymadng_utils.io.utils import save_knobs
 
-from aba_optimiser.accelerators import PSB
-from aba_optimiser.mad import GradientDescentMadInterface
+from aba_optimiser.fitting.config import SequenceConfig
+from aba_optimiser.machine.accelerators import PSB
+from aba_optimiser.machine.mad import GradientDescentMadInterface
 from aba_optimiser.poco import (
     ClosedOrbitFitter,
     ClosedOrbitMeasurement,
     ClosedOrbitSeries,
     LevenbergMarquardtConfig,
 )
-from aba_optimiser.training.config.models import SequenceConfig
 
 from .test_closed_twiss_fitter import _knob_names
 

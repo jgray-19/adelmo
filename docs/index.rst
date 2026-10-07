@@ -16,9 +16,9 @@ Two families of fit are provided:
      - Entry points
    * - Tracking
      - Turn-by-turn BPM data tracked through the model
-     - :class:`~aba_optimiser.training.ArcByArcFitter`,
-       :class:`~aba_optimiser.training.ACDMarkerFitter`,
-       :class:`~aba_optimiser.training.KickerFitter`
+     - :class:`~aba_optimiser.tracking.ArcByArcFitter`,
+       :class:`~aba_optimiser.tracking.ACDMarkerFitter`,
+       :class:`~aba_optimiser.tracking.KickerFitter`
    * - Closed twiss
      - Closed orbit, phase advance, beta and dispersion
      - :class:`~aba_optimiser.poco.ClosedOrbitFitter`,

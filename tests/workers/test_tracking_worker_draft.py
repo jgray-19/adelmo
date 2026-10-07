@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from aba_optimiser.mad.scripts import dump_debug_script
-from aba_optimiser.workers.tracking import TrackingWorker, active_observables
+from aba_optimiser.machine.mad.scripts import dump_debug_script
+from aba_optimiser.tracking.worker import TrackingWorker, active_observables
 
 
 def _build_worker(*, include_momentum: bool = True) -> TrackingWorker:

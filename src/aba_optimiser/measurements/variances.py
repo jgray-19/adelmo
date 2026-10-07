@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from aba_optimiser.noise import assign_bpm_variances
+from aba_optimiser.measurements.noise import assign_bpm_variances
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

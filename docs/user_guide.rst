@@ -15,7 +15,7 @@ with ``fitter.run()``, which returns the fitted knobs and their uncertainties.
 
    * - Object
      - Role
-   * - :class:`~aba_optimiser.accelerators.Accelerator` subclass
+   * - :class:`~aba_optimiser.machine.accelerators.Accelerator` subclass
      - Machine definition: sequence file, kinetic energy, BPM pattern and the knob
        families to fit (``errors``, ``misalignments``).
    * - :class:`~aba_optimiser.config.OptimiserConfig`
@@ -23,10 +23,10 @@ with ``fitter.run()``, which returns the fitted knobs and their uncertainties.
        convergence criterion.
    * - :class:`~aba_optimiser.config.SimulationConfig`
      - Worker and batch counts, data and validation fractions, outlier screening.
-   * - :class:`~aba_optimiser.training.SequenceConfig`
+   * - :class:`~aba_optimiser.tracking.SequenceConfig`
      - Magnet range exposed to MAD-NG and BPMs to exclude.
-   * - :class:`~aba_optimiser.training.MeasurementConfig`
-     - Measurement files, each with a :class:`~aba_optimiser.training.MeasurementDetails`
+   * - :class:`~aba_optimiser.tracking.MeasurementConfig`
+     - Measurement files, each with a :class:`~aba_optimiser.tracking.MeasurementDetails`
        (MAD interface options, momentum offset, first BPM).
 
 Fitters
@@ -39,18 +39,18 @@ Fitters
    * - Fitter
      - Initial conditions
      - Tracking
-   * - :class:`~aba_optimiser.training.ArcByArcFitter`
+   * - :class:`~aba_optimiser.tracking.ArcByArcFitter`
      - BPM at the start of each range
      - Forward and backward over the ``bpm_start_points`` x ``bpm_end_points`` ranges.
        Set ``acd_excited=True`` for AC-dipole data.
-   * - :class:`~aba_optimiser.training.ACDMarkerFitter`
+   * - :class:`~aba_optimiser.tracking.ACDMarkerFitter`
      - AC-dipole ``before``/``after`` markers
      - Bidirectional; the whole ring is observed.
-   * - :class:`~aba_optimiser.training.KickerFitter`
+   * - :class:`~aba_optimiser.tracking.KickerFitter`
      - Kicker marker
      - One worker, forward only, ``turns_after_kicker`` turns.
 
-``KickerFitter`` requires a :class:`~aba_optimiser.training.KickerConfig`. The
+``KickerFitter`` requires a :class:`~aba_optimiser.tracking.KickerConfig`. The
 measurement data must contain ``x``, ``px``, ``y`` and ``py`` at the kicker marker, and
 the sequence must contain the kicker element.
 
@@ -61,9 +61,9 @@ Example
 
    from pathlib import Path
 
-   from aba_optimiser.accelerators import LHC
+   from aba_optimiser.machine.accelerators import LHC
    from aba_optimiser.config import OptimiserConfig, SimulationConfig
-   from aba_optimiser.training import (
+   from aba_optimiser.tracking import (
        ArcByArcFitter,
        MeasurementConfig,
        MeasurementDetails,
@@ -102,10 +102,10 @@ Optional fitter arguments
 ``optimise_knobs``
     Restrict the fit to a subset of global knob names.
 ``output_config``
-    :class:`~aba_optimiser.training.OutputConfig`: TensorBoard logging, uncertainty
+    :class:`~aba_optimiser.tracking.OutputConfig`: TensorBoard logging, uncertainty
     estimation and log files.
 ``checkpoint_config``
-    :class:`~aba_optimiser.training.CheckpointConfig`: periodic checkpoints and restart.
+    :class:`~aba_optimiser.tracking.CheckpointConfig`: periodic checkpoints and restart.
 ``initial_conditions_callback``
     Epoch-end hook that refreshes the workers' initial conditions.
 ``loss_callback``
@@ -148,7 +148,7 @@ more :class:`~aba_optimiser.poco.ClosedOrbitSeries`.
     series was measured. They are fixed inputs and may differ between series.
     Varying the quadrupole strengths between series makes quadrupole misalignments
     observable. Accepted forms are a dictionary, a knobs file or a TFS corrector
-    table; :func:`aba_optimiser.mad.merge_machine_states` combines several. Setting
+    table; :func:`aba_optimiser.machine.mad.merge_machine_states` combines several. Setting
     ``machine_state`` on the fitter provides a default inherited by every series.
 ``absolute_planes``
     Planes fitted as absolute orbits. The remaining planes are fitted as the change
@@ -172,7 +172,7 @@ Degeneracy analysis
 Gauss-Newton normal matrix at the initial knobs. Near-zero eigenvalues identify knob
 combinations that the data cannot constrain, so the problem can be regularised or the
 knob set reduced before running the fit. Use
-:meth:`~aba_optimiser.training.TrackingFitter.check_degeneracy` on a tracking fitter.
+:meth:`~aba_optimiser.tracking.TrackingFitter.check_degeneracy` on a tracking fitter.
 
 Testing
 -------

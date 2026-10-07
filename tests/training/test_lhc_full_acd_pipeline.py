@@ -38,21 +38,17 @@ from xtrack_tools.acd import run_ac_dipole_tracking
 from xtrack_tools.env import initialise_env
 from xtrack_tools.monitors import process_tracking_data
 
-from aba_optimiser.accelerators import LHC
 from aba_optimiser.config import OptimiserConfig, SimulationConfig
-from aba_optimiser.mad import GradientDescentMadInterface
+from aba_optimiser.fitting.config import OutputConfig, SequenceConfig
+from aba_optimiser.machine.accelerators import LHC
+from aba_optimiser.machine.mad import GradientDescentMadInterface
 from aba_optimiser.measurements.acd_pipeline import (
     ACDOpticsAnalysisConfig,
     run_driven_and_compensated_optics,
 )
 from aba_optimiser.measurements.reference import reconstruction_frame
-from aba_optimiser.training.config.models import (
-    MeasurementConfig,
-    MeasurementDetails,
-    OutputConfig,
-    SequenceConfig,
-)
-from aba_optimiser.training.tracking.fitter import ACDMarkerFitter, FitterOptions
+from aba_optimiser.tracking.config.models import MeasurementConfig, MeasurementDetails
+from aba_optimiser.tracking.fitter import ACDMarkerFitter, FitterOptions
 
 pytest.importorskip("tmom_recon")
 

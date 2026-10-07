@@ -7,16 +7,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from aba_optimiser.accelerators import PSB
 from aba_optimiser.config import OptimiserConfig
-from aba_optimiser.mad import merge_machine_states
-from aba_optimiser.training.config.helpers import create_arc_measurement_config
-from aba_optimiser.training.config.models import (
-    KickerConfig,
-    OutputConfig,
-    SequenceConfig,
-)
-from aba_optimiser.training.tracking.fitter import FitterOptions, KickerFitter
+from aba_optimiser.fitting.config import OutputConfig, SequenceConfig
+from aba_optimiser.machine.accelerators import PSB
+from aba_optimiser.machine.mad import merge_machine_states
+from aba_optimiser.tracking.config.helpers import create_arc_measurement_config
+from aba_optimiser.tracking.config.models import KickerConfig
+from aba_optimiser.tracking.fitter import FitterOptions, KickerFitter
 from tests.training.controller_test_utils import (
     _generate_kicker_track,
     _make_simulation_config_quad,
@@ -26,7 +23,7 @@ from tests.training.controller_test_utils import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from aba_optimiser.mad.aba_mad_interface import AbaMadInterface
+    from aba_optimiser.machine.mad.aba_mad_interface import AbaMadInterface
 
 logger = logging.getLogger(__name__)
 pytestmark = pytest.mark.serial

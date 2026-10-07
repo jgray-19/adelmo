@@ -8,9 +8,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from aba_optimiser.accelerators import PSB
 from aba_optimiser.config import SimulationConfig
-from aba_optimiser.mad import GradientDescentMadInterface
+from aba_optimiser.fitting.protocol import Evaluate, GradReply
+from aba_optimiser.fitting.worker import WorkerConfig
+from aba_optimiser.machine.accelerators import PSB
+from aba_optimiser.machine.mad import GradientDescentMadInterface
 from aba_optimiser.poco import (
     ClosedOrbitMeasurement,
     ClosedOrbitSeries,
@@ -20,13 +22,12 @@ from aba_optimiser.poco.fitter import (
     prior_alphas,
     validate_prior_strengths,
 )
-from aba_optimiser.workers import Observable, WorkerConfig
-from aba_optimiser.workers.closed_orbit import (
+from aba_optimiser.poco.workers.closed_orbit import (
     ClosedOrbitMeasurementData,
     ClosedOrbitSeriesData,
     ClosedOrbitWorker,
 )
-from aba_optimiser.workers.protocol import Evaluate, GradReply
+from aba_optimiser.poco.workers.closed_twiss import Observable
 
 if TYPE_CHECKING:
     from pathlib import Path

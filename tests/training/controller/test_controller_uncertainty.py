@@ -6,22 +6,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from aba_optimiser.mad import merge_machine_states
-from aba_optimiser.training.config.models import OutputConfig
-from aba_optimiser.training.tracking.fitter import (
-    ArcByArcFitter,
-    FitterOptions,
-    TrackingFitter,
-)
-from aba_optimiser.workers.common import (
-    HESSIAN_MIN_EIGENVALUE,
+from aba_optimiser.fitting.config import OutputConfig
+from aba_optimiser.fitting.protocol import Evaluate
+from aba_optimiser.fitting.uncertainty import HESSIAN_MIN_EIGENVALUE, sandwich_uncertainties
+from aba_optimiser.fitting.weights import variance_to_weight
+from aba_optimiser.machine.mad import merge_machine_states
+from aba_optimiser.tracking.fitter import ArcByArcFitter, FitterOptions, TrackingFitter
+from aba_optimiser.tracking.uncertainty import (
     UncertaintyPart,
-    WeightProcessor,
     merge_uncertainty_parts,
     noise_matrix,
-    sandwich_uncertainties,
 )
-from aba_optimiser.workers.protocol import Evaluate
 
 
 def test_sandwich_uncertainties_are_finite_and_non_negative_for_an_indefinite_normal_matrix() -> None:
@@ -139,7 +134,7 @@ def _compute_training_weight_normaliser(ctrl: TrackingFitter) -> float:
             "py": data.momentum_variances[:, :, 1],
         }
         for observable in active:
-            weights = WeightProcessor.variance_to_weight(variances[observable])
+            weights = variance_to_weight(variances[observable])
             if weights.size:
                 global_max = max(global_max, float(np.max(weights)))
 
@@ -153,9 +148,9 @@ def test_controller_worker_hessian_matches_finite_difference_on_reduced_knob_sub
     seq_b1,
     loaded_interface,
 ) -> None:
-    from aba_optimiser.accelerators import LHC
-    from aba_optimiser.training.config.helpers import create_arc_measurement_config
-    from aba_optimiser.training.config.models import SequenceConfig
+    from aba_optimiser.fitting.config import SequenceConfig
+    from aba_optimiser.machine.accelerators import LHC
+    from aba_optimiser.tracking.config.helpers import create_arc_measurement_config
     from tests.training.controller_test_utils import (
         _generate_nonoise_track,
         _make_optimiser_config_quad,
@@ -261,10 +256,10 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
     seq_psb,
     loaded_psb_interface,
 ) -> None:
-    from aba_optimiser.accelerators import PSB
     from aba_optimiser.config import OptimiserConfig
-    from aba_optimiser.training.config.helpers import create_arc_measurement_config
-    from aba_optimiser.training.config.models import SequenceConfig
+    from aba_optimiser.fitting.config import SequenceConfig
+    from aba_optimiser.machine.accelerators import PSB
+    from aba_optimiser.tracking.config.helpers import create_arc_measurement_config
     from tests.training.controller_test_utils import (
         _generate_nonoise_track,
         _make_simulation_config_quad,

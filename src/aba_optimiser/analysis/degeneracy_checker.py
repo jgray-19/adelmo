@@ -11,7 +11,7 @@ on such a problem has no unique minimum: the knobs drift along the flat directio
 with little change in loss.
 
 ``A`` is the matrix already accumulated for parameter uncertainties
-(:func:`aba_optimiser.workers.common.hessian_uncertainties`). Its eigenspectrum at
+(:func:`aba_optimiser.fitting.uncertainty.hessian_uncertainties`). Its eigenspectrum at
 the initial knobs identifies a degenerate fit, and the knob combinations
 responsible, before optimisation, so the user can regularise, remove knobs or add
 independent data.
@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from aba_optimiser.workers.common import hessian_uncertainties
+from aba_optimiser.fitting.uncertainty import hessian_uncertainties
 
 # Default relative tolerance for calling a (scaled) eigenvalue "null". Scaled
 # eigenvalues are O(1) for well-constrained directions, so this compares against

@@ -1,4 +1,4 @@
-"""Tests for tracking-mode planning in aba_optimiser.training.config.tracking."""
+"""Tests for tracking-mode planning in aba_optimiser.tracking.config.tracking."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from aba_optimiser.accelerators import PSB
 from aba_optimiser.config import SimulationConfig
-from aba_optimiser.training.config.models import KickerConfig
-from aba_optimiser.training.config.tracking import (
+from aba_optimiser.machine.accelerators import PSB
+from aba_optimiser.tracking.config.models import KickerConfig
+from aba_optimiser.tracking.config.tracking import (
     ACDArcByArcTrackingPlan,
     RangeContext,
     TrackingPlan,

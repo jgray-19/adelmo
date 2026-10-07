@@ -6,17 +6,10 @@ import pandas as pd
 import pytest
 
 from aba_optimiser.config import SimulationConfig
-from aba_optimiser.training.config.tracking import (
-    TrackingPlan,
-    _boundary_turns_for_track,
-)
-from aba_optimiser.training.tracking.data_manager import DataManager, _marker_order
-from aba_optimiser.training.tracking.workers.turn_planner import (
-    allocate_batches_per_file,
-)
-from aba_optimiser.training.tracking.workers.turn_planner import (
-    group_turns_by_file as _group_turns_by_file,
-)
+from aba_optimiser.tracking.config.tracking import TrackingPlan, _boundary_turns_for_track
+from aba_optimiser.tracking.data_manager import DataManager, _marker_order
+from aba_optimiser.tracking.dispatch.turn_planner import allocate_batches_per_file
+from aba_optimiser.tracking.dispatch.turn_planner import group_turns_by_file as _group_turns_by_file
 
 _DEFAULT_TRACKING_PLAN = TrackingPlan()
 

@@ -16,8 +16,8 @@ import tfs
 from omc3.model_creator import create_instance_and_model
 from pymadng_utils.madx.make_sequence import make_madx_sequence
 
-from aba_optimiser.accelerators import LHC, PSB
-from aba_optimiser.mad.aba_mad_interface import AbaMadInterface
+from aba_optimiser.machine.accelerators import LHC, PSB
+from aba_optimiser.machine.mad.aba_mad_interface import AbaMadInterface
 
 if TYPE_CHECKING:
     from collections.abc import Generator

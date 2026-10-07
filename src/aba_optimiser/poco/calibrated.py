@@ -1,4 +1,4 @@
-"""Closed-orbit fitter that also fits BPM gains and corrector kick calibrations (see :mod:`aba_optimiser.calibration`)."""
+"""Closed-orbit fitter that also fits BPM gains and corrector kick calibrations (see :mod:`aba_optimiser.poco.calibration`)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from aba_optimiser.calibration import (
+from aba_optimiser.fitting.protocol import Evaluate, GradReply, distribute
+from aba_optimiser.machine.mad.machine_state import resolve_machine_state
+from aba_optimiser.poco.calibration import (
     PLANES,
     CalibrationBlocks,
     CalibrationSpec,
@@ -18,20 +20,18 @@ from aba_optimiser.calibration import (
     corrector_gain_name,
     reduce_blocks,
 )
-from aba_optimiser.mad.machine_state import resolve_machine_state
 from aba_optimiser.poco.closed_orbit import CLOSED_ORBIT_OBSERVABLES, ClosedOrbitFitter
 from aba_optimiser.poco.lm_loop import LMPoint, run_levenberg_marquardt
-from aba_optimiser.workers.calibrated_closed_orbit import CalibratedClosedOrbitWorker
-from aba_optimiser.workers.protocol import Evaluate, GradReply, distribute
+from aba_optimiser.poco.workers.calibrated import CalibratedClosedOrbitWorker
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
 
-    from aba_optimiser.accelerators import Accelerator
+    from aba_optimiser.fitting.config import OutputConfig, SequenceConfig
+    from aba_optimiser.machine.accelerators import Accelerator
     from aba_optimiser.optimisers.levenberg_marquardt import LevenbergMarquardtConfig
     from aba_optimiser.poco.closed_orbit import ClosedOrbitSeries
-    from aba_optimiser.training.config.models import OutputConfig, SequenceConfig
 
 LOGGER = logging.getLogger(__name__)
 
