@@ -41,8 +41,8 @@ from aba_optimiser.training.utils import (
     load_tfs_files,
     normalise_true_strengths,
 )
-from aba_optimiser.training.workers.lifecycle import WorkerLifecycleManager
 from aba_optimiser.training.workers.manager import WorkerManager
+from aba_optimiser.training.workers.pool import WorkerPool
 
 __all__ = [
     "ACDArcByArcTrackingPlan",
@@ -66,8 +66,8 @@ __all__ = [
     "TrackingFitter",
     "TrackingModeSetup",
     "TrackingPlan",
-    "WorkerLifecycleManager",
     "WorkerManager",
+    "WorkerPool",
     "WorkerRangeSpec",
     "acd_marker_setup",
     "arc_by_arc_setup",

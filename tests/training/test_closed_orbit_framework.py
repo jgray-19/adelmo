@@ -150,6 +150,7 @@ def test_batched_measurements_keep_distinct_signal_orbits_and_share_only_referen
 
     worker._assign_state = MethodType(send_globals, worker)
     worker._set_pt = MethodType(set_pt, worker)
+    worker._set_co_key = MethodType(lambda self, _mad, _role, _pt: None, worker)
     worker._model_and_jacobian = MethodType(model, worker)
 
     gradient, loss, hessian, normal_matrix = worker.compute_gradients_and_loss(

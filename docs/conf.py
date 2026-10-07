@@ -74,6 +74,7 @@ autodoc_mock_imports = [
 templates_path = ["_templates"]
 exclude_patterns: list[str] = [
     "_build",
+    "reports",
     "Thumbs.db",
     ".DS_Store",
 ]

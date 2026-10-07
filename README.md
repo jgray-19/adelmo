@@ -1,73 +1,25 @@
-# sgd-magnet-tuner
+# aba_optimiser
 
 [![Coverage Status](https://github.com/jgray-19/sgd-magnet-tuner/actions/workflows/coverage.yml/badge.svg)](https://github.com/jgray-19/sgd-magnet-tuner/actions/workflows/coverage.yml)
 [![codecov](https://codecov.io/github/jgray-19/sgd-magnet-tuner/graph/badge.svg?token=Y1KZACDFPL)](https://codecov.io/github/jgray-19/sgd-magnet-tuner)
 
-Tools for optimising accelerator magnet knob strengths using gradient-based
-methods with MAD-NG. This README is short and focused — see the docs for
-full details.
+Estimation of accelerator magnet errors (strengths, misalignments and tilts) from
+beam measurements, using gradient-based optimisation of MAD-NG models.
 
-## Package overview
+Two families of fit are provided:
 
-High-level modules (concise):
+| Fit | Data | Entry points |
+|---|---|---|
+| Tracking | Turn-by-turn BPM data, tracked through the model | `ArcByArcFitter`, `ACDMarkerFitter`, `KickerFitter` |
+| Closed twiss | Closed orbit, phase advance, beta and dispersion | `ClosedOrbitFitter`, `ClosedTwissFitter` |
 
-- `accelerators` / `config` — LHC, PSB and SPS optimiser accelerators and configuration dataclasses
-- `training` — tracking fitters (`ArcByArcFitter`, `ACDMarkerFitter`, `KickerFitter`), data manager and worker orchestration
-- `training_closed_twiss` — Levenberg–Marquardt closed-orbit / optics fitting (`ClosedOrbitFitter`, `ClosedTwissFitter`)
-- `workers` / `mad` — MAD-NG tracking and closed-orbit workers and interfaces
-- `measurements` / `noise` — measurement preparation shared by the PSB and LHC workflows (reconstruction, ACD marker rows, variances)
-- `optimisers` — Adam / AMSGrad / L-BFGS implementations
-- `analysis` / `calibration` — degeneracy checks and BPM-gain / corrector calibration
+Supported machines: LHC, PSB, SPS and FCC.
 
-dp/p ↔ pt conversion comes from `pymadng_utils.physics` (or `accelerator.dp2pt`).
-The LHC measurement workflows live in `lhc_measurements`; the PSB campaign
-entry points live in `psb_md/scripts/optimisation/`.
-
-Use the tests in `tests/training/` as compact examples of real workflows.
-
-### Closed-orbit fits at different machine states
-
-A `ClosedOrbitSeries` can carry a `machine_state`: MAD-X globals (quadrupole
-strengths such as `kbrqf`, corrector kicks such as `kbr3dhz2l4`, tune knobs; a dict or a
-knobs file) at which its
-orbits were measured. They are known inputs, not fitted, and differ freely between
-series, so quadrupole beam-based alignment (fitting `dx`/`dy`) works by changing the
-quadrupole strengths between measurements. Series are fitted either as absolute
-orbits (`absolute_planes=("x", "y")`) or as changes from the fitter's own `machine_state`
-(the reference) to the series' state, e.g. a changed corrector kick, in any mix. `ClosedOrbitFitter(machine_state=...)` sets a
-default every series inherits; it replaces the old `tune_knobs`/`corrector_knobs` arguments.
-`machine_state` is the one name for this everywhere (`GenericMadInterface`, `MeasurementDetails.interface_options`,
-the fitters): a dict, a knobs file, or a TFS corrector table; `aba_optimiser.mad.merge_machine_states` combines several.
-The fitter records its accepted iterations in `fitter.history` and `fitter.close()` shuts down its MAD process. See
-`tests/training/test_closed_orbit_machine_state.py`.
-
-## Dependencies (external projects)
-
-This project uses helper packages maintained in related repositories; install
-them before running the end-to-end workflows:
-
-- xtrack_tools: https://github.com/jgray-19/xtrack_tools
-- tmom-recon:  https://github.com/jgray-19/tmom-recon
-- pymadng-utils: https://github.com/jgray-19/pymadng-utils
-
-Companion documentation for this stack is published under the same GitHub Pages
-account with repository-name paths:
-
-- sgd-magnet-tuner: https://jgray-19.github.io/sgd-magnet-tuner/
-- pymadng-utils: https://jgray-19.github.io/pymadng-utils/
-- tmom-recon: https://jgray-19.github.io/tmom-recon/
-- xtrack_tools: https://jgray-19.github.io/xtrack_tools/
-
-Install via pip from GitHub, for example::
-
-```bash
-pip install git+https://github.com/jgray-19/xtrack_tools.git
-pip install git+https://github.com/jgray-19/tmom-recon.git
-```
+Full documentation: <https://jgray-19.github.io/sgd-magnet-tuner/>
 
 ## Installation
 
-Clone and install in editable mode::
+Requires Python 3.11 or later.
 
 ```bash
 git clone https://github.com/jgray-19/sgd-magnet-tuner.git
@@ -75,56 +27,133 @@ cd sgd-magnet-tuner
 pip install -e .
 ```
 
-For development (tests + docs):
+Optional dependency groups:
+
+| Extra | Contents |
+|---|---|
+| `tracking` | omc3, cpymad, pyarrow, psutil (required by the tracking workflows) |
+| `measurements` | tmom-recon (momentum reconstruction) |
+| `test` | pytest, pytest-cov, pytest-xdist, xtrack-tools |
+| `docs` | Sphinx and theme |
+| `dev` | ruff, pre-commit |
 
 ```bash
-pip install -e .[test,docs,tracking]
+pip install -e ".[test,docs,tracking]"
 ```
 
-## Kicker mode
+### Companion packages
 
-Kicker mode supports single-start tracking where the initial conditions come
-from a kicker marker rather than a BPM. It enforces a single worker/track,
-disables validation payloads, and only tracks forward (no sdir = -1).
+Several workflows depend on companion packages installed from GitHub:
 
-Requirements:
+| Package | Purpose |
+|---|---|
+| [pymadng-utils](https://github.com/jgray-19/pymadng-utils) | Shared accelerator abstractions, dp/p and pt conversion, knob-file I/O |
+| [tmom-recon](https://github.com/jgray-19/tmom-recon) | Transverse momentum and optics reconstruction |
+| [xtrack_tools](https://github.com/jgray-19/xtrack_tools) | Tracking helpers and dataframe conversion (tests) |
 
-- The input data must include the kicker marker name with x, px, y, py columns.
-- The model sequence should include the kicker element so the sequence can be
-	cycled to it.
+```bash
+pip install git+https://github.com/jgray-19/pymadng-utils.git
+pip install git+https://github.com/jgray-19/tmom-recon.git
+pip install git+https://github.com/jgray-19/xtrack_tools.git
+```
 
-Use `KickerFitter` with a `KickerConfig`:
+## Usage
+
+A tracking fit is configured with an accelerator and four configuration objects,
+then run with `fitter.run()`, which returns the fitted knob values and their
+uncertainties.
 
 ```python
-from aba_optimiser.training import KickerConfig, KickerFitter
+from pathlib import Path
 
-fitter = KickerFitter(
+from aba_optimiser.accelerators import LHC
+from aba_optimiser.config import OptimiserConfig, SimulationConfig
+from aba_optimiser.training import (
+    ArcByArcFitter,
+    MeasurementConfig,
+    MeasurementDetails,
+    SequenceConfig,
+)
+
+accelerator = LHC(beam=1, sequence_file="lhcb1.seq", errors={"quad": {"k1"}})
+
+fitter = ArcByArcFitter(
     accelerator=accelerator,
-    optimiser_config=optimiser_config,
-    simulation_config=simulation_config,
-    sequence_config=sequence_config,
-    measurement_config=measurement_config,
-    kicker_config=KickerConfig(kicker_name="KICKER.NAME", turns_after_kicker=1024),
+    optimiser_config=OptimiserConfig(
+        max_epochs=200,
+        warmup_epochs=10,
+        warmup_lr_start=1e-6,
+        max_lr=1e-4,
+        min_lr=1e-6,
+        gradient_converged_value=1e-12,
+    ),
+    simulation_config=SimulationConfig(num_workers=8, num_batches=4),
+    sequence_config=SequenceConfig(magnet_range="$start/$end"),
+    measurement_config=MeasurementConfig({Path("measurement.parquet"): MeasurementDetails()}),
+    bpm_start_points=["BPM.12R1.B1"],
+    bpm_end_points=["BPM.20R1.B1"],
 )
 knobs, uncertainties = fitter.run()
 ```
 
+Further examples are in `tests/training/`, which exercise each fitter end to end.
+
+### Tracking modes
+
+| Class | Initial conditions | Tracking |
+|---|---|---|
+| `ArcByArcFitter` | BPM at the start of each range | Forward and backward over the configured BPM ranges |
+| `ACDMarkerFitter` | AC-dipole `before`/`after` markers | Bidirectional, whole ring observed |
+| `KickerFitter` | Kicker marker | Single worker, forward only, `turns_after_kicker` turns |
+
+`KickerFitter` additionally takes a `KickerConfig(kicker_name, turns_after_kicker)`.
+The measurement data must contain `x`, `px`, `y`, `py` at the kicker marker, and the
+sequence must include the kicker element.
+
+### Closed-twiss fits
+
+`ClosedTwissFitter` fits knobs so that the model's periodic optics match measured
+closed orbit, beta, phase and dispersion simultaneously, using a single parametric
+MAD-NG `twiss`. It takes `measurements`, a mapping from the measurement momentum `pt` to a
+measurement file or dataframe, and uses a Levenberg-Marquardt solver configured by
+`LevenbergMarquardtConfig`.
+
+### Closed-orbit fits
+
+`ClosedOrbitFitter` fits knobs to one or more `ClosedOrbitSeries`. Each series
+carries a `machine_state`: the MAD-X globals (quadrupole strengths, corrector kicks,
+tune knobs) at which its orbits were measured. These are fixed inputs and may differ
+between series. Varying the quadrupole strengths between series makes quadrupole
+misalignments observable.
+
+A series is fitted either as an absolute orbit (`absolute_planes`) or as the change
+from the fitter's own `machine_state` to the series' state. `machine_state` accepts a
+dictionary, a knobs file or a TFS corrector table; `aba_optimiser.mad.merge_machine_states`
+combines several. Accepted iterations are recorded in `fitter.history`, and
+`fitter.close()` shuts down the MAD-NG process.
+
+See `tests/training/test_closed_orbit_machine_state.py`.
+
 ## Tests
 
-Run tests with pytest::
-
 ```bash
-pytest tests/
-pytest tests/ --cov=aba_optimiser
+pytest -m "not slow"          # fast suite
+pytest -m slow                # convergence and end-to-end tests
+pytest --cov=aba_optimiser
 ```
 
-## Docs
+Markers are listed in `pyproject.toml` and `tests/README.md`.
 
-Build docs::
+## Documentation
 
 ```bash
-pip install -e .[docs]
+pip install -e ".[docs]"
 cd docs && make html
 ```
 
-View at `docs/_build/html/index.html`.
+The output is written to `docs/_build/html/index.html`.
+
+## Related repositories
+
+The measurement and campaign workflows built on this package are maintained
+separately: `lhc_measurements`, `psb_md`, `psb_loco`, `lhc_loco` and `fcc_loco`.

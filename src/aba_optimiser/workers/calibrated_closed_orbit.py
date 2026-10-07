@@ -87,7 +87,7 @@ class CalibratedClosedOrbitBatchWorker(ClosedOrbitBatchWorker):
         spec = self._series_states[0]["calibration"]
         n_b = len(PLANES) * len(spec.bpms)
         blocks = CalibrationBlocks(self.n_q, len(spec.correctors), n_b)
-        for state in self._series_states:
+        for self._series_index, state in enumerate(self._series_states):
             self._load_state(state)
             found = self._evaluate_calibrated(mad, knob_updates, spec, blocks)
             state.update(self._save_state())
@@ -121,7 +121,7 @@ class CalibratedClosedOrbitBatchWorker(ClosedOrbitBatchWorker):
         total = 0.0
         mad.send("knobs_to_plain()")
         try:
-            for state in self._series_states:
+            for self._series_index, state in enumerate(self._series_states):
                 self._load_state(state)
                 part = self._evaluate_calibrated_loss(mad, knob_updates, spec)
                 state.update(self._save_state())
@@ -143,6 +143,7 @@ class CalibratedClosedOrbitBatchWorker(ClosedOrbitBatchWorker):
             if key not in cache:
                 self._enter_scaled(mad, role, knob_updates)
                 self._set_pt(mad, pt)
+                self._set_co_key(mad, role, pt)
                 cache[key] = self._orbit_plain(mad, context=f" ({role}, pt={pt:+.9g})")
             return cache[key]
 
@@ -179,6 +180,7 @@ class CalibratedClosedOrbitBatchWorker(ClosedOrbitBatchWorker):
             if key not in cache:
                 self._enter_scaled(mad, role, knob_updates)
                 self._set_pt(mad, pt)
+                self._set_co_key(mad, role, pt)
                 cache[key] = self._model_and_jacobian(mad, context=f" ({role}, pt={pt:+.9g})")
             return cache[key]
 

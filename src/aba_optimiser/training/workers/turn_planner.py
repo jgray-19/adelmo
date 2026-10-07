@@ -125,8 +125,8 @@ class WorkerTurnPlanner:
 
         # One turn batch is fanned out over ``range_specs_per_batch`` workers, so the
         # number of turn batches that realises ``num_workers`` workers is the ratio.
-        # A batch must hold at least one turn, so we cannot have more batches than
-        # available training turns.
+        # A batch must hold at least one turn, so the number of batches cannot
+        # exceed the number of available training turns.
         worker_turn_batches = max(1, num_workers // max(1, range_specs_per_batch))
         total_turns = sum(len(turns) for turns in turns_by_file.values())
         num_turn_batches = min(worker_turn_batches, total_turns)

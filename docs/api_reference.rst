@@ -1,24 +1,8 @@
 API Reference
 =============
 
-This reference is limited to modules with direct automated test coverage and to
-runtime entry points that are exercised in the current suite. Script-heavy,
-campaign-specific, or mostly skipped areas are intentionally not published
-here yet.
-
-Included Scope
---------------
-
-The documented surface currently focuses on:
-
-1. Accelerator definitions and shared runtime configuration.
-2. MAD interface classes used by the optimisation loop.
-3. Tracking fitters, worker-management, and worker payload APIs.
-4. Optimiser implementations and core numerical helpers with active tests.
-5. The shared measurement-preparation modules used by the PSB and LHC workflows.
-
-LHC measurement workflows live in ``lhc_measurements`` and PSB campaign
-workflows in ``psb_md``; neither is part of this package.
+The reference covers the public entry points and the modules with automated test
+coverage. Measurement and campaign workflows are maintained in separate repositories.
 
 
 Primary Entry Points
@@ -76,7 +60,11 @@ Closed-Orbit Fitting
 
    aba_optimiser.training_closed_twiss
    aba_optimiser.training_closed_twiss.closed_orbit
+   aba_optimiser.training_closed_twiss.calibrated
+   aba_optimiser.training_closed_twiss.fitter
    aba_optimiser.workers.closed_orbit
+   aba_optimiser.workers.closed_twiss
+   aba_optimiser.workers.calibrated_closed_orbit
 
 
 Optimisation Runtime
@@ -98,11 +86,10 @@ Optimisation Runtime
    aba_optimiser.training.optimisation.loop
    aba_optimiser.training.optimisation.scheduler
    aba_optimiser.training.workers
-   aba_optimiser.training.workers.lifecycle
    aba_optimiser.training.workers.manager
    aba_optimiser.training.workers.payloads
    aba_optimiser.training.workers.setup
-   aba_optimiser.training.workers.validation
+   aba_optimiser.training.workers.pool
 
 
 Workers
@@ -126,8 +113,8 @@ Optimisers And Numerical Helpers
    :toctree: _autosummary
 
    aba_optimiser.optimisers.adam
-   aba_optimiser.optimisers.amsgrad
    aba_optimiser.optimisers.lbfgs
+   aba_optimiser.optimisers.levenberg_marquardt
 
 
 Measurement Preparation

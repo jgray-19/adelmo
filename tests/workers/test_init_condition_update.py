@@ -152,27 +152,23 @@ def _recv_and_ack(child_conn, received_store: list, idx: int) -> None:
     child_conn.send({"worker_id": idx, "status": "ok"})
 
 
-def _make_real_channels(counts: list[int]):
-    """Build a WorkerManager stub backed by real mp.Pipe() connections."""
-    from aba_optimiser.training.workers.manager import WorkerManager
-    from aba_optimiser.workers.protocol import WorkerChannels
+def _make_pool(counts: list[int], id_offset: int = 0):
+    """A WorkerPool backed by real mp.Pipe() connections; returns it and the child ends."""
+    from aba_optimiser.training.workers.pool import WorkerPool
 
     parent_conns, child_conns = zip(*[mp.Pipe() for _ in counts])
+    pool = WorkerPool(
+        conns=list(parent_conns),
+        # workers just need pid/exitcode attributes for error-handling
+        workers=[SimpleNamespace(pid=id_offset + i, exitcode=None) for i in range(len(counts))],
+        particle_counts=list(counts),
+    )
+    return pool, list(child_conns)
 
-    channels = object.__new__(WorkerChannels)
-    channels.parent_conns = tuple(parent_conns)
-    # workers just need a .exitcode attribute for error-handling
-    channels.workers = tuple(SimpleNamespace(pid=i, exitcode=None) for i in range(len(counts)))
-    channels._count = len(counts)
 
-    wm = object.__new__(WorkerManager)
-    wm._worker_particle_counts = list(counts)
-    wm._validation_worker_particle_counts = []
-    wm.channels = channels
-    wm.validation_channels = None
-    wm._channels = lambda: channels
-
-    return wm, list(child_conns)
+def _make_real_channels(counts: list[int]):
+    """Build a WorkerManager stub with real training pipe connections."""
+    return _make_real_channels_with_validation(counts, [])[:2]
 
 
 def _make_real_channels_with_validation(
@@ -180,29 +176,15 @@ def _make_real_channels_with_validation(
 ):
     """Build a WorkerManager stub with both training and validation pipe connections."""
     from aba_optimiser.training.workers.manager import WorkerManager
-    from aba_optimiser.workers.protocol import WorkerChannels
-
-    def _build_channels(counts: list[int], id_offset: int):
-        parent_conns, child_conns = zip(*[mp.Pipe() for _ in counts])
-        ch = object.__new__(WorkerChannels)
-        ch.parent_conns = tuple(parent_conns)
-        ch.workers = tuple(
-            SimpleNamespace(pid=id_offset + i, exitcode=None) for i in range(len(counts))
-        )
-        ch._count = len(counts)
-        return ch, list(child_conns)
-
-    trn_channels, trn_children = _build_channels(training_counts, id_offset=0)
-    val_channels, val_children = _build_channels(validation_counts, id_offset=len(training_counts))
+    from aba_optimiser.training.workers.pool import WorkerPool
 
     wm = object.__new__(WorkerManager)
-    wm._worker_particle_counts = list(training_counts)
-    wm._validation_worker_particle_counts = list(validation_counts)
-    wm.channels = trn_channels
-    wm.validation_channels = val_channels
-    wm._channels = lambda: trn_channels
-    wm._validation_channels = lambda: val_channels
-
+    wm.training, trn_children = _make_pool(training_counts)
+    wm.validation, val_children = (
+        _make_pool(validation_counts, id_offset=len(training_counts))
+        if validation_counts
+        else (WorkerPool(), [])
+    )
     return wm, trn_children, val_children
 
 

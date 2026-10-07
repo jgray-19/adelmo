@@ -5,7 +5,7 @@
 optimisation begins: it asks each worker for per-BPM diagnostics, flags BPMs and
 whole workers whose loss is an outlier (positive-side z-score above a sigma
 threshold), and pushes the resulting keep-masks back to the workers. It operates
-purely on the worker metadata, connections, and channels passed in, so it holds
+purely on the :class:`~aba_optimiser.training.workers.pool.WorkerPool` passed in, so it holds
 no worker-process state of its own.
 """
 
@@ -18,9 +18,8 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 
 if TYPE_CHECKING:
-    from multiprocessing.connection import Connection
-
     from aba_optimiser.training.workers.payloads import WorkerPayloadBuilder
+    from aba_optimiser.training.workers.pool import WorkerPool
     from aba_optimiser.training.workers.setup import WorkerRuntimeMetadata
     from aba_optimiser.workers.protocol import WorkerChannels
 
@@ -47,16 +46,14 @@ class OutlierScreener:
 
     def screen(
         self,
+        pool: WorkerPool,
         *,
-        channels: WorkerChannels,
-        parent_conns: list[Connection],
-        worker_metadata: list[WorkerRuntimeMetadata],
         initial_knobs: dict[str, float],
         bpm_sigma_threshold: float = 2.0,
         worker_sigma_threshold: float = 2.0,
     ) -> ScreeningResult | None:
         """Screen and mask outliers before optimisation starts."""
-        if not parent_conns:
+        if not pool:
             LOGGER.warning("No workers available for pre-optimisation outlier screening")
             return None
 
@@ -66,7 +63,8 @@ class OutlierScreener:
             worker_sigma_threshold,
         )
 
-        diagnostics = self.request_worker_diagnostics(channels, initial_knobs)
+        worker_metadata = pool.metadata
+        diagnostics = self.request_worker_diagnostics(pool.channels, initial_knobs)
         worker_losses: list[float] = []
         for idx, diag in enumerate(diagnostics):
             total_loss_raw = diag.get("total_loss")
@@ -85,13 +83,13 @@ class OutlierScreener:
             diagnostics, worker_metadata, bpm_sigma_threshold
         )
         self.summarise_screening_losses(diagnostics, bpm_masks, worker_disabled, worker_metadata)
-        self.apply_screening_actions(parent_conns, worker_metadata, bpm_masks, worker_disabled, channels)
+        self.apply_screening_actions(pool, bpm_masks, worker_disabled)
 
         LOGGER.warning(
             "Pre-optimisation screening complete: masked %d BPM entries across workers, disabled %d/%d workers",
             sum(int((~mask).sum()) for mask in bpm_masks),
             sum(worker_disabled),
-            len(parent_conns),
+            len(pool),
         )
         return ScreeningResult(bpm_masks=bpm_masks, worker_disabled=worker_disabled)
 
@@ -341,15 +339,13 @@ class OutlierScreener:
 
     def apply_screening_actions(
         self,
-        parent_conns: list[Connection],
-        worker_metadata: list[WorkerRuntimeMetadata],
+        pool: WorkerPool,
         bpm_masks: list[np.ndarray],
         worker_disabled: list[bool],
-        channels: WorkerChannels | None = None,
     ) -> None:
         """Send mask/disable settings to workers and verify acknowledgements."""
         for conn, keep_mask, disable, meta in zip(
-            parent_conns, bpm_masks, worker_disabled, worker_metadata, strict=True
+            pool.conns, bpm_masks, worker_disabled, pool.metadata, strict=True
         ):
             expanded_mask = self.payload_builder.expand_bpm_mask(keep_mask, meta.n_run_turns)
             conn.send(
@@ -360,12 +356,7 @@ class OutlierScreener:
                 }
             )
 
-        acknowledgements = (
-            [conn.recv() for conn in parent_conns]
-            if channels is None
-            else channels.recv_all()
-        )
-        for ack in acknowledgements:
+        for ack in pool.channels.recv_all():
             ack_dict = cast("dict[object, object]", ack) if isinstance(ack, dict) else None
             if ack_dict is None or ack_dict.get("status") != "ok":
                 raise RuntimeError(f"Failed to apply worker mask settings: {ack}")

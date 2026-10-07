@@ -571,7 +571,6 @@ local used = {{}}
 local counts = {{}}
 {attr_block}
 {energy_block}
-coord_names = {{"x", "px", "y", "py", "t", "pt"}}
 {self.py_name}:send(knob_names, true)
 {self.py_name}:send(spos_list, true)
         """)

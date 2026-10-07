@@ -425,7 +425,7 @@ def _to_advance(values: np.ndarray, jacobian: np.ndarray) -> tuple[np.ndarray, n
     is separated by a full unit of phase - true of every real BPM layout, and the
     same assumption omc3 makes when it reports an advance in ``[0, 1)``.
 
-    The modulo is locally the identity, so the Jacobian of the advance is just
-    the difference of the consecutive Jacobian rows.
+    The modulo is locally the identity, so the Jacobian of the advance is the
+    difference of consecutive Jacobian rows.
     """
     return np.mod(np.diff(values), 1.0), np.diff(jacobian, axis=0)

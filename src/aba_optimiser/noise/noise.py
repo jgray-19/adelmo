@@ -35,24 +35,6 @@ def get_noise_file_for_accelerator(accelerator_type: str) -> Path:
     return _ACCELERATOR_NOISE_FILES[_normalise_accelerator_type(accelerator_type)]
 
 
-def get_bpm_type(name: str, accelerator_type: str) -> str:
-    """Extract the BPM type token used for fallback noise lookup."""
-    accelerator_key = _normalise_accelerator_type(accelerator_type)
-
-    if accelerator_key == "lhc":
-        if not name.startswith("BPM"):
-            raise ValueError(f"Invalid BPM name: {name}")
-        parts = name.split(".")
-        if len(parts) < 2:
-            raise ValueError(f"Invalid BPM name: {name}")
-        type_ = parts[0].removeprefix("BPM")
-        if type_.startswith("W") and len(type_) >= 2:
-            return "W"
-        return type_
-
-    raise ValueError(f"Unsupported accelerator_type '{accelerator_type}'")
-
-
 def load_bpm_noise_table(
     accelerator_type: str,
     noise_file: Path | None = None,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import dataclasses
-from functools import partial
 from types import SimpleNamespace
 
 import numpy as np
@@ -125,9 +124,9 @@ def _collect_epoch_gradient(ctrl: TrackingFitter, knob_updates: dict[str, float]
     gradient = np.zeros(len(ctrl.config_manager.knob_names), dtype=np.float64)
     points = {
         meta.worker_id: len(meta.bpm_names) * meta.n_run_turns
-        for meta in ctrl.worker_manager.worker_metadata
+        for meta in ctrl.worker_manager.training.metadata
     }
-    channels = ctrl.worker_manager._channels()
+    channels = ctrl.worker_manager.training.channels
     for batch in range(ctrl.simulation_config.num_batches):
         channels.send_all((knob_updates, batch))
         for result in channels.recv_all():
@@ -142,21 +141,13 @@ def _compute_training_weight_normaliser(ctrl: TrackingFitter) -> float:
     """Rebuild the worker payload weights and return the global gradient normaliser.
 
     Production normalises weights over the training *and* validation payloads at once
-    (see ``WorkerManager._build_payload_split``), so the normaliser is computed over the
+    (see ``WorkerManager._build_payloads``), so the normaliser is computed over the
     same combined set here.
     """
-    build = partial(
-        ctrl.worker_manager.create_worker_payloads,
-        ctrl.data_manager.tracks,
-        file_turn_map=ctrl.data_manager.file_map,
-        start_bpms=ctrl.config_manager.start_bpms,
-        end_bpms=ctrl.config_manager.end_bpms,
-        simulation_config=ctrl.simulation_config,
-        machine_deltaps=ctrl.machine_deltaps,
+    training, validation = ctrl.worker_manager._build_payloads(
+        ctrl.data_manager.tracks, with_validation=True
     )
-    payloads = build(ctrl.data_manager.turn_batches)
-    if ctrl.data_manager.validation_turn_batches:
-        payloads = payloads + build(ctrl.data_manager.validation_turn_batches)
+    payloads = training + validation
     if not payloads:
         raise AssertionError("Expected at least one worker payload")
 
@@ -237,7 +228,6 @@ def test_controller_worker_hessian_matches_finite_difference_on_reduced_knob_sub
         ),
         true_strengths=magnet_strengths.copy(),
     )
-    weight_normaliser = _compute_training_weight_normaliser(ctrl)
 
     terminated = False
     try:
@@ -252,6 +242,7 @@ def test_controller_worker_hessian_matches_finite_difference_on_reduced_knob_sub
             ctrl.machine_deltaps,
             ctrl.initial_knobs,
         )
+        weight_normaliser = _compute_training_weight_normaliser(ctrl)
         base_knobs = ctrl.filtered_true_strengths.copy()
         base_vec = np.array(
             [base_knobs[name] for name in ctrl.config_manager.knob_names],

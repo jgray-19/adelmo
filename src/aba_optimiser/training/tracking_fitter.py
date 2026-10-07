@@ -31,6 +31,7 @@ from aba_optimiser.training.config.tracking import (
 )
 from aba_optimiser.training.data_manager import DataManager
 from aba_optimiser.training.workers.manager import WorkerManager
+from aba_optimiser.training.workers.setup import WorkerSetupHelper
 from aba_optimiser.workers.common import sandwich_uncertainties
 
 if TYPE_CHECKING:
@@ -226,9 +227,7 @@ class TrackingFitter(BaseFitter):
 
             # Clean up memory after workers are started
             self._cleanup_memory()
-            channels = self.worker_manager.channels
-            if channels is None:
-                raise RuntimeError("Worker channels are not initialised")
+            channels = self.worker_manager.training.channels
 
             epoch_end_hook = self._make_epoch_end_hook()
             self.final_knobs = self.optimisation_loop.run_optimisation(
@@ -456,19 +455,21 @@ class TrackingFitter(BaseFitter):
         )
 
         self.worker_manager = WorkerManager(
-            magnet_range=magnet_range,
-            fixed_start=self.config_manager.fixed_start,
-            fixed_end=self.config_manager.fixed_end,
-            accelerator=self.accelerator,
-            interface_options_per_file=self.interface_options,
-            all_bpms=self.config_manager.all_bpms,
-            file_kick_planes=self.data_manager.file_kick_planes,
-            bad_bpms=bad_bpms,
-            use_fixed_bpm=self.simulation_config.use_fixed_bpm,
-            debug=self.debug,
-            mad_logfile=self.mad_logfile,
-            python_logfile=self.python_logfile,
-            tracking_plan=self.tracking_plan,
+            WorkerSetupHelper(
+                accelerator=self.accelerator,
+                all_bpms=self.config_manager.all_bpms,
+                fixed_start=self.config_manager.fixed_start,
+                fixed_end=self.config_manager.fixed_end,
+                use_fixed_bpm=self.simulation_config.use_fixed_bpm,
+                bad_bpms=bad_bpms,
+                file_kick_planes=self.data_manager.file_kick_planes,
+                magnet_range=magnet_range,
+                interface_options_per_file=self.interface_options,
+                debug=self.debug,
+                mad_logfile=self.mad_logfile,
+                python_logfile=self.python_logfile,
+                tracking_plan=self.tracking_plan,
+            )
         )
 
     def _get_mad_setup_kwargs(self) -> dict:

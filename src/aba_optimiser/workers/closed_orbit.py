@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -203,6 +204,14 @@ class ClosedOrbitWorker(ClosedTwissWorker):
     def _set_pt(mad: MAD, value: float) -> None:
         mad.send(f"x0map.pt:set0({value:.15e})")
 
+    def _set_co_key(self, mad: MAD, role: str, pt: float) -> None:
+        """Tell MAD which machine state the next closed-orbit solve is for, so it warm-starts from that state's own last orbit.
+
+        State = (series index in this worker, signal/reference role, momentum). ``ABA_CO_PER_STATE=0`` keeps the old single warm start.
+        """
+        if os.environ.get("ABA_CO_PER_STATE", "1") != "0":
+            mad.send(f"co_key = '{getattr(self, '_series_index', 0)}:{role}:{pt:.12e}'")
+
     def _align_measurements(self, twiss_names: list[str]) -> None:
         alignments = []
         for measurement in self.series_measurements:
@@ -373,6 +382,7 @@ class ClosedOrbitWorker(ClosedTwissWorker):
             for reference_pt in reference_pts:
                 self._enter_state(mad, "reference")
                 self._set_pt(mad, reference_pt)
+                self._set_co_key(mad, "reference", reference_pt)
                 state = self._model_and_jacobian(mad, context=f" (shared reference, pt={reference_pt:+.9g})")
                 if state is None:
                     return np.zeros(1), float("nan"), np.zeros((1, 1)), None
@@ -407,6 +417,7 @@ class ClosedOrbitWorker(ClosedTwissWorker):
             if key not in cache:
                 self._enter_state(mad, role)
                 self._set_pt(mad, pt)
+                self._set_co_key(mad, role, pt)
                 cache[key] = self._model_and_jacobian(mad, context=f" ({role}, pt={pt:+.9g})")
             return cache[key]
 
@@ -516,7 +527,7 @@ class ClosedOrbitBatchWorker(ClosedOrbitWorker):
         hessian = np.zeros((self.n_knobs, self.n_knobs))
         normal_matrix = np.zeros((self.n_knobs, self.n_knobs))
         with self._reference_round():
-            for state in self._series_states:
+            for self._series_index, state in enumerate(self._series_states):
                 self._load_state(state)
                 part = self._evaluate_series(mad)
                 state.update(self._save_state())

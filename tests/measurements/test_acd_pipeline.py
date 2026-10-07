@@ -8,7 +8,6 @@ import pytest
 
 from aba_optimiser.measurements.acd_pipeline import (
     ACDOpticsAnalysisConfig,
-    build_mixed_closed_orbit_reference,
     long_frame_to_tbt_data,
     run_driven_and_compensated_optics,
 )
@@ -30,26 +29,6 @@ def test_long_frame_to_tbt_data_preserves_name_and_turn_order() -> None:
     assert result.meta["file"] == "input.sdds"
     assert result.matrices[0].X.index.tolist() == ["BPM2", "BPM1"]
     np.testing.assert_array_equal(result.matrices[0].X, [[20.0, 21.0], [10.0, 11.0]])
-
-
-def test_mixed_reference_uses_measured_positions_and_model_angles() -> None:
-    measured = pd.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]}, index=["BPM1", "BPM2"])
-    fitted = pd.DataFrame(
-        {
-            "x": [10.0, 20.0],
-            "y": [30.0, 40.0],
-            "px": [5.0, 6.0],
-            "py": [7.0, 8.0],
-        },
-        index=["BPM1", "BPM2"],
-    )
-
-    result = build_mixed_closed_orbit_reference(measured, fitted)
-
-    np.testing.assert_array_equal(result["x"], [1.0, 2.0])
-    np.testing.assert_array_equal(result["y"], [3.0, 4.0])
-    np.testing.assert_array_equal(result["px"], [5.0, 6.0])
-    np.testing.assert_array_equal(result["py"], [7.0, 8.0])
 
 
 def test_run_driven_optics_rejects_harpy_cleaning(tmp_path: Path) -> None:

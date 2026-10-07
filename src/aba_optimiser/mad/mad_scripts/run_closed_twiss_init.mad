@@ -43,7 +43,6 @@
 !   <read optics_columns via closed_tbl:to_df>
 !   send_orbit_jacobian()                   -- one matrix per orbit coordinate
 
-local tblcat in MAD.utility
 local matrix, vector in MAD
 local cofind, track in MAD
 local normal in MAD.gphys
@@ -62,13 +61,12 @@ num_knobs = #knob_names
 ! Orbit-only needs mo=1: d(orbit)/d(knob) is the pure-parameter monomial, which is
 ! order 1, and the phase-space linearisation is order 1 as well.
 orbit_only = #optics_columns == 0
-coord_names = {'x', 'px', 'y', 'py', 't', 'pt'}
 x0map = MAD.damap {
-    nv = #coord_names,
+    nv = 6,
     np = num_knobs,
     mo = orbit_only and 1 or 2,
     po = 1,
-    vn = tblcat(coord_names, knob_names),
+    pn = knob_names,
 }
 
 ! Make each knob a TPSA (value + 1*parameter) so its derivative propagates, and
@@ -153,16 +151,49 @@ end
 
 ! Closed orbit with the knobs as plain numbers (call between knobs_to_plain() and knobs_to_param()): cofind from a plain
 ! start builds its own 6-variable map. Returns the one-turn map; its status is 'stable' at a closed orbit.
-local function plain_cofind(atexit)
+-- Warm start of the next cofind: the last converged closed orbit (x, px, y, py) of the SAME machine state. The worker sets the
+-- global ``co_key`` (series index, role, pt) before each solve, so every state keeps its own start and one series' orbit never
+-- seeds another's (different corrector kick, other momentum). Without ``co_key`` every solve shares the key 'default'.
+co_key = 'default'
+local co_by_key = {}
+local cofind_log = os.getenv('COFIND_LOG')
+local function log_failure(stage, detail)
+    if not cofind_log then return end
+    local f = io.open(cofind_log, 'a')
+    if f then f:write(stage, ' ', tostring(detail), '\n') f:close() end
+end
+
+local function run_cofind(atexit, start)
+    local X0 = { pt = x0map.pt:get0() }  -- the fixed momentum pinned by the worker on x0map
+    if start then X0.x, X0.px, X0.y, X0.py = start[1], start[2], start[3], start[4] end
     local _, mflw = cofind{
         sequence = loaded_sequence,
         method   = 6,
         observe  = 1,
-        X0       = { pt = x0map.pt:get0() },  -- the fixed momentum pinned by the worker on x0map
+        X0       = X0,
         save     = false,
         atexit   = atexit,
     }
     return mflw[1]
+end
+
+! Warm start from the previous solution; a failed or unstable warm start retries from the zero orbit (the stored orbit is
+! only replaced by a converged one, so a lost trial does not poison the next).
+local function plain_cofind(atexit)
+    local last_co = co_by_key[co_key]
+    if last_co then
+        if atexit then reset_orbit() end
+        local ok, res = pcall(run_cofind, atexit, last_co)
+        if ok and res.status == 'stable' then
+            co_by_key[co_key] = res:get0()
+            return res
+        end
+        log_failure('warm_cofind_failed', ok and res.status or res)
+        if atexit then reset_orbit() end
+    end
+    local res = run_cofind(atexit, nil)
+    if res.status == 'stable' then co_by_key[co_key] = res:get0() else log_failure('cold_cofind_unstable', res.status) end
+    return res
 end
 
 ! Closed orbit and its knob derivatives without ``twiss``, which also normalises the parametric one-turn map and tracks
@@ -177,6 +208,7 @@ function compute_closed_orbit()
     local ok, plain = pcall(plain_cofind)
     knobs_to_param()  -- whatever happened: the worker's knob updates need the parameters
     if not ok or plain.status ~= 'stable' then
+        log_failure('cofind_error', ok and plain.status or plain)
         python:send(false, true)
         return
     end
@@ -186,7 +218,8 @@ function compute_closed_orbit()
     start.nocopy = true
     start:set0(plain:get0())
     track{ sequence = loaded_sequence, X0 = start, method = 6, save = false }
-    local nf = normal(start)
+    local nok, nf = pcall(normal, start)
+    if not nok then log_failure('normal_error', nf) python:send(false, true) return end
     nf.a:copy(start):set0(nf.x0)
 
     reset_orbit()
@@ -200,6 +233,7 @@ function compute_closed_orbit()
         atexit   = save_orbit_jac,
     }
     if mflw[1].status == 'lost' or orbit_n ~= nbpms then
+        log_failure('final_track', mflw[1].status .. ' n=' .. orbit_n)
         python:send(false, true)
         return
     end
@@ -245,9 +279,8 @@ end
 ! The scalar orbit is already a plain twiss column, so only the Jacobian needs
 ! the saved maps.
 ! Rows are filled through a vector and ``setrow``. ``matrix:seti`` takes a single
-! *linear* index, so ``jacobian:seti(row, col, value)`` silently writes ``col`` as
-! the value at position ``row`` - it does not error, it just returns the loop
-! counter everywhere.
+! *linear* index, so ``jacobian:seti(row, col, value)`` writes ``col`` as the value
+! at position ``row`` without raising an error.
 function send_orbit_jacobian()
     local maps = closed_tbl:getcol('__map')
     local nbpm = #closed_tbl

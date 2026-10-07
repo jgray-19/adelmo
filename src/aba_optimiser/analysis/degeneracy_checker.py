@@ -1,34 +1,30 @@
 """Detect degenerate (unconstrained) knob directions before optimising.
 
-Motivation
+Background
 ----------
-A weighted least-squares fit ``min_x  Σ w r(x)²`` is only well-posed if the
-measurement actually constrains every knob combination. When it does not, the
-Gauss-Newton normal matrix ``A = JᵀWJ`` (``J`` the residual Jacobian, ``W`` the
-inverse-variance weights) is rank-deficient or ill-conditioned: it has one or
-more near-zero eigenvalues whose eigenvectors are *knob combinations the data
-cannot see*. An optimiser started on such a problem does not converge to a
-unique minimum - it slides along the flat valley, moving the knobs a long way
-while the loss barely changes, and settles wherever the step dynamics happen to
-leave it.
+A weighted least-squares fit ``min_x  Σ w r(x)²`` is well-posed only if the
+measurement constrains every knob combination. Otherwise the Gauss-Newton normal
+matrix ``A = JᵀWJ`` (``J`` the residual Jacobian, ``W`` the inverse-variance
+weights) is rank-deficient or ill-conditioned, with near-zero eigenvalues whose
+eigenvectors are knob combinations the data cannot constrain. An optimiser started
+on such a problem has no unique minimum: the knobs drift along the flat direction
+with little change in loss.
 
-``A`` is exactly the matrix the tuner already accumulates for parameter
-uncertainties (:func:`aba_optimiser.workers.common.hessian_uncertainties`).
-Evaluated at the *initial* knobs, before any optimisation step is taken, its
-eigenspectrum tells you a priori whether the fit is degenerate - and which knob
-combinations are to blame - so you can regularise, drop knobs, or collect
-independent data instead of discovering the problem after a long run.
+``A`` is the matrix already accumulated for parameter uncertainties
+(:func:`aba_optimiser.workers.common.hessian_uncertainties`). Its eigenspectrum at
+the initial knobs identifies a degenerate fit, and the knob combinations
+responsible, before optimisation, so the user can regularise, remove knobs or add
+independent data.
 
 Unit scaling
 ------------
-The raw ``A`` mixes knobs of very different physical scale (dipole ``k0`` vs
-quad ``k1`` vs ``pt``), so its condition number conflates *unit disparity* with
-*genuine degeneracy*. By default the eigen-analysis is performed on the
-symmetrically scaled matrix ``Ã = D^{-1/2} A D^{-1/2}`` with ``D = diag(A)``,
-which is dimensionless and correlation-like: its diagonal is 1 for every
-constrained knob, so a small eigenvalue means a genuinely unconstrained
-*combination*, not merely a small-valued knob. Knobs with zero sensitivity
-(``diag(A) == 0``) are detected separately and reported as fully unconstrained.
+The raw ``A`` mixes knobs of different physical scale (dipole ``k0``, quad ``k1``,
+``pt``), so its condition number reflects unit disparity as well as degeneracy. By
+default the analysis uses the symmetrically scaled matrix
+``Ã = D^{-1/2} A D^{-1/2}`` with ``D = diag(A)``. It is dimensionless with unit
+diagonal for every constrained knob, so a small eigenvalue indicates an
+unconstrained *combination* rather than a small-valued knob. Knobs with zero
+sensitivity (``diag(A) == 0``) are reported separately as fully unconstrained.
 """
 
 from __future__ import annotations
@@ -193,7 +189,7 @@ def analyse_degeneracy(
             the *initial* knobs to diagnose the problem before optimising.
         knob_names: Names of the knobs, in the row/column order of ``normal_matrix``.
         scale: If True (default), analyse the dimensionless symmetrically scaled
-            matrix ``D^{-1/2} A D^{-1/2}`` so the verdict reflects genuine
+            matrix ``D^{-1/2} A D^{-1/2}`` so the verdict reflects
             collinearity rather than unit disparity between knobs.
         rel_tol: A direction is "unconstrained" when its eigenvalue is below
             ``rel_tol * λ_max``.

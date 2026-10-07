@@ -14,13 +14,14 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import pandas as pd
 from omc3.hole_in_one import hole_in_one_entrypoint
 from turn_by_turn.structures import TbtData, TransverseData
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
+
+    import pandas as pd
 
 
 @dataclass(frozen=True)
@@ -135,28 +136,4 @@ def run_driven_and_compensated_optics(
             **common,
         )
     return driven_dir, compensated_dir
-
-
-def build_mixed_closed_orbit_reference(
-    measured_orbit: pd.DataFrame,
-    fitted_orbit: pd.DataFrame,
-) -> pd.DataFrame:
-    """Combine measured ``x/y`` with fitted-model ``px/py`` at common BPMs."""
-    measured = measured_orbit.set_index("name") if "name" in measured_orbit else measured_orbit
-    fitted = fitted_orbit.set_index("name") if "name" in fitted_orbit else fitted_orbit
-    common = measured.index.intersection(fitted.index)
-    if common.empty:
-        raise ValueError("Measured and fitted closed orbits have no common BPMs")
-    result = pd.DataFrame(
-        {
-            "x": measured.loc[common, "x"].astype(float),
-            "y": measured.loc[common, "y"].astype(float),
-            "px": fitted.loc[common, "px"].astype(float),
-            "py": fitted.loc[common, "py"].astype(float),
-        },
-        index=common,
-    )
-    if result.isna().any().any():
-        raise ValueError("Mixed closed-orbit reference contains missing values")
-    return result
 

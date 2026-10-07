@@ -8,10 +8,12 @@ import numpy as np
 
 from aba_optimiser.accelerators import PSB
 from aba_optimiser.config import SimulationConfig
+from aba_optimiser.training.config.tracking import TrackingPlan
 from aba_optimiser.training.data_manager import FileTracks
 from aba_optimiser.training.workers.manager import WorkerManager
+from aba_optimiser.training.workers.pool import WorkerPool
 from aba_optimiser.training.workers.screening import OutlierScreener
-from aba_optimiser.training.workers.setup import WorkerRuntimeMetadata
+from aba_optimiser.training.workers.setup import WorkerRuntimeMetadata, WorkerSetupHelper
 from aba_optimiser.workers import TrackingData, WorkerConfig
 from aba_optimiser.workers.common import KickPlane, PrecomputedTrackingWeights, UncertaintyPart
 from aba_optimiser.workers.tracking_validation import ValidationTrackingWorker
@@ -59,6 +61,9 @@ class _ConnThatMustNotPoll:
     def recv(self) -> object:
         raise AssertionError("Validation cleanup should not receive a final payload")
 
+    def close(self) -> None:
+        pass
+
 
 def _start_pipe_worker(child_conn: multiprocessing.connection.Connection, responses: list[object]) -> threading.Thread:
     """Start a daemon thread that acts as a fake worker over a real pipe.
@@ -75,6 +80,18 @@ def _start_pipe_worker(child_conn: multiprocessing.connection.Connection, respon
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
     return thread
+
+
+def _start_recording_worker(sink: list[object]) -> multiprocessing.connection.Connection:
+    """Return a parent pipe end whose fake worker records one message and acks it."""
+    parent, child = multiprocessing.Pipe()
+
+    def _run() -> None:
+        sink.append(child.recv())
+        child.send({"status": "ok"})
+
+    threading.Thread(target=_run, daemon=True).start()
+    return parent
 
 
 BPMS = ["BR3.BPM1L3", "BR3.BPM2L3", "BR3.BPM3L3", "BR3.BPM4L3"]
@@ -94,18 +111,22 @@ def _make_manager(
 ) -> WorkerManager:
     bpms = all_bpms or BPMS
     return WorkerManager(
-        magnet_range="$start/$end",
-        fixed_start=bpms[0],
-        fixed_end=bpms[-1],
-        accelerator=_make_psb(tmp_path),
-        interface_options_per_file=interface_options_per_file
-        or [
-            {
-                "machine_state": tmp_path / "correctors_state.txt",
-            }
-        ],
-        all_bpms=bpms,
-        file_kick_planes=dict.fromkeys(range(4), "xy"),
+        WorkerSetupHelper(
+            accelerator=_make_psb(tmp_path),
+            all_bpms=bpms,
+            fixed_start=bpms[0],
+            fixed_end=bpms[-1],
+            use_fixed_bpm=True,
+            bad_bpms=None,
+            file_kick_planes=dict.fromkeys(range(4), "xy"),
+            magnet_range="$start/$end",
+            interface_options_per_file=interface_options_per_file
+            or [{"machine_state": tmp_path / "correctors_state.txt"}],
+            debug=False,
+            mad_logfile=None,
+            python_logfile=None,
+            tracking_plan=TrackingPlan(),
+        )
     )
 
 
@@ -138,21 +159,20 @@ def test_create_worker_payloads_assigns_per_file_artifacts_from_file_turn_map(tm
         ],
     )
 
+    manager.file_turn_map = {2: 0, 202: 1}
+    manager.start_bpms = [BPMS[0]]
+    manager.end_bpms = [BPMS[1]]
+    manager.simulation_config = SimulationConfig(
+        num_workers=2, num_batches=1, optimise_momenta=False
+    )
+    manager.machine_deltaps = [0.0, 1e-3]
+
     payloads = manager.create_worker_payloads(
         tracks={
-            0: _make_tracks(manager.all_bpms, [1, 2, 3]),
-            1: _make_tracks(manager.all_bpms, [201, 202, 203]),
+            0: _make_tracks(BPMS[:3], [1, 2, 3]),
+            1: _make_tracks(BPMS[:3], [201, 202, 203]),
         },
         turn_batches=[[2], [202]],
-        file_turn_map={2: 0, 202: 1},
-        start_bpms=[BPMS[0]],
-        end_bpms=[BPMS[1]],
-        simulation_config=SimulationConfig(
-            num_workers=2,
-            num_batches=1,
-            optimise_momenta=False,
-        ),
-        machine_deltaps=[0.0, 1e-3],
     )
 
     assert [file_idx for _, _, file_idx in payloads] == [0, 1, 0, 1]
@@ -171,7 +191,7 @@ def test_create_worker_payloads_assigns_per_file_artifacts_from_file_turn_map(tm
 
 def test_build_bpm_masks_from_diagnostics_aggregates_multi_turn_losses(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
-    manager.worker_metadata = [
+    manager.training.metadata = [
         WorkerRuntimeMetadata(
             worker_id=0,
             file_idx=0,
@@ -191,7 +211,7 @@ def test_build_bpm_masks_from_diagnostics_aggregates_multi_turn_losses(tmp_path:
                 "loss_per_bpm": [1.0, 50.0, 1.0, 50.0],
             }
         ],
-        worker_metadata=manager.worker_metadata,
+        worker_metadata=manager.training.metadata,
         bpm_sigma_threshold=0.5,
     )
 
@@ -201,10 +221,10 @@ def test_build_bpm_masks_from_diagnostics_aggregates_multi_turn_losses(tmp_path:
 
 def test_apply_screening_actions_expands_masks_across_turns(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
-    conn_a = _FakeConn([{"status": "ok"}])
-    conn_b = _FakeConn([{"status": "ok"}])
-    manager.parent_conns = [conn_a, conn_b]  # ty:ignore[invalid-assignment]
-    manager.worker_metadata = [
+    received: list[list[object]] = [[], []]
+    manager.training.conns = [_start_recording_worker(sink) for sink in received]
+    manager.training.workers = [_FakeWorker(), _FakeWorker()]  # type: ignore[list-item]
+    manager.training.metadata = [
         WorkerRuntimeMetadata(
             worker_id=0,
             file_idx=0,
@@ -228,20 +248,19 @@ def test_apply_screening_actions_expands_masks_across_turns(tmp_path: Path) -> N
     ]
 
     OutlierScreener(manager.payload_builder).apply_screening_actions(
-        parent_conns=manager.parent_conns,
-        worker_metadata=manager.worker_metadata,
+        manager.training,
         bpm_masks=[np.array([True, False]), np.array([False, True])],
         worker_disabled=[False, True],
     )
 
-    assert conn_a.sent == [
+    assert received[0] == [
         {
             "cmd": "apply_mask",
             "keep_bpm_mask": [True, False, True, False],
             "disable_worker": False,
         }
     ]
-    assert conn_b.sent == [
+    assert received[1] == [
         {
             "cmd": "apply_mask",
             "keep_bpm_mask": [False, True],
@@ -251,7 +270,7 @@ def test_apply_screening_actions_expands_masks_across_turns(tmp_path: Path) -> N
 
 def test_summarise_screening_losses_logs_pre_and_projected_loss(tmp_path: Path, caplog) -> None:
     manager = _make_manager(tmp_path)
-    manager.worker_metadata = [
+    manager.training.metadata = [
         WorkerRuntimeMetadata(
             worker_id=0,
             file_idx=0,
@@ -269,7 +288,7 @@ def test_summarise_screening_losses_logs_pre_and_projected_loss(tmp_path: Path, 
             diagnostics=[{"worker_id": 0, "loss_per_bpm": [1.0, 9.0, 1.0, 9.0]}],
             bpm_masks=[np.array([True, False])],
             worker_disabled=[False],
-            worker_metadata=manager.worker_metadata,
+            worker_metadata=manager.training.metadata,
         )
 
     assert "Pre-screening loss summary" in caplog.text
@@ -330,13 +349,12 @@ def _uncertainty_manager(
 ) -> WorkerManager:
     """A manager whose training workers are pipe threads, one per entry of ``file_indices``."""
     manager = _make_manager(tmp_path)
-    manager.parent_conns = []
     for worker_responses in responses:
         parent, child = multiprocessing.Pipe()
         _start_pipe_worker(child, worker_responses)
-        manager.parent_conns.append(parent)
-    manager.workers = [_FakeWorker() for _ in file_indices]  # type: ignore[misc]
-    manager.worker_metadata = [
+        manager.training.conns.append(parent)
+    manager.training.workers = [_FakeWorker() for _ in file_indices]  # type: ignore[misc]
+    manager.training.metadata = [
         WorkerRuntimeMetadata(
             worker_id=idx,
             file_idx=file_idx,
@@ -349,10 +367,7 @@ def _uncertainty_manager(
         )
         for idx, file_idx in enumerate(file_indices)
     ]
-    manager._worker_particle_counts = [1 for _ in file_indices]
-    manager.validation_workers = []
-    manager.validation_parent_conns = []
-    manager.validation_channels = None
+    manager.training.particle_counts = [1 for _ in file_indices]
     return manager
 
 
@@ -371,19 +386,15 @@ def test_termination_and_hessian_merges_shared_readings_per_file(tmp_path: Path)
     shared = g_a + g_b
     np.testing.assert_allclose(normal, 6.0 * np.eye(2))
     np.testing.assert_allclose(noise, 0.1 * np.outer(shared, shared) + 0.2 * np.outer(g_c, g_c))
-    assert [worker.join_calls for worker in manager.workers] == [1, 1, 1]
+    assert [worker.join_calls for worker in manager.training.workers] == [1, 1, 1]
 
 
 def test_terminate_workers_kills_training_and_validation_workers(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     training = [_FakeWorker(), _FakeWorker()]
     validation = [_FakeWorker()]
-    manager.workers = training  # type: ignore[assignment]
-    manager.validation_workers = validation  # type: ignore[assignment]
-    manager.parent_conns = []
-    manager.validation_parent_conns = []
-    manager.channels = None
-    manager.validation_channels = None
+    manager.training = WorkerPool(workers=training)  # type: ignore[arg-type]
+    manager.validation = WorkerPool(workers=validation)  # type: ignore[arg-type]
 
     manager.terminate_workers()
 
@@ -392,15 +403,12 @@ def test_terminate_workers_kills_training_and_validation_workers(tmp_path: Path)
         assert worker.join_calls == 1
 
 
-def test_stop_validation_workers_does_not_wait_for_final_payload(tmp_path: Path) -> None:
-    manager = _make_manager(tmp_path)
+def test_pool_stop_does_not_wait_for_final_payload() -> None:
     worker = _FakeWorker()
     conn = _ConnThatMustNotPoll()
-    manager.validation_channels = None
-    manager.validation_workers = [worker]  # type: ignore[list-item]
-    manager.validation_parent_conns = [conn]  # type: ignore[list-item]
+    pool = WorkerPool(conns=[conn], workers=[worker])  # type: ignore[list-item]
 
-    manager._stop_validation_workers()
+    pool.stop()
 
     assert conn.sent == (None, None)
     assert worker.join_calls == 1
@@ -415,4 +423,4 @@ def test_termination_and_hessian_disables_hessian_before_shutdown(tmp_path: Path
     total, _ = manager.termination_and_hessian(2, estimate_hessian=False)
 
     np.testing.assert_allclose(total, np.zeros((2, 2), dtype=np.float64))
-    assert manager.workers[0].join_calls == 1
+    assert manager.training.workers[0].join_calls == 1

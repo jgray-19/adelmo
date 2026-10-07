@@ -148,9 +148,9 @@ class LevenbergMarquardtOptimiser:
         larger lambda both shortens the step and rotates it toward ``-grad``.
         """
         if self.best_grad is None or self.best_hessian is None:
-            # Nothing has been accepted yet, so there is no curvature to retry
-            # from. Report convergence so the caller stops instead of spinning
-            # on a point it already knows it cannot evaluate.
+            # No step has been accepted, so there is no curvature to retry from.
+            # Report convergence so the caller stops rather than re-evaluating a
+            # point that cannot be evaluated.
             return LevenbergMarquardtUpdate(
                 next_params=self.best_params.copy(),
                 accepted=False,

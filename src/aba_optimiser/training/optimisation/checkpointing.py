@@ -239,11 +239,9 @@ class OptimisationCheckpointer:
                 vector, saved_knob_names, self._knob_names, fill_value=0.0
             )
 
-        if state_type in {"adam", "amsgrad"}:
+        if state_type == "adam":
             state["m"] = remap(cast("list[float]", state["m"]))
             state["v"] = remap(cast("list[float]", state["v"]))
-            if state_type == "amsgrad" and "v_hat_max" in state:
-                state["v_hat_max"] = remap(cast("list[float]", state["v_hat_max"]))
             return state
 
         if state_type == "lbfgs":

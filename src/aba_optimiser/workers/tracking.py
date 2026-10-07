@@ -328,8 +328,8 @@ end
         report = mad.recv()
         if report.get("lost"):
             # A lost preflight particle is handled the same way at runtime (the
-            # epoch is rejected); don't fail startup, just skip the count check
-            # since a truncated track gives a misleading observation count.
+            # epoch is rejected); startup does not fail; the count check is
+            # skipped because a truncated track gives a misleading observation count.
             LOGGER.warning(
                 "Worker %d: preflight particle lost; skipping observation-count check "
                 "(range=%s sdir=%d)",

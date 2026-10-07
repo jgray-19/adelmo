@@ -1,61 +1,51 @@
 """Fit bends and quads to closed orbit + phase, and hand back a closed-orbit reference.
 
-Why this exists
----------------
-A transverse-momentum reconstruction needs the closed orbit's *angle*
-``px``/``py`` at every BPM. BPMs measure position only, so the angle can come
-from nothing but a model -- and a nominal model that does not carry the machine's
-real magnet errors supplies an angle that is simply wrong. On PSB ring 3 with
-realistic dipole errors the nominal model's angle error *equals* the true angle:
-it contributes nothing.
+Purpose
+-------
+A transverse-momentum reconstruction requires the closed-orbit angle ``px``/``py``
+at every BPM. BPMs measure position only, so the angle must come from a model. A
+nominal model without the machine's magnet errors gives an incorrect angle; on PSB
+ring 3 with realistic dipole errors the nominal angle error equals the true angle.
 
-Fitting the errors from a plain closed-orbit measurement fixes that, but only if
-three things are right at once. Each was established by measurement, not
-assumption (see NOTES_offmom_investigation, sections E and F, in the tmom-recon
-repository):
+Fitting the errors to a closed-orbit measurement corrects this, subject to three
+requirements:
 
-1. **Regularise.** 80 knobs against 17 BPMs at realistic resolution, fitted with
-   no prior, is *worse than not fitting at all* -- the recovered error vector
-   comes out ~6x larger than the true one as the fit absorbs noise into
-   compensating magnet errors. A modest Tikhonov prior swings the same data from
-   2.7x worse than nominal to 22x better. This is the single most important
-   setting here, which is why it has a non-zero default.
-2. **Match the knob families to the observables.** The closed orbit is nearly
-   blind to gradient errors: a quadrupole on a centred orbit produces no
-   deflection. Giving an orbit-only fit free quadrupole knobs therefore makes it
-   ~2.6x *worse*, because the knobs only add noise-absorbing freedom. Phase does
-   respond to gradients, so with phase included the same quad knobs pay off ~4x.
-3. **Use more than one momentum.** At a single momentum the per-magnet Jacobians
-   are degenerate; see :class:`~aba_optimiser.workers.common.ClosedTwissData`.
+1. **Regularisation.** With 80 knobs against 17 BPMs at realistic resolution, an
+   unregularised fit recovers an error vector ~6x larger than the true one, because
+   noise is absorbed into compensating magnet errors. A Tikhonov prior changes the
+   result from 2.7x worse than nominal to 22x better, hence the non-zero default.
+2. **Knob families matched to observables.** The closed orbit is insensitive to
+   gradient errors (a quadrupole on a centred orbit produces no deflection), so
+   free quadrupole knobs in an orbit-only fit worsen the result by ~2.6x. Phase
+   advance responds to gradients; with phase included the same knobs improve it ~4x.
+3. **More than one momentum.** At a single momentum the per-magnet Jacobians are
+   degenerate; see :class:`~aba_optimiser.workers.common.ClosedTwissData`.
 
 Observables
 -----------
-The default is closed orbit plus phase advance, deliberately. Phase needs no
-amplitude calibration, and unlike beta-from-amplitude or a model-derived
-``DPX``/``DPY`` it does not feed a modelled quantity back into a model fit. Beta
-and dispersion are available through *observables* for callers whose measurement
-genuinely supports them.
+The default observables are closed orbit and phase advance. Phase requires no
+amplitude calibration and, unlike beta-from-amplitude or a model-derived
+``DPX``/``DPY``, does not feed a modelled quantity back into the model fit. Beta
+and dispersion can be selected through *observables* when the measurement supports
+them.
 
 Consuming the result
 --------------------
 :class:`MomentumReference` is plain data: fitted knob values and a per-BPM
-closed-orbit frame carrying ``x``/``y``/``px``/``py``. A downstream
-reconstruction takes those without importing anything from this package.
+closed-orbit frame with ``x``/``y``/``px``/``py``. A downstream reconstruction can
+use it without importing from this package.
 
-The reference is a *momentum origin*, not just an orbit: a reconstruction
-expressed against :attr:`MomentumReference.closed_orbit` sees only what the
-measurement has in excess of that orbit, so what it needs is the offset **from**
-:attr:`MomentumReference.reference_pt`, never the measurement's absolute ``pt``.
-The off-momentum study measured the difference at a reference sitting
-:math:`3\\times10^{-3}` off the origin: using the absolute ``pt`` as if it were
-the offset degrades the reconstructed ``px`` from 4.741e-4 to 7.702e-2, against
-1.162e-3 for the offset -- a factor 66. First order cancels either way; the whole
-penalty lands on the second-order dispersion term, so the mistake is invisible on
-a linear lattice and ruinous on a real one.
+The reference is a momentum origin as well as an orbit. A reconstruction expressed
+against :attr:`MomentumReference.closed_orbit` requires the offset *from*
+:attr:`MomentumReference.reference_pt`, not the measurement's absolute ``pt``. For
+a reference :math:`3\\times10^{-3}` off the origin, using the absolute ``pt`` as the
+offset degrades the reconstructed ``px`` from 4.741e-4 to 7.702e-2, against
+1.162e-3 for the offset. First order cancels either way; the error enters through
+the second-order dispersion term and is therefore absent on a linear lattice.
 
-Do not do that subtraction here. Pass the measured positions as
-``closed_orbit_at_zero`` and ``orbit_mode="dynamic"`` to ``tmom_recon``, and
-pass only the measurement momentum offset alongside them.
+The subtraction is not performed here. Pass the measured positions as
+``closed_orbit_at_zero`` with ``orbit_mode="dynamic"`` to ``tmom_recon``, together
+with the measurement momentum offset only.
 """
 
 from __future__ import annotations

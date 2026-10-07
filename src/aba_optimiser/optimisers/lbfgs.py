@@ -21,9 +21,9 @@ class LBFGSOptimiser(BaseOptimiser):
 
     Notes
     -----
-    * Two-loop recursion computes d_k = -H_k g_k; we only scale by lr_eff.
-    * H0 scaling gamma = (s^T y)/(y^T y) kept (good conditioning).
-    * BB1 multiplier uses the same (s,y) you already build; no extra evals.
+    * Two-loop recursion computes d_k = -H_k g_k; the result is scaled by lr_eff.
+    * Initial Hessian scaling gamma = (s^T y)/(y^T y) is retained for conditioning.
+    * The BB1 multiplier reuses the (s, y) pair already built; no extra evaluations.
     """
 
     def __init__(
@@ -123,11 +123,11 @@ class LBFGSOptimiser(BaseOptimiser):
     def _bb1_multiplier(self, s: np.ndarray, y: np.ndarray) -> float:
         """
         BB1 spectral step (s^T s)/(s^T y); clipped + EMA-smoothed.
-        Use only when we have a fresh pair.
+        Requires a fresh (s, y) pair.
         """
         denom = float(np.dot(s, y))
         if denom <= self.eps:
-            return self.eta_ema  # keep previous multiplier if curvature poor
+            return self.eta_ema  # retain previous multiplier if curvature is poor
         raw = float(np.dot(s, s)) / denom
         # clip to avoid outliers, then EMA
         raw = min(max(raw, self.bb_min), self.bb_max)

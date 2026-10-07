@@ -166,12 +166,8 @@ def _scale_position_variances_after_svd(
     leaves ``rank / n_bpms`` of its variance, so the cleaned data is more precise
     than the resolution the BPM table declares and its weight has to rise to match.
 
-    This used to be a hardcoded factor of 100, which is the LHC value: ~500 BPMs
-    over an auto-selected rank of ~5. On the PSB's 16 BPMs at rank 2 the true gain
-    is 8, so the constant over-weighted PSB positions by more than an order of
-    magnitude. Verified against simulation at 16/32/128 BPMs (measured 7.97, 16.41
-    and 60.85 against 8, 16 and 64) and against PSB tracking data, where the
-    measured gain is 9.2.
+    The gain depends on the machine: ~100 for the LHC (~500 BPMs, rank ~5) but 8
+    for the PSB (16 BPMs, rank 2), so it cannot be a constant.
     """
     result = df.copy()
     for plane, rank in zip(("x", "y"), svd_ranks, strict=True):

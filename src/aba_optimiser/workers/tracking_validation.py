@@ -132,8 +132,7 @@ class ValidationTrackingWorker(TrackingWorker):
 
     def _setup_da_maps(self, mad: MAD) -> None:
         """Create only the coordinate DA state needed for numeric tracking."""
-        mad.send("coord_names = {'x', 'px', 'y', 'py', 't', 'pt'}")
-        mad.send("da_x0_base = damap{nv=#coord_names, np=0, mo=1, po=1, vn=coord_names}")
+        mad.send("da_x0_base = damap{nv=6, np=0, mo=1, po=1}")
 
     def setup_mad_interface(self, init_knobs: dict[str, float]) -> tuple[MAD, int]:
         """Set up a non-gradient MAD interface."""

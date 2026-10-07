@@ -10,7 +10,7 @@ from __future__ import annotations
 import pandas as pd
 
 from aba_optimiser.training.data_manager import infer_kick_plane
-from aba_optimiser.training.workers.spawning import WorkerSpawner
+from aba_optimiser.training.workers.manager import select_worker_class
 from aba_optimiser.workers.tracking import TrackingWorker
 from aba_optimiser.workers.tracking_position_only import PositionOnlyTrackingWorker
 
@@ -42,7 +42,7 @@ def test_a_weakly_driven_second_plane_still_counts_as_dual_plane() -> None:
 
 
 def test_worker_class_follows_momentum_use_not_the_kick_plane() -> None:
-    assert WorkerSpawner.select_worker_class("xy", optimise_momenta=True) is TrackingWorker
-    assert WorkerSpawner.select_worker_class("xy", optimise_momenta=False) is PositionOnlyTrackingWorker
-    assert WorkerSpawner.select_worker_class("x", optimise_momenta=True) is TrackingWorker
-    assert WorkerSpawner.select_worker_class("y", optimise_momenta=False) is PositionOnlyTrackingWorker
+    assert select_worker_class("xy", optimise_momenta=True) is TrackingWorker
+    assert select_worker_class("xy", optimise_momenta=False) is PositionOnlyTrackingWorker
+    assert select_worker_class("x", optimise_momenta=True) is TrackingWorker
+    assert select_worker_class("y", optimise_momenta=False) is PositionOnlyTrackingWorker

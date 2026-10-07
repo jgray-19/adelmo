@@ -59,7 +59,7 @@ from aba_optimiser.accelerators import PSB
 from aba_optimiser.mad import GradientDescentMadInterface
 from aba_optimiser.mad.scripts import CLOSED_TWISS_INIT, PYTHON_IN_MAD
 from aba_optimiser.training.config.models import SequenceConfig
-from aba_optimiser.training.workers.lifecycle import WorkerLifecycleManager
+from aba_optimiser.training.workers.pool import WorkerPool
 from aba_optimiser.training_closed_twiss import (
     DEFAULT_OBSERVABLES,
     ClosedTwissFitter,
@@ -362,19 +362,17 @@ def _normal_matrix(
         measurements=measurements,
         observables=observables,
     )
-    manager = WorkerLifecycleManager(ClosedTwissWorker)
+    pool = WorkerPool()
     try:
-        manager.create_and_start_workers(
-            [(data, config, fitter.simulation_config) for config, data in fitter.worker_payloads],
-            send_handshake=False,
-        )
+        for worker_id, (config, data) in enumerate(fitter.worker_payloads):
+            pool.spawn(ClosedTwissWorker, worker_id, data, config, fitter.simulation_config)
         names = list(fitter.config_manager.knob_names)
         *_, normal_matrix, _ = fitter._collect_gn(
-            manager.channels, dict.fromkeys(names, 0.0), names
+            pool.channels, dict.fromkeys(names, 0.0), names
         )
         return normal_matrix, names
     finally:
-        manager.terminate_workers()
+        pool.stop()
         iface = getattr(fitter.config_manager, "mad_iface", None)
         if iface is not None:
             iface.close()

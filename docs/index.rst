@@ -1,80 +1,66 @@
-aba_optimiser documentation
-===========================
+aba_optimiser
+=============
 
-``aba_optimiser`` is a worker-based optimisation toolkit for accelerator magnet
-studies. The current documentation is intentionally narrow: it focuses on the
-API surface that is exercised by the automated tests and used by the main
-fitter-driven runtime.
+``aba_optimiser`` estimates accelerator magnet errors (strengths, misalignments and
+tilts) from beam measurements by gradient-based optimisation of MAD-NG models.
+Supported machines are the LHC, PSB, SPS and FCC.
 
-Use this site as a reference for:
+Two families of fit are provided:
 
-* accelerator definitions and runtime configuration dataclasses
-* MAD interface classes used to construct optimisation problems
-* tracking fitter, worker, and optimiser APIs
-* the shared measurement-preparation modules used by the PSB and LHC workflows
+.. list-table::
+   :header-rows: 1
+   :widths: 20 40 40
 
-Workflow guides and campaign-specific scripts are intentionally left out of the
-published docs until they have stronger validation coverage.
+   * - Fit
+     - Data
+     - Entry points
+   * - Tracking
+     - Turn-by-turn BPM data tracked through the model
+     - :class:`~aba_optimiser.training.ArcByArcFitter`,
+       :class:`~aba_optimiser.training.ACDMarkerFitter`,
+       :class:`~aba_optimiser.training.KickerFitter`
+   * - Closed twiss
+     - Closed orbit, phase advance, beta and dispersion
+     - :class:`~aba_optimiser.training_closed_twiss.ClosedOrbitFitter`,
+       :class:`~aba_optimiser.training_closed_twiss.ClosedTwissFitter`
 
-GitHub Dependencies
--------------------
+Installation
+------------
 
-Some parts of the repository rely on companion packages installed directly from
-GitHub rather than PyPI-only dependencies:
+Python 3.11 or later is required.
 
-* ``pymadng-utils`` provides shared accelerator abstractions, dp/p ↔ pt
-  conversion (``pymadng_utils.physics``), plus MAD/MAD-X helper utilities such
-  as knob file IO and interface glue used throughout the core runtime.
-* ``tmom-recon`` provides transverse and longitudinal momentum reconstruction,
-  AC-dipole measurement helpers, and optics reconstruction routines used by the
-  measurement and optics-oriented code paths.
-* ``xtrack-tools`` provides tracking helpers, environment initialisation, and
-  dataframe conversion utilities used by the higher-fidelity fitter and
-  simulation tests.
+.. code-block:: bash
 
-These dependencies are important because the tested end-to-end workflows in
-this repository are built around a larger accelerator-tooling stack rather than
-standalone numerical routines.
+   git clone https://github.com/jgray-19/sgd-magnet-tuner.git
+   cd sgd-magnet-tuner
+   pip install -e ".[test,docs,tracking]"
 
-AC-Dipole Measurement Reconstruction
-------------------------------------
+Companion packages
+------------------
 
-The PSB (``psb_md``) and LHC squeeze (``lhc_measurements.squeeze``)
-reconstructions follow the current ``tmom-recon`` and ``pymadng-utils``
-conventions:
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
 
-* Batch processing reconstructs each measurement once with
-  ``tmom_recon.calculate_acd_pz``. Live marker-momentum refreshes during a fit
-  (``aba_optimiser.measurements.acd_pipeline``) recompute the same cleaned
-  measurement after magnet changes.
-* The LHC MAD-NG model is updated with both the natural tunes and the driven
-  AC-dipole tunes via ``update_model_with_madng(..., tunes=..., drv_tunes=...)``.
-* The reconstruction Twiss is expected to be on-momentum. Momentum offsets are
-  carried through MAD-NG ``pt``; using an off-momentum Twiss would subtract a
-  dispersive closed orbit from the measured positions and bias the reconstructed
-  phase space.
-* The saved parquet keeps the usual BPM rows and appends the
-  ``<acd>_before`` / ``<acd>_after`` marker rows emitted by ``tmom-recon``
-  (``aba_optimiser.measurements.reconstruction.append_acd_marker_rows``) so
-  downstream ACD optimisation can initialise bidirectional tracking at the
-  reconstructed marker states.
-* Tune and corrector knob files extracted for each measurement frequency are
-  passed into the ACD MAD-NG driver, matching the optics state used for the
-  corresponding turn-by-turn measurement.
-* When b2 dipole error tables are enabled, the MAD interface requires a tune
-  knob file. Applying b2 errors shifts the machine tunes, so the interface
-  applies the error table and then restores the tunes before creating
-  optimisation knobs.
+   * - Package
+     - Purpose
+   * - `pymadng-utils <https://jgray-19.github.io/pymadng-utils/>`_
+     - Shared accelerator abstractions, dp/p and pt conversion
+       (``pymadng_utils.physics``), knob-file I/O.
+   * - `tmom-recon <https://jgray-19.github.io/tmom-recon/>`_
+     - Transverse momentum, AC-dipole and optics reconstruction.
+   * - `xtrack_tools <https://jgray-19.github.io/xtrack_tools/>`_
+     - Tracking helpers and dataframe conversion, used by the tests.
 
-Companion documentation:
-
-* ``sgd-magnet-tuner``: `jgray-19.github.io/sgd-magnet-tuner <https://jgray-19.github.io/sgd-magnet-tuner/>`_
-* ``pymadng-utils``: `jgray-19.github.io/pymadng-utils <https://jgray-19.github.io/pymadng-utils/>`_
-* ``tmom-recon``: `jgray-19.github.io/tmom-recon <https://jgray-19.github.io/tmom-recon/>`_
-* ``xtrack_tools``: `jgray-19.github.io/xtrack_tools <https://jgray-19.github.io/xtrack_tools/>`_
+The measurement and campaign workflows built on this package are maintained in
+separate repositories (``lhc_measurements``, ``psb_md``, ``psb_loco``, ``lhc_loco``
+and ``fcc_loco``) and are not documented here.
 
 .. toctree::
    :maxdepth: 2
-   :caption: API
+   :caption: Contents
 
+   user_guide
+   architecture
+   measurements
    api_reference

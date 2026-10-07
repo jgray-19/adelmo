@@ -30,18 +30,18 @@ class OptimiserConfig:
     max_lr: float
     min_lr: float
     gradient_converged_value: float
-    optimiser_type: str = field(default="adam")  # Options: "adam", "amsgrad", "lbfgs"
+    optimiser_type: str = field(default="adam")  # Options: "adam", "lbfgs"
 
     # Gradient smoothing for loss tracking
     grad_norm_alpha: float = field(default=0.2)
 
-    # L-BFGS-specific parameters (ignored for adam/amsgrad)
+    # L-BFGS-specific parameters (ignored for adam)
     lbfgs_history_size: int = field(default=10)
     lbfgs_max_grad_norm: float | None = field(default=1.0)
     lbfgs_max_step_norm: float | None = field(default=1.0)
     lbfgs_powell_damping: float = field(default=0.2)
 
-    # Adam/AMSGrad-specific parameters (ignored for lbfgs)
+    # Adam-specific parameters (ignored for lbfgs)
     adam_weight_decay: float = field(default=0.0)
     # None keeps each optimiser's own default. Lower it when the gradients are far
     # below the default, or eps rather than the gradient scale sets the step size.
@@ -69,16 +69,15 @@ class SimulationConfig:
     num_workers: int
     num_batches: int
 
-    # Fraction of the post-validation-split training data to actually use and
+    # Fraction of the post-validation-split training data to use and
     # distribute among the workers. 1.0 (default) uses every available training
     # turn; smaller values keep that fraction of each file's turns (per-file
     # stratified sampling). Must be in (0, 1].
     data_fraction: float = field(default=1.0)
 
-    # Fraction of the available turns held out per file as a genuine, disjoint
-    # validation set used only to measure generalisation (overfitting). These
-    # turns are removed from training entirely, so validation loss is a true
-    # out-of-sample signal. `data_fraction` is applied to the remaining training
+    # Fraction of the available turns held out per file as a disjoint validation
+    # set used only to measure generalisation. These turns are removed from
+    # training, so the validation loss is out-of-sample. `data_fraction` is applied to the remaining training
     # turns. Must be in [0, 1); 0.0 disables held-out validation.
     validation_fraction: float = field(default=0.1)
 
@@ -107,8 +106,8 @@ class SimulationConfig:
     worker_blas_threads: int | None = field(default=1)
 
     # Probe the workers at the initial knobs before optimising and mask BPMs and
-    # workers whose loss z-score exceeds the thresholds below, so obviously bad
-    # data cannot dominate the fit. Disable it to see the raw per-BPM behaviour.
+    # workers whose loss z-score exceeds the thresholds below, so grossly bad
+    # data cannot dominate the fit. Disable to obtain the raw per-BPM behaviour.
     enable_preloop_outlier_screening: bool = field(default=True)
     bpm_loss_outlier_sigma: float = field(default=3.0)
     worker_loss_outlier_sigma: float = field(default=3.0)

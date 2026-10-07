@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 
 from aba_optimiser.optimisers import adam as _adam  # noqa: F401
-from aba_optimiser.optimisers import amsgrad as _amsgrad  # noqa: F401
 from aba_optimiser.optimisers import lbfgs as _lbfgs  # noqa: F401
 from aba_optimiser.optimisers.base import BaseOptimiser
 from aba_optimiser.training.optimisation.checkpointing import OptimisationCheckpointer
@@ -95,7 +94,7 @@ class OptimisationLoop:
     def _init_optimiser(self, shape: tuple[int, ...], optimiser_config: OptimiserConfig) -> None:
         """Initialise the optimiser based on type."""
         optimiser_type = optimiser_config.optimiser_type
-        if optimiser_type in {"adam", "amsgrad"}:
+        if optimiser_type == "adam":
             eps = {} if optimiser_config.adam_eps is None else {"eps": optimiser_config.adam_eps}
             self.optimiser = BaseOptimiser.create(
                 optimiser_type,

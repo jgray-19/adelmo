@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 # directions: flooring them keeps the inverted covariance finite and non-negative
 # instead of exploding (or going negative through numerical noise).
 HESSIAN_MIN_EIGENVALUE = 1e-35
+# Relative eigenvalue (of the unit-diagonal normal matrix) below which a direction counts as unconstrained by the data.
+SINGULAR_REL_TOLERANCE = 1e-8
 
 class KickPlane(str, Enum):
     """Kick-plane options for worker routing and payload selection."""
@@ -235,14 +237,13 @@ class ClosedTwissData:
     ``weight_scale`` and ``total_points`` are the *global* loss normalisation and
     must be identical across every worker in a fit. Each worker divides its
     inverse-variance weights by ``weight_scale`` and its loss/gradient/Hessian by
-    ``total_points``. Were these derived per worker - from its own largest weight
-    and its own point count - the optimiser would minimise
-    ``sum_w (1/(max_w * N_w)) * chi2_w`` rather than the pooled ``sum_w chi2_w``,
-    so the most precisely measured momentum would be silently down-weighted for
-    being precise, and the reported 1-sigma (built from the un-normalised
-    ``JᵀWJ``) would describe an estimator different from the one that was
-    actually minimised. They are computed once, over every worker's
-    observables, by :func:`create_worker_payloads`.
+    ``total_points``. If derived per worker (from its own largest weight and point count), the
+    optimiser would minimise ``sum_w (1/(max_w * N_w)) * chi2_w`` instead of the
+    pooled ``sum_w chi2_w``. The most precisely measured momentum would then be
+    down-weighted, and the reported 1-sigma (built from the un-normalised
+    ``JᵀWJ``) would not describe the estimator that was minimised. They are
+    computed once, over every worker's observables, by
+    :func:`create_worker_payloads`.
     """
 
     bpm_names: list[str]
@@ -281,22 +282,6 @@ class WeightProcessor:
         np.divide(1.0, variances, out=weights, where=valid)
         return weights
 
-    @staticmethod
-    def normalise_weights_globally(*weights_arrays: np.ndarray) -> tuple[np.ndarray, ...]:
-        """Normalize multiple weight arrays globally so that the maximum across all is 1.
-
-        Args:
-            weights_arrays: Multiple arrays of weight values
-
-        Returns:
-            Tuple of normalized weight arrays
-        """
-        global_max = max(np.max(weights) for weights in weights_arrays)
-        if global_max > 0:
-            return tuple(weights / global_max for weights in weights_arrays)
-        return weights_arrays
-
-
 def _floored_inverse(matrix: np.ndarray, min_eigenvalue: float) -> np.ndarray:
     """Inverse of the symmetrised ``matrix`` with eigenvalues floored to ``min_eigenvalue``."""
     matrix = np.asarray(matrix, dtype=np.float64)
@@ -313,6 +298,41 @@ def _floored_inverse(matrix: np.ndarray, min_eigenvalue: float) -> np.ndarray:
             min_eigenvalue,
         )
     return (eigenvectors / clipped) @ eigenvectors.T
+
+
+def warn_if_singular(
+    normal_matrix: np.ndarray,
+    knob_names: list[str] | None = None,
+    *,
+    rel_tolerance: float = SINGULAR_REL_TOLERANCE,
+) -> int:
+    """Warn when the data normal matrix ``JᵀWJ`` is (near-)singular; returns the number of weak directions.
+
+    The matrix is first scaled to unit diagonal (a correlation matrix), so the test does not depend on the knobs' units.
+    Directions with an eigenvalue below ``rel_tolerance`` x the largest one are not constrained by the data: the fit
+    returns whatever the prior or the starting point puts there, and the reported uncertainties are only as good as the
+    prior. Pass the matrix *without* any prior added.
+    """
+    matrix = np.asarray(normal_matrix, dtype=np.float64)
+    sym = 0.5 * (matrix + matrix.T)
+    diagonal = np.diag(sym)
+    unconstrained = diagonal <= 0.0
+    scale = np.where(unconstrained, 1.0, np.sqrt(np.abs(diagonal)))
+    eigenvalues, eigenvectors = np.linalg.eigh(sym / np.outer(scale, scale))
+    weak = eigenvalues < rel_tolerance * max(float(eigenvalues[-1]), np.finfo(float).tiny)
+    n_weak = int(np.count_nonzero(weak))
+    if n_weak or unconstrained.any():
+        message = (
+            f"Normal matrix is near-singular: {n_weak} of {len(eigenvalues)} directions have eigenvalue < "
+            f"{rel_tolerance:.0e} x largest (unit-diagonal scaling), {int(unconstrained.sum())} knob(s) have no sensitivity at all. "
+            "The data do not constrain them; the fit is set there by the prior."
+        )
+        if knob_names is not None and n_weak:
+            weight = (eigenvectors[:, weak] ** 2).sum(axis=1)
+            worst = np.argsort(weight)[::-1][:5]
+            message += " Knobs most involved: " + ", ".join(f"{knob_names[i]} ({weight[i]:.2f})" for i in worst)
+        logger.warning(message)
+    return n_weak
 
 
 def merge_uncertainty_parts(parts: list[UncertaintyPart], n_knobs: int) -> UncertaintyPart:

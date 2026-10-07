@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 
 import numpy as np
 
@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from aba_optimiser.workers import WorkerConfig
 
 LOGGER = logging.getLogger(__name__)
+
+WorkerPayload: TypeAlias = tuple["TrackingData", "WorkerConfig", int]
 
 
 def observation_turn_offsets(cols: np.ndarray, sdir: int) -> np.ndarray:
@@ -164,10 +166,10 @@ class WorkerPayloadBuilder:
 
     @staticmethod
     def attach_global_weights(
-        payloads: list[tuple[TrackingData, WorkerConfig, int]],
+        payloads: list[WorkerPayload],
         *,
         optimise_momenta: bool = True,
-    ) -> list[tuple[TrackingData, WorkerConfig, int]]:
+    ) -> list[WorkerPayload]:
         """Precompute globally normalised weights for all tracking workers.
 
         Weights are inverse variances divided by the single largest weight, so all

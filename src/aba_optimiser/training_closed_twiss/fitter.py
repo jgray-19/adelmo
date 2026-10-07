@@ -16,12 +16,13 @@ from aba_optimiser.optimisers.levenberg_marquardt import (
     LevenbergMarquardtOptimiser,
 )
 from aba_optimiser.training.base_fitter import BaseFitter
-from aba_optimiser.training.workers.lifecycle import WorkerLifecycleManager
+from aba_optimiser.training.workers.pool import WorkerPool
 from aba_optimiser.workers import ClosedTwissData, ClosedTwissWorker, Observable, WorkerConfig
 from aba_optimiser.workers.common import (
     ObservableKind,
     WeightProcessor,
     hessian_uncertainties,
+    warn_if_singular,
 )
 
 if TYPE_CHECKING:
@@ -68,14 +69,13 @@ MEASUREMENT_COLUMNS: dict[str, tuple[str, str]] = {
 }
 
 #: Observables fitted when the caller does not choose: everything the closed
-#: twiss and an omc3 optics measurement independently have in common. Fitting all
-#: of them is the default because each family constrains a different combination
-#: of the knobs, and inverse-variance weighting means a noisy family costs
-#: nothing - it simply carries little weight. Narrow this only to isolate an
-#: effect deliberately, as the tests do.
+#: twiss and an omc3 optics measurement independently have in common. All of
+#: them are fitted by default: each family constrains a different combination of
+#: the knobs, and inverse-variance weighting gives a noisy family little weight.
+#: Narrow this only to isolate an effect, as the tests do.
 #:
-#: ``dpx``/``dpy`` are the one exclusion, and it is a correctness one rather than
-#: conservatism: omc3 does not measure them independently but *derives* them from
+#: ``dpx``/``dpy`` are the one exclusion, and it is required for correctness:
+#: omc3 does not measure them independently but *derives* them from
 #: ``DX``/``DY`` through the model transfer matrix, so including them counts one
 #: measurement twice. In the vertical it is worse than redundant - the derivation
 #: assumes no vertical dispersion source exists anywhere, which is exactly the
@@ -153,25 +153,19 @@ class _GaussNewtonFitter(BaseFitter):
     def run(self) -> tuple[dict[str, float], dict[str, float]]:
         """Execute the closed-twiss optimisation with a Gauss-Newton solve."""
         writer = self.setup_logging(self.log_suffix)
-        worker_manager = WorkerLifecycleManager(self.worker_class)
+        pool = WorkerPool()
         self.final_knobs = None
 
         try:
-            worker_manager.create_and_start_workers(
-                [(data, config, self.simulation_config) for config, data in self.worker_payloads],
-                send_handshake=False,
-            )
-            channels = worker_manager.channels
-            if channels is None:
-                raise RuntimeError("Worker channels are not initialised")
-
-            self.final_knobs, hessian, knob_names = self._gauss_newton(channels, writer)
+            for worker_id, (config, data) in enumerate(self.worker_payloads):
+                pool.spawn(self.worker_class, worker_id, data, config, self.simulation_config)
+            self.final_knobs, hessian, knob_names = self._gauss_newton(pool.channels, writer)
         except KeyboardInterrupt:
             logger.warning("KeyboardInterrupt: terminating closed-twiss optimisation early.")
             self.final_knobs = getattr(self, "final_knobs", None) or dict(self.initial_knobs)
             hessian, knob_names = None, list(self.config_manager.knob_names)
         finally:
-            worker_manager.terminate_workers()
+            pool.stop()
 
         if writer is not None:
             writer.close()
@@ -190,9 +184,9 @@ class _GaussNewtonFitter(BaseFitter):
         The closed twiss is close to linear in the knob strengths over the range
         a fit explores, so a curvature-preconditioned step (solve
         ``(H + lam·diag H) delta = -g`` with the summed Gauss-Newton Hessian
-        ``H``) converges in a handful of iterations and, unlike plain gradient
-        descent, actually resolves the weakly-conditioned directions the
-        multi-delta measurements make identifiable.
+        ``H``) converges in a few iterations and, unlike plain gradient descent,
+        resolves the weakly conditioned directions made identifiable by the
+        multi-delta measurements.
         """
         knob_names = list(self.config_manager.knob_names)
         current = np.array([float(self.initial_knobs[name]) for name in knob_names], dtype=float)
@@ -210,9 +204,11 @@ class _GaussNewtonFitter(BaseFitter):
         for iteration in range(self.lm_config.max_iterations):
             completed_iterations = iteration + 1
             current_knobs = dict(zip(knob_names, (float(v) for v in current), strict=False))
-            loss, grad, hessian, _hessian_phys, particle_loss = self._collect_gn(
+            loss, grad, hessian, hessian_phys, particle_loss = self._collect_gn(
                 channels, current_knobs, knob_names
             )
+            if iteration == 0 and not particle_loss:
+                warn_if_singular(hessian_phys, knob_names)  # before the prior is added
             if self.prior_strengths and not particle_loss:
                 if prior_alphas is None:
                     prior_alphas = _prior_alphas(
@@ -662,9 +658,9 @@ def _stamp_global_normalisation(payloads: list[tuple[WorkerConfig, ClosedTwissDa
         scale is tuned against; dividing by each worker's own count would make a
         momentum measured at fewer BPMs count for more per point.
 
-    Both cancel out of the Gauss-Newton step ``H^-1 g`` when applied uniformly,
-    which is precisely why they must be uniform: the fit is then invariant to
-    them, and only the physical inverse-variance weights decide the answer.
+    Both cancel out of the Gauss-Newton step ``H^-1 g`` when applied uniformly, so
+    they must be uniform: the fit is then invariant to them and only the physical
+    inverse-variance weights determine the result.
     """
     weights = [
         WeightProcessor.variance_to_weight(np.asarray(observable.variances, dtype=float))
@@ -769,11 +765,10 @@ def _build_observable(
             f"n={variances.size}, finite={int(np.count_nonzero(finite))}, "
             f"positive=0, zero={int(np.count_nonzero(finite & (variances == 0)))}, "
             f"negative={int(np.count_nonzero(finite & (variances < 0)))}. "
-            f"Column {err_column!r} is empty or identically zero. Falling back to a "
-            "1/<target^2> weight is not an option here: that scale is in this "
-            "family's own physical units, so against families that do carry real "
-            "variances it is not a weight at all -- the family is silently deleted "
-            "from the fit. Supply real errors, or set use_errors=False so *every* "
+            f"Column {err_column!r} is empty or identically zero. A 1/<target^2> "
+            "fallback weight is not used: it is in this family's own physical units, "
+            "so against families with real variances it would effectively remove the "
+            "family from the fit. Supply real errors, or set use_errors=False so every "
             "family is normalised the same way."
         )
 
