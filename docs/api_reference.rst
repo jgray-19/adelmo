@@ -52,8 +52,8 @@ MAD Interface Layer
    aba_optimiser.mad.machine_state
 
 
-Closed-Orbit Fitting
---------------------
+Closed-Orbit Fitting (POCO)
+---------------------------
 
 .. autosummary::
    :toctree: _autosummary
@@ -62,34 +62,48 @@ Closed-Orbit Fitting
    aba_optimiser.poco.closed_orbit
    aba_optimiser.poco.calibrated
    aba_optimiser.poco.fitter
+   aba_optimiser.poco.lm_loop
+   aba_optimiser.poco.prior
    aba_optimiser.workers.closed_orbit
    aba_optimiser.workers.closed_twiss
    aba_optimiser.workers.calibrated_closed_orbit
 
 
-Optimisation Runtime
---------------------
+Tracking Fits
+-------------
 
 .. autosummary::
    :toctree: _autosummary
 
    aba_optimiser.training
-   aba_optimiser.training.base_fitter
    aba_optimiser.training.tracking.fitter
-   aba_optimiser.training.config
-   aba_optimiser.training.config.helpers
-   aba_optimiser.training.config.manager
-   aba_optimiser.training.config.models
-   aba_optimiser.training.config.tracking
+   aba_optimiser.training.tracking.session
    aba_optimiser.training.tracking.data_manager
-   aba_optimiser.training.optimisation
+   aba_optimiser.training.tracking.workers.payloads
+   aba_optimiser.training.tracking.workers.screening
+   aba_optimiser.training.tracking.workers.setup
+   aba_optimiser.training.tracking.workers.turn_planner
+   aba_optimiser.training.tracking.workers.uncertainty_drain
    aba_optimiser.training.sgd.loop
    aba_optimiser.training.sgd.scheduler
-   aba_optimiser.training.workers
-   aba_optimiser.training.workers.manager
-   aba_optimiser.training.tracking.workers.payloads
-   aba_optimiser.training.tracking.workers.setup
+   aba_optimiser.training.sgd.checkpointing
+   aba_optimiser.training.config
+   aba_optimiser.training.config.helpers
+   aba_optimiser.training.config.models
+   aba_optimiser.training.config.tracking
+
+
+Shared Fitting Runtime
+----------------------
+
+.. autosummary::
+   :toctree: _autosummary
+
+   aba_optimiser.training.machine_setup
    aba_optimiser.training.pool
+   aba_optimiser.training.lifecycle
+   aba_optimiser.training.reduction
+   aba_optimiser.training.results
 
 
 Workers
@@ -99,11 +113,11 @@ Workers
    :toctree: _autosummary
 
    aba_optimiser.workers
+   aba_optimiser.workers.protocol
    aba_optimiser.workers.abstract_worker
    aba_optimiser.workers.common
+   aba_optimiser.workers.shared_reference
    aba_optimiser.workers.tracking
-   aba_optimiser.workers.tracking_position_only
-   aba_optimiser.workers.tracking_validation
 
 
 Optimisers And Numerical Helpers
@@ -112,6 +126,7 @@ Optimisers And Numerical Helpers
 .. autosummary::
    :toctree: _autosummary
 
+   aba_optimiser.optimisers.base
    aba_optimiser.optimisers.adam
    aba_optimiser.optimisers.lbfgs
    aba_optimiser.optimisers.levenberg_marquardt
