@@ -32,7 +32,7 @@ LOGGER = logging.getLogger(__name__)
 class CalibratedClosedOrbitWorker(ClosedOrbitWorker):
     """Worker that fits ``(1 + b_bpm) * model(q, kicks * (1 + g_corrector))`` to the measured orbit changes.
 
-    Every calibrated corrector that is on (a non-zero ``k_<corrector>`` global) in either the series' state or its
+    Every calibrated corrector that is on (a non-zero ``<kick_prefix><corrector>`` global) in either the series' state or its
     reference state has its whole kick scaled by its gain, in both states.
 
     Assumes the baseline lattice has no enabled correctors: a kick that is non-zero only in the baseline (not set by
@@ -47,10 +47,11 @@ class CalibratedClosedOrbitWorker(ClosedOrbitWorker):
         """One more knob per corrector that is on in this worker's series: its gain offset, after the magnet knobs."""
         correctors = list(
             dict.fromkeys(
-                name[2:].upper()
+                corrector
                 for series in self.series
                 for name, value in (*series.data.machine_state.items(), *series.data.reference_state.items())
-                if name.startswith("k_") and name[2:].upper() in series.data.calibration.correctors and value != 0.0
+                if (corrector := series.data.calibration.corrector_of(name)) in series.data.calibration.correctors
+                and value != 0.0
             )
         )
         gain_knobs = [corrector_gain_knob_name(corrector) for corrector in correctors]
@@ -70,10 +71,11 @@ class CalibratedClosedOrbitWorker(ClosedOrbitWorker):
         """
         state = self._states[role]
         assign_state(mad, state)
+        spec = self.series[0].data.calibration
         commands = []
         for name, kick in state.items():
-            corrector = name[2:].upper()
-            if name.startswith("k_") and corrector in self._correctors and kick != 0.0:
+            corrector = spec.corrector_of(name)
+            if corrector in self._correctors and kick != 0.0:
                 gain = 1.0 + float(knob_updates.get(corrector_gain_name(corrector), 0.0))
                 knob = corrector_gain_knob_name(corrector)
                 commands.append(f"MADX['{name}'] = \\-> {kick:.15e} * ({gain:.15e} + loaded_sequence['{knob}'])")

@@ -42,12 +42,12 @@ LOGGER = logging.getLogger(__name__)
 class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
     """:class:`ClosedOrbitFitter` with ``(1 + b_bpm)(1 + g_corrector)`` calibration parameters.
 
-    Every series' own ``machine_state`` must set exactly one ``k_<corrector>`` kick (its change from the fitter's
+    Every series' own ``machine_state`` must set exactly one ``<kick_prefix><corrector>`` kick (its change from the fitter's
     ``machine_state`` is worked out internally); the corrector's gain is named after it. The BPM gains are
     eliminated by a Schur complement each iteration and recovered by back-substitution, so the Levenberg-Marquardt solve
     is over the magnet knobs and the corrector gains only. ``sigma_bpm`` / ``sigma_corrector`` are Gaussian priors that
-    also fix the ``b``/``g`` scale degeneracy. ``knob_sigmas`` (knob name -> absolute width, in the knob's units) adds a
-    Gaussian prior on those magnet knobs; knobs it does not name stay free. After the fit, :attr:`calibration_result` holds every gain.
+    also fix the ``b``/``g`` scale degeneracy. ``knob_sigmas`` (knob name, or terminal attribute such as ``dk1l`` for every knob ending in it, -> absolute width in the
+    knob's units) adds a Gaussian prior on those magnet knobs; knobs it does not name stay free. ``prior_strengths`` is not used. After the fit, :attr:`calibration_result` holds every gain.
     """
 
     worker_class = CalibratedClosedOrbitWorker
@@ -71,7 +71,9 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
         sigma_corrector: float = 1e-2,
         knob_sigmas: Mapping[str, float] | None = None,
         loss_only_trials: bool = True,
+        kick_prefix: str = "k_",
     ) -> None:
+        self.kick_prefix = kick_prefix
         self.knob_sigmas = {name.lower(): float(sigma) for name, sigma in (knob_sigmas or {}).items()}
         if any(sigma <= 0 for sigma in self.knob_sigmas.values()):
             raise ValueError("knob_sigmas must be > 0")
@@ -105,15 +107,16 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
         if any(tuple(data.bpm_names) != bpms for _, data in payloads):
             raise ValueError("Calibration fits need every series to observe the same BPMs")
         kicks = [
-            [name for name in resolve_machine_state(item.machine_state) if name.startswith("k_")]
+            [name for name in resolve_machine_state(item.machine_state) if name.startswith(self.kick_prefix)]
             for item in self.series
         ]
         if any(len(names) != 1 for names in kicks):
             raise ValueError(
-                f"Calibration fits need every series' machine_state to set exactly one 'k_<corrector>' kick, got {kicks}"
+                f"Calibration fits need every series' machine_state to set exactly one "
+                f"'{self.kick_prefix}<corrector>' kick, got {kicks}"
             )
-        correctors = tuple(dict.fromkeys(names[0][2:].upper() for names in kicks))
-        self.calibration_spec = CalibrationSpec(bpms, correctors)
+        correctors = tuple(dict.fromkeys(names[0][len(self.kick_prefix) :].upper() for names in kicks))
+        self.calibration_spec = CalibrationSpec(bpms, correctors, self.kick_prefix)
         for _, data in payloads:
             data.calibration = self.calibration_spec
         groups = distribute([len(item.measurements) for item in self.series], self.n_workers)
@@ -192,10 +195,13 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
         g_names = [corrector_gain_name(c) for c in spec.correctors]
         b_names = [bpm_gain_name(plane, bpm) for plane in PLANES for bpm in spec.bpms]
 
-        unknown = sorted(set(self.knob_sigmas) - {name.lower() for name in knob_names})
+        attributes = [name.rpartition(".")[2].lower() for name in knob_names]
+        unknown = sorted(set(self.knob_sigmas) - {name.lower() for name in knob_names} - set(attributes))
         if unknown:
             raise ValueError(f"knob_sigmas names knobs that are not optimised: {unknown[:5]}")
-        sigma_q = np.array([self.knob_sigmas.get(name.lower(), 0.0) for name in knob_names])
+        sigma_q = np.array(
+            [self.knob_sigmas.get(name.lower(), self.knob_sigmas.get(attribute, 0.0)) for name, attribute in zip(knob_names, attributes)]
+        )
 
         u = np.zeros(n_q + n_g)
         u[:n_q] = [float(self.machine.initial_knobs[name]) for name in knob_names]

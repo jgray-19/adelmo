@@ -124,3 +124,21 @@ def test_series_must_set_exactly_one_corrector_kick(seq_k: Path) -> None:
     for state in ({}, {"k_dhz2l4": TRIM, "k_dhz8l1": TRIM}):
         with pytest.raises(ValueError, match="exactly one 'k_<corrector>' kick"):
             _fitter(seq_k, [ClosedOrbitSeries(measurement, machine_state=state)])
+
+
+def test_kick_prefix_names_the_corrector_globals(seq_psb: Path) -> None:
+    """With ``kick_prefix="kbr3"`` the sequence's own corrector variables carry the gains; no renaming needed."""
+    truth = _truth(seq_psb, seed=8)
+    labels = ("nominal", "both", "opposite", "focusing-up", "defocusing-down")
+    series = [_series(seq_psb, truth, label, "kbr3dhz2l4", gain=0.1) for label in labels]
+    series += [_series(seq_psb, truth, label, "kbr3dhz8l1") for label in labels]
+
+    fitter = _fitter(seq_psb, series, sigma_corrector=0.5, kick_prefix="kbr3", knob_sigmas={"dx": 1e-3, "dy": 1e-3})
+    try:
+        fitter.run()
+    finally:
+        fitter.close()
+
+    assert fitter.calibration_spec.correctors == ("DHZ2L4", "DHZ8L1")
+    gains = fitter.calibration_result
+    assert gains["corrgain.DHZ2L4"] - gains["corrgain.DHZ8L1"] == pytest.approx(0.1, abs=0.03)

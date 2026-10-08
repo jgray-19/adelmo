@@ -35,10 +35,18 @@ def corrector_gain_knob_name(corrector: str) -> str:
 
 @dataclass(frozen=True)
 class CalibrationSpec:
-    """Global gain layout shared by every series: BPM names (both planes) and corrector names."""
+    """Global gain layout shared by every series: BPM names (both planes), corrector names and the kick globals' prefix."""
 
     bpms: tuple[str, ...]
     correctors: tuple[str, ...]
+    #: A corrector's kick global is ``<kick_prefix><corrector>`` (case-insensitive), e.g. ``k_dhz2l4``.
+    kick_prefix: str = "k_"
+
+    def corrector_of(self, global_name: str) -> str | None:
+        """The upper-case corrector a kick global belongs to, or ``None`` if *global_name* is not a kick."""
+        if not global_name.startswith(self.kick_prefix):
+            return None
+        return global_name[len(self.kick_prefix) :].upper()
 
 
 class CalibrationBlocks:
