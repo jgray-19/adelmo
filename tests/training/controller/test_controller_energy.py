@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
-from aba_optimiser.config import OptimiserConfig
+from adelmo.config import OptimiserConfig
 from tests.training.controller_test_utils import (
     DPP_VALUE,
     _build_energy_optimisation_case,
@@ -21,7 +21,7 @@ from tests.training.controller_test_utils import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from aba_optimiser.machine.mad.aba_mad_interface import AbaMadInterface
+    from adelmo.machine.mad.aba_mad_interface import AbaMadInterface
 
 
 pytestmark = pytest.mark.serial

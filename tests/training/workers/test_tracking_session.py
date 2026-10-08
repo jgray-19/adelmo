@@ -6,19 +6,19 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from aba_optimiser.config import SimulationConfig
-from aba_optimiser.fitting.pool import WorkerPool
-from aba_optimiser.fitting.protocol import STOP, Ack, CommandKind, LossReply
-from aba_optimiser.fitting.worker import KickPlane, WorkerConfig
-from aba_optimiser.machine.accelerators import PSB
-from aba_optimiser.tracking.config.tracking import TrackingPlan
-from aba_optimiser.tracking.data_manager import FileTracks
-from aba_optimiser.tracking.dispatch.payloads import WorkerPayloadBuilder
-from aba_optimiser.tracking.dispatch.screening import OutlierScreener
-from aba_optimiser.tracking.dispatch.setup import WorkerRuntimeMetadata, WorkerSetupHelper
-from aba_optimiser.tracking.session import TrackingSession
-from aba_optimiser.tracking.uncertainty import UncertaintyPart, drain_uncertainty
-from aba_optimiser.tracking.worker import PrecomputedTrackingWeights, TrackingData, TrackingWorker
+from adelmo.config import SimulationConfig
+from adelmo.fitting.pool import WorkerPool
+from adelmo.fitting.protocol import STOP, Ack, CommandKind, LossReply
+from adelmo.fitting.worker import KickPlane, WorkerConfig
+from adelmo.machine.accelerators import PSB
+from adelmo.tracking.config.tracking import TrackingPlan
+from adelmo.tracking.data_manager import FileTracks
+from adelmo.tracking.dispatch.payloads import WorkerPayloadBuilder
+from adelmo.tracking.dispatch.screening import OutlierScreener
+from adelmo.tracking.dispatch.setup import WorkerRuntimeMetadata, WorkerSetupHelper
+from adelmo.tracking.session import TrackingSession
+from adelmo.tracking.uncertainty import UncertaintyPart, drain_uncertainty
+from adelmo.tracking.worker import PrecomputedTrackingWeights, TrackingData, TrackingWorker
 
 if TYPE_CHECKING:
     from pathlib import Path

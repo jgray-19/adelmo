@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from aba_optimiser.poco.calibration import (
+from adelmo.poco.calibration import (
     CalibrationBlocks,
     add_series,
     apply_prior,
@@ -58,6 +58,7 @@ def blocks_at(q, g, b):
     for s in SERIES:
         m, jac, d_gain = orbit(s, q, g)
         add_series(blocks, m, jac, d_gain[..., None], s["targets"], s["weights"], b[COLS], COLS, [s["corr"]])
+    blocks.symmetrise()
     return blocks
 
 

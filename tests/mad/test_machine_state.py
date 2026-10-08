@@ -18,9 +18,9 @@ import pytest
 import tfs
 from pymadng_utils.io.utils import save_knobs
 
-from aba_optimiser.machine.accelerators import PSB
-from aba_optimiser.machine.mad import GenericMadInterface, merge_machine_states
-from aba_optimiser.machine.mad.machine_state import resolve_machine_state
+from adelmo.machine.accelerators import PSB
+from adelmo.machine.mad import GenericMadInterface, merge_machine_states
+from adelmo.machine.mad.machine_state import resolve_machine_state
 
 if TYPE_CHECKING:
     from pathlib import Path

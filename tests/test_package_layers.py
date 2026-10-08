@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-import aba_optimiser
+import adelmo
 
-PACKAGE_ROOT = Path(aba_optimiser.__file__).parent
+PACKAGE_ROOT = Path(adelmo.__file__).parent
 
 #: Packages each package must never import.
 FORBIDDEN = {
@@ -37,7 +37,7 @@ def _imported_packages(path: Path) -> set[str]:
             continue
         for name in names:
             parts = name.split(".")
-            if parts[0] == "aba_optimiser" and len(parts) > 1:
+            if parts[0] == "adelmo" and len(parts) > 1:
                 packages.add(parts[1])
     return packages
 

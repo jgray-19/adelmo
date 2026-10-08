@@ -6,12 +6,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from aba_optimiser.measurements.acd_pipeline import (
+from adelmo.measurements.acd_pipeline import (
     ACDOpticsAnalysisConfig,
     long_frame_to_tbt_data,
     run_driven_and_compensated_optics,
 )
-from aba_optimiser.tracking.data_manager import FileTracks
+from adelmo.tracking.data_manager import FileTracks
 
 
 def test_long_frame_to_tbt_data_preserves_name_and_turn_order() -> None:

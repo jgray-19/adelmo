@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 import pytest
 import tfs
 
-from aba_optimiser.machine.accelerators import LHC
-from aba_optimiser.machine.mad.optimising_mad_interface import GenericMadInterface
+from adelmo.machine.accelerators import LHC
+from adelmo.machine.mad.optimising_mad_interface import GenericMadInterface
 
 if TYPE_CHECKING:
     from pathlib import Path

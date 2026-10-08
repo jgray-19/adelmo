@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from aba_optimiser.machine.accelerators import PSB
+from adelmo.machine.accelerators import PSB
 
 if TYPE_CHECKING:
     from pathlib import Path

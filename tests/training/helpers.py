@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING
 import tfs
 from xtrack_tools.env import initialise_env
 
-from aba_optimiser.machine.accelerators import LHC
-from aba_optimiser.machine.mad import (
+from adelmo.machine.accelerators import LHC
+from adelmo.machine.mad import (
     AbaMadInterface,
     GenericMadInterface,
     GradientDescentMadInterface,

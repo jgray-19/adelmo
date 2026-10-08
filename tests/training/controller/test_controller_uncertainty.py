@@ -6,13 +6,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from aba_optimiser.fitting.config import OutputConfig
-from aba_optimiser.fitting.protocol import Evaluate
-from aba_optimiser.fitting.uncertainty import HESSIAN_MIN_EIGENVALUE, sandwich_uncertainties
-from aba_optimiser.fitting.weights import variance_to_weight
-from aba_optimiser.machine.mad import merge_machine_states
-from aba_optimiser.tracking.fitter import ArcByArcFitter, FitterOptions, TrackingFitter
-from aba_optimiser.tracking.uncertainty import (
+from adelmo.fitting.config import OutputConfig
+from adelmo.fitting.protocol import Evaluate
+from adelmo.fitting.uncertainty import HESSIAN_MIN_EIGENVALUE, sandwich_uncertainties
+from adelmo.fitting.weights import variance_to_weight
+from adelmo.machine.mad import merge_machine_states
+from adelmo.tracking.fitter import ArcByArcFitter, FitterOptions, TrackingFitter
+from adelmo.tracking.uncertainty import (
     UncertaintyPart,
     merge_uncertainty_parts,
     noise_matrix,
@@ -148,9 +148,9 @@ def test_controller_worker_hessian_matches_finite_difference_on_reduced_knob_sub
     seq_b1,
     loaded_interface,
 ) -> None:
-    from aba_optimiser.fitting.config import SequenceConfig
-    from aba_optimiser.machine.accelerators import LHC
-    from aba_optimiser.tracking.config.helpers import create_arc_measurement_config
+    from adelmo.fitting.config import SequenceConfig
+    from adelmo.machine.accelerators import LHC
+    from adelmo.tracking.config.helpers import create_arc_measurement_config
     from tests.training.controller_test_utils import (
         _generate_nonoise_track,
         _make_optimiser_config_quad,
@@ -256,10 +256,10 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
     seq_psb,
     loaded_psb_interface,
 ) -> None:
-    from aba_optimiser.config import OptimiserConfig
-    from aba_optimiser.fitting.config import SequenceConfig
-    from aba_optimiser.machine.accelerators import PSB
-    from aba_optimiser.tracking.config.helpers import create_arc_measurement_config
+    from adelmo.config import OptimiserConfig
+    from adelmo.fitting.config import SequenceConfig
+    from adelmo.machine.accelerators import PSB
+    from adelmo.tracking.config.helpers import create_arc_measurement_config
     from tests.training.controller_test_utils import (
         _generate_nonoise_track,
         _make_simulation_config_quad,
@@ -325,11 +325,10 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
             true_strengths=magnet_strengths.copy(),
         ),
     )
-    weight_normaliser = _compute_training_weight_normaliser(ctrl)
-
     terminated = False
     try:
         ctrl.start_session(ctrl.machine.initial_knobs)
+        weight_normaliser = _compute_training_weight_normaliser(ctrl)
         base_knobs = ctrl.machine.true_strengths.copy()
         base_vec = np.array(
             [base_knobs[name] for name in ctrl.machine.knob_names],

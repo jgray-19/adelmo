@@ -22,9 +22,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
-from aba_optimiser.machine.accelerators import PSB
-from aba_optimiser.machine.mad import GradientDescentMadInterface
-from aba_optimiser.machine.mad.scripts import PYTHON_IN_MAD
+from adelmo.machine.accelerators import PSB
+from adelmo.machine.mad import GradientDescentMadInterface
+from adelmo.machine.mad.scripts import PYTHON_IN_MAD
 
 from .test_closed_orbit_cofind import COORDS, _send_init, _solve
 

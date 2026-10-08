@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING
 import pytest
 from pymadng_utils.physics import PROTON_MASS_GEV
 
-from aba_optimiser.machine.accelerators.base import Accelerator, KnobSpec, MagnetFamily
+from adelmo.machine.accelerators.base import Accelerator, KnobSpec, MagnetFamily
 
 if TYPE_CHECKING:
-    from aba_optimiser.machine.mad.aba_mad_interface import AbaMadInterface
+    from adelmo.machine.mad.aba_mad_interface import AbaMadInterface
 
 
 class ConcreteAccelerator(Accelerator):

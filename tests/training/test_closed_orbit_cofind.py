@@ -38,17 +38,17 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
-from aba_optimiser.config import SimulationConfig
-from aba_optimiser.fitting.worker import WorkerConfig
-from aba_optimiser.machine.accelerators import PSB
-from aba_optimiser.machine.mad import GradientDescentMadInterface
-from aba_optimiser.machine.mad.scripts import CLOSED_TWISS_INIT, PYTHON_IN_MAD
-from aba_optimiser.poco.workers.closed_orbit import (
+from adelmo.config import SimulationConfig
+from adelmo.fitting.worker import WorkerConfig
+from adelmo.machine.accelerators import PSB
+from adelmo.machine.mad import GradientDescentMadInterface
+from adelmo.machine.mad.scripts import CLOSED_TWISS_INIT, PYTHON_IN_MAD
+from adelmo.poco.workers.closed_orbit import (
     ClosedOrbitMeasurementData,
     ClosedOrbitSeriesData,
     ClosedOrbitWorker,
 )
-from aba_optimiser.poco.workers.closed_twiss import (
+from adelmo.poco.workers.closed_twiss import (
     ClosedTwissData,
     ClosedTwissWorker,
     Observable,

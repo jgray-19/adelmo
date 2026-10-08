@@ -14,8 +14,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
-from aba_optimiser.machine.accelerators import PSB
-from aba_optimiser.machine.mad.optimising_mad_interface import (
+from adelmo.machine.accelerators import PSB
+from adelmo.machine.mad.optimising_mad_interface import (
     GenericMadInterface,
     GradientDescentMadInterface,
 )

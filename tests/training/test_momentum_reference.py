@@ -1,4 +1,4 @@
-"""Physics tests for :mod:`aba_optimiser.momentum_reference`.
+"""Physics tests for :mod:`adelmo.momentum_reference`.
 
 The quantity under test is the closed-orbit *angle* ``px`` at the BPMs. It cannot
 be measured -- BPMs read position -- so a momentum reconstruction has to take it
@@ -26,9 +26,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from aba_optimiser.machine.accelerators import PSB
-from aba_optimiser.machine.mad import GradientDescentMadInterface
-from aba_optimiser.momentum_reference import (
+from adelmo.machine.accelerators import PSB
+from adelmo.machine.mad import GradientDescentMadInterface
+from adelmo.momentum_reference import (
     ORBIT_AND_PHASE,
     closed_orbit_at,
     fit_momentum_reference,
@@ -197,7 +197,7 @@ def test_a_single_momentum_is_rejected(seq_psb: Path) -> None:
 
 def test_orbit_alone_with_quad_knobs_is_rejected(seq_psb: Path) -> None:
     """Gradient knobs with no gradient-sensitive observable is a measured mistake."""
-    from aba_optimiser.momentum_reference import _check_observable_knob_match
+    from adelmo.momentum_reference import _check_observable_knob_match
 
     with pytest.raises(ValueError, match="blind to gradients"):
         _check_observable_knob_match(_both(seq_psb), ("x", "y"))

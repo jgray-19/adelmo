@@ -3,7 +3,7 @@
 ```bash
 pytest -m "not slow"     # fast suite
 pytest -m slow           # convergence and end-to-end tests
-pytest --cov=aba_optimiser
+pytest --cov=adelmo
 ```
 
 ## Markers

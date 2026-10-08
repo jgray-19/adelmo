@@ -5,11 +5,11 @@ import random
 import pandas as pd
 import pytest
 
-from aba_optimiser.config import SimulationConfig
-from aba_optimiser.tracking.config.tracking import TrackingPlan, _boundary_turns_for_track
-from aba_optimiser.tracking.data_manager import DataManager, _marker_order
-from aba_optimiser.tracking.dispatch.turn_planner import allocate_batches_per_file
-from aba_optimiser.tracking.dispatch.turn_planner import group_turns_by_file as _group_turns_by_file
+from adelmo.config import SimulationConfig
+from adelmo.tracking.config.tracking import TrackingPlan, _boundary_turns_for_track
+from adelmo.tracking.data_manager import DataManager, _marker_order
+from adelmo.tracking.dispatch.turn_planner import allocate_batches_per_file
+from adelmo.tracking.dispatch.turn_planner import group_turns_by_file as _group_turns_by_file
 
 _DEFAULT_TRACKING_PLAN = TrackingPlan()
 

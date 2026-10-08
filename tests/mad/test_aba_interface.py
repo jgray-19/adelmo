@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 import tfs
 
-from aba_optimiser.machine.accelerators import LHC
-from aba_optimiser.machine.mad.aba_mad_interface import AbaMadInterface
+from adelmo.machine.accelerators import LHC
+from adelmo.machine.mad.aba_mad_interface import AbaMadInterface
 from tests.mad.helpers import (
     check_interface_basic_init,
     cleanup_interface,

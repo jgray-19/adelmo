@@ -9,12 +9,12 @@ from typing import TYPE_CHECKING
 import pytest
 import xtrack as xt
 
-from aba_optimiser.config import OptimiserConfig
-from aba_optimiser.fitting.config import OutputConfig, SequenceConfig
-from aba_optimiser.machine.accelerators import PSB
-from aba_optimiser.machine.mad import merge_machine_states
-from aba_optimiser.tracking.config.helpers import create_arc_measurement_config
-from aba_optimiser.tracking.fitter import ACDMarkerFitter, FitterOptions
+from adelmo.config import OptimiserConfig
+from adelmo.fitting.config import OutputConfig, SequenceConfig
+from adelmo.machine.accelerators import PSB
+from adelmo.machine.mad import merge_machine_states
+from adelmo.tracking.config.helpers import create_arc_measurement_config
+from adelmo.tracking.fitter import ACDMarkerFitter, FitterOptions
 from tests.training.controller_test_utils import (
     _load_mad_twiss_for_tracking,
     _make_simulation_config_quad,
@@ -25,7 +25,7 @@ from tests.training.controller_test_utils import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from aba_optimiser.machine.mad.aba_mad_interface import AbaMadInterface
+    from adelmo.machine.mad.aba_mad_interface import AbaMadInterface
 
 pytest.importorskip("tmom_recon")
 pytest.importorskip("xtrack_tools")

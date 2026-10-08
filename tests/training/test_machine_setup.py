@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from aba_optimiser.config import SimulationConfig
-from aba_optimiser.fitting.config import OutputConfig, SequenceConfig
-from aba_optimiser.fitting.setup import MachineSetup
-from aba_optimiser.machine.accelerators import LHC
-from aba_optimiser.tracking.config.models import MeasurementConfig, MeasurementDetails
-from aba_optimiser.tracking.config.tracking import TrackingPlan
-from aba_optimiser.tracking.ranges import resolve_bpm_ranges
+from adelmo.config import SimulationConfig
+from adelmo.fitting.config import OutputConfig, SequenceConfig
+from adelmo.fitting.setup import MachineSetup
+from adelmo.machine.accelerators import LHC
+from adelmo.tracking.config.models import MeasurementConfig, MeasurementDetails
+from adelmo.tracking.config.tracking import TrackingPlan
+from adelmo.tracking.ranges import resolve_bpm_ranges
 
 START, END = "BPM.9R1.B1", "BPM.9L2.B1"
 KNOB = "MQ.11R1.B1.dk1l"  # a quadrupole inside START/END

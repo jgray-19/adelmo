@@ -53,10 +53,10 @@ import pandas as pd
 import pytest
 from pymadng_utils.io.utils import save_knobs
 
-from aba_optimiser.fitting.config import SequenceConfig
-from aba_optimiser.machine.accelerators import PSB
-from aba_optimiser.machine.mad import GradientDescentMadInterface
-from aba_optimiser.poco import (
+from adelmo.fitting.config import SequenceConfig
+from adelmo.machine.accelerators import PSB
+from adelmo.machine.mad import GradientDescentMadInterface
+from adelmo.poco import (
     ClosedOrbitFitter,
     ClosedOrbitMeasurement,
     ClosedOrbitSeries,

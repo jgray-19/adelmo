@@ -8,26 +8,26 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from aba_optimiser.config import SimulationConfig
-from aba_optimiser.fitting.protocol import Evaluate, GradReply
-from aba_optimiser.fitting.worker import WorkerConfig
-from aba_optimiser.machine.accelerators import PSB
-from aba_optimiser.machine.mad import GradientDescentMadInterface
-from aba_optimiser.poco import (
+from adelmo.config import SimulationConfig
+from adelmo.fitting.protocol import Evaluate, GradReply
+from adelmo.fitting.worker import WorkerConfig
+from adelmo.machine.accelerators import PSB
+from adelmo.machine.mad import GradientDescentMadInterface
+from adelmo.poco import (
     ClosedOrbitMeasurement,
     ClosedOrbitSeries,
 )
-from aba_optimiser.poco.fitter import (
+from adelmo.poco.fitter import (
     apply_prior,
     prior_alphas,
     validate_prior_strengths,
 )
-from aba_optimiser.poco.workers.closed_orbit import (
+from adelmo.poco.workers.closed_orbit import (
     ClosedOrbitMeasurementData,
     ClosedOrbitSeriesData,
     ClosedOrbitWorker,
 )
-from aba_optimiser.poco.workers.closed_twiss import Observable
+from adelmo.poco.workers.closed_twiss import Observable
 
 if TYPE_CHECKING:
     from pathlib import Path

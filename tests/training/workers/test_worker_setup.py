@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from aba_optimiser.machine.accelerators import PSB, SPS
-from aba_optimiser.tracking.config.tracking import ACDTrackingPlan, TrackingPlan
-from aba_optimiser.tracking.dispatch.setup import WorkerRangeSpec, WorkerSetupHelper
+from adelmo.machine.accelerators import PSB, SPS
+from adelmo.tracking.config.tracking import ACDTrackingPlan, TrackingPlan
+from adelmo.tracking.dispatch.setup import WorkerRangeSpec, WorkerSetupHelper
 
 if TYPE_CHECKING:
     from pathlib import Path

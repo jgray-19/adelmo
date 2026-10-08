@@ -1,6 +1,6 @@
 """FCC accelerator knob selection (no MAD-NG)."""
 
-from aba_optimiser.machine.accelerators import FCC
+from adelmo.machine.accelerators import FCC
 
 
 def test_quad_k1_knob_spec(tmp_path):

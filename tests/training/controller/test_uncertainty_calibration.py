@@ -22,13 +22,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from aba_optimiser.config import OptimiserConfig, SimulationConfig
-from aba_optimiser.fitting.config import OutputConfig, SequenceConfig
-from aba_optimiser.fitting.uncertainty import sandwich_uncertainties
-from aba_optimiser.machine.mad import merge_machine_states
-from aba_optimiser.tracking.config.helpers import create_arc_measurement_config
-from aba_optimiser.tracking.config.models import MeasurementConfig
-from aba_optimiser.tracking.fitter import ArcByArcFitter, FitterOptions
+from adelmo.config import OptimiserConfig, SimulationConfig
+from adelmo.fitting.config import OutputConfig, SequenceConfig
+from adelmo.fitting.uncertainty import sandwich_uncertainties
+from adelmo.machine.mad import merge_machine_states
+from adelmo.tracking.config.helpers import create_arc_measurement_config
+from adelmo.tracking.config.models import MeasurementConfig
+from adelmo.tracking.fitter import ArcByArcFitter, FitterOptions
 from tests.training.controller_test_utils import (
     DPP_VALUE,
     FLATTOP_TURNS,
@@ -40,7 +40,7 @@ from tests.training.controller_test_utils import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from aba_optimiser.machine.mad.aba_mad_interface import AbaMadInterface
+    from adelmo.machine.mad.aba_mad_interface import AbaMadInterface
 
 pytestmark = [pytest.mark.slow, pytest.mark.serial]
 

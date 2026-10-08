@@ -1,6 +1,6 @@
 import numpy as np
 
-from aba_optimiser.optimisers.lbfgs import LBFGSOptimiser
+from adelmo.optimisers.lbfgs import LBFGSOptimiser
 
 
 class TestLBFGSOptimiser:

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from aba_optimiser.tracking.dispatch.payloads import WorkerPayloadBuilder
-from aba_optimiser.tracking.dispatch.turn_planner import allocate_batches_per_file
+from adelmo.tracking.dispatch.payloads import WorkerPayloadBuilder
+from adelmo.tracking.dispatch.turn_planner import allocate_batches_per_file
 
 
 def test_allocate_batches_spreads_across_files() -> None:
