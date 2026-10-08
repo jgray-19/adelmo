@@ -1,14 +1,14 @@
 Measurement Preparation
 =======================
 
-The modules in ``aba_optimiser.measurements`` prepare AC-dipole (ACD) measurements for
+The modules in ``adelmo.measurements`` prepare AC-dipole (ACD) measurements for
 fitting. They follow the conventions of ``tmom-recon`` and ``pymadng-utils``.
 
 Reconstruction
 --------------
 
 * Each measurement is reconstructed once with ``tmom_recon.calculate_acd_pz``. Marker
-  momenta refreshed during a fit (:mod:`aba_optimiser.measurements.acd_pipeline`)
+  momenta refreshed during a fit (:mod:`adelmo.measurements.acd_pipeline`)
   recompute the same cleaned measurement after the magnets change.
 * The reconstruction Twiss must be on-momentum. Momentum offsets are carried through
   MAD-NG ``pt``; an off-momentum Twiss would subtract a dispersive closed orbit from
@@ -21,8 +21,8 @@ Output format
 
 The saved parquet contains the BPM rows and the ``<acd>_before`` / ``<acd>_after``
 marker rows emitted by ``tmom-recon``
-(:func:`aba_optimiser.measurements.reconstruction.append_acd_marker_rows`). The
-:class:`~aba_optimiser.tracking.ACDMarkerFitter` uses the marker rows as initial
+(:func:`adelmo.measurements.reconstruction.append_acd_marker_rows`). The
+:class:`~adelmo.tracking.ACDMarkerFitter` uses the marker rows as initial
 conditions for bidirectional tracking.
 
 Machine state

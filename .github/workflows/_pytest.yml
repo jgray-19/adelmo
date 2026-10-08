@@ -51,7 +51,7 @@ jobs:
 
           if [[ -n "$COVERAGE" ]]; then
             args+=(
-              --cov=aba_optimiser
+              --cov=adelmo
               --cov-branch
               --cov-report=xml:coverage.xml
             )

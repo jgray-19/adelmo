@@ -1,7 +1,7 @@
-aba_optimiser
+adelmo
 =============
 
-``aba_optimiser`` estimates accelerator magnet errors (strengths, misalignments and
+``adelmo`` estimates accelerator magnet errors (strengths, misalignments and
 tilts) from beam measurements by gradient-based optimisation of MAD-NG models.
 Supported machines are the LHC, PSB, SPS and FCC.
 
@@ -16,13 +16,13 @@ Two families of fit are provided:
      - Entry points
    * - Tracking
      - Turn-by-turn BPM data tracked through the model
-     - :class:`~aba_optimiser.tracking.ArcByArcFitter`,
-       :class:`~aba_optimiser.tracking.ACDMarkerFitter`,
-       :class:`~aba_optimiser.tracking.KickerFitter`
+     - :class:`~adelmo.tracking.ArcByArcFitter`,
+       :class:`~adelmo.tracking.ACDMarkerFitter`,
+       :class:`~adelmo.tracking.KickerFitter`
    * - Closed twiss
      - Closed orbit, phase advance, beta and dispersion
-     - :class:`~aba_optimiser.poco.ClosedOrbitFitter`,
-       :class:`~aba_optimiser.poco.ClosedTwissFitter`
+     - :class:`~adelmo.poco.ClosedOrbitFitter`,
+       :class:`~adelmo.poco.ClosedTwissFitter`
 
 Installation
 ------------

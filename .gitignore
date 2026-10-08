@@ -179,7 +179,7 @@ plots/
 artifacts/measurements/plots/
 *.out
 *.png
-!src/aba_optimiser/mad/mad_scripts/
+!src/adelmo/mad/mad_scripts/
 !tests/data
 
 # AFS filesystem temp files
@@ -234,3 +234,7 @@ tests/data/sequences/*.mad
 /optimise_quads_output.txt
 /claude_prompt.txt
 /claude_schedule.sh
+
+# build and run artefacts
+*.o
+/test_run_*.txt

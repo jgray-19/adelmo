@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aba_optimiser"
+name = "adelmo"
 version = "0.1.0"
 description = "Knob strength optimisation using PyMAD-NG"
 authors = [
@@ -83,12 +83,12 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["aba_optimiser*"]
+include = ["adelmo*"]
 
 [tool.coverage.run]
 # Use the importable package name so coverage can map executed files correctly
 # in CI even when the project is installed into site-packages.
-source = ["aba_optimiser"]
+source = ["adelmo"]
 relative_files = true
 
 [tool.pytest.ini_options]

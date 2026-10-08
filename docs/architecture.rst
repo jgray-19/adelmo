@@ -67,35 +67,35 @@ Package layout
 Imports only point down this list; the two engines never import each other
 (``tests/test_package_layers.py`` checks it).
 
-``aba_optimiser.momentum_reference``
+``adelmo.momentum_reference``
     Momentum reference from blank measurements; uses both engines.
-``aba_optimiser.tracking``
+``adelmo.tracking``
     The tracking engine: fitters, ``TrackingSession``, BPM ranges, ``DataManager``,
     the tracking worker and its uncertainty parts. ``tracking.dispatch`` builds the
     worker payloads, plans turns and screens outliers; ``tracking.sgd`` holds the SGD
     loop, learning-rate schedule and checkpointing; ``tracking.config`` the
     measurement, kicker and checkpoint settings and the tracking plans.
-``aba_optimiser.poco``
+``adelmo.poco``
     The POCO engine: Levenberg-Marquardt fitters for closed-orbit and closed-twiss
     data, priors, BPM-gain and corrector calibration, and their workers
     (``poco.workers``).
-``aba_optimiser.fitting``
+``adelmo.fitting``
     What both engines share: ``MachineSetup``, ``SequenceConfig`` and
     ``OutputConfig``, the worker protocol and base worker, the shared-memory
     reference, the worker pool, run lifecycle, reply reduction, loss weights,
     uncertainties and ``FitResult``.
-``aba_optimiser.optimisers``
+``adelmo.optimisers``
     Adam, L-BFGS and Levenberg-Marquardt.
-``aba_optimiser.machine``
+``adelmo.machine``
     ``machine.accelerators``: machine definitions (``LHC``, ``PSB``, ``SPS``,
     ``FCC``), knob families, BPM pattern and tune configuration. ``machine.mad``: the
     MAD-NG interfaces; ``GenericMadInterface`` builds the model,
     ``GradientDescentMadInterface`` adds the optimisation knobs and derivatives, and
     ``machine_state`` handles fixed machine-state inputs.
-``aba_optimiser.measurements``
+``adelmo.measurements``
     Measurement preparation shared by the PSB and LHC workflows: reconstruction,
     ACD marker rows, BPM noise and variances.
-``aba_optimiser.analysis``
+``adelmo.analysis``
     Degeneracy checks.
 
 Knob conventions
