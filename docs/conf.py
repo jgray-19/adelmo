@@ -16,13 +16,13 @@ if str(SRC_DIR) not in sys.path:
 
 # -- Project information -----------------------------------------------------
 
-project = "aba_optimiser"
+project = "adelmo"
 author = "Joshua Gray"
 current_year = datetime.now().year
 copyright = f"{current_year}, {author}"  # noqa: A001
 
 try:
-    release = importlib.metadata.version("aba_optimiser")
+    release = importlib.metadata.version("adelmo")
 except importlib.metadata.PackageNotFoundError:
     release = "0.1.0"
 version = release
@@ -74,6 +74,7 @@ autodoc_mock_imports = [
 templates_path = ["_templates"]
 exclude_patterns: list[str] = [
     "_build",
+    "reports",
     "Thumbs.db",
     ".DS_Store",
 ]
@@ -91,7 +92,7 @@ def setup(app):  # type: ignore[override]
 
 html_theme = "shibuya"
 html_static_path = ["_static"]
-html_title = "aba_optimiser documentation"
+html_title = "adelmo documentation"
 
 # -- Intersphinx configuration ----------------------------------------------
 

@@ -1,6 +1,6 @@
 import numpy as np
 
-from aba_optimiser.optimisers.adam import AdamOptimiser
+from adelmo.optimisers.adam import AdamOptimiser
 
 
 class TestAdamOptimiser:
@@ -109,7 +109,7 @@ class TestAdamOptimiser:
         optim = AdamOptimiser(shape=shape, beta1=0.85, beta2=0.95, eps=1e-8, weight_decay=0.02)
         params_after_first = optim.step(params, grads1, lr)
 
-        state = optim.state_to_dict()
+        state = optim.state_dict()
         restored = AdamOptimiser(shape=shape)
         restored.load_state_dict(state)
 

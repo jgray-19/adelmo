@@ -15,11 +15,6 @@ import xtrack as xt
 pytest.importorskip("tmom_recon")
 pytest.importorskip("xtrack_tools")
 from pymadng_utils.io.utils import save_knobs
-from tmom_recon.kicker.test_utils import (
-    realign_kicker_turns,
-    select_kicker_element,
-    strip_inline_flags,
-)
 from xtrack_tools.coordinates import create_initial_conditions
 from xtrack_tools.kicker import _insert_exciter_at, _knl_ksl
 from xtrack_tools.monitors import (
@@ -29,23 +24,87 @@ from xtrack_tools.monitors import (
 )
 from xtrack_tools.tracking import run_tracking, run_tracking_without_ac_dipole
 
-from aba_optimiser.config import OptimiserConfig, SimulationConfig
-from aba_optimiser.physics.deltap import dp2pt
-from aba_optimiser.simulation.data_processing import prepare_track_dataframe
-from aba_optimiser.training.controller import Controller
-from aba_optimiser.training.controller_config import (
-    MeasurementConfig,
-    OutputConfig,
-    SequenceConfig,
-)
+from adelmo.config import OptimiserConfig, SimulationConfig
+from adelmo.fitting.config import OutputConfig, SequenceConfig
+from adelmo.machine.mad import merge_machine_states
+from adelmo.tracking.config.helpers import create_arc_measurement_config
+from adelmo.tracking.dispatch.screening import OutlierScreener
+from adelmo.tracking.fitter import ArcByArcFitter, FitterOptions, TrackingFitter
 from tests.training.helpers import TRACK_COLUMNS, generate_xsuite_env_with_errors
+
+# Measurement noise assigned to the synthetic tracks' variance columns.
+POSITION_STD_DEV = 1e-4
+MOMENTUM_STD_DEV = 3e-6
+
+KICKER_PATTERNS = (
+    r"^mk",
+    r"kick",
+    r"^mcb",
+    r"^mke",
+    r"^mki",
+    r"\.ksw",
+    r"\.dhz",
+    r"\.dvt",
+)
+
+
+def select_kicker_element(line) -> str | None:
+    """Return the first element name that looks like a kicker/corrector."""
+    for pattern in KICKER_PATTERNS:
+        for name in line.element_names:
+            if re.search(pattern, name, flags=re.IGNORECASE):
+                return name
+    return None
+
+
+def strip_inline_flags(pattern: str) -> str:
+    """Remove a leading inline case-insensitive flag for safe embedding."""
+    if pattern.startswith("(?i)"):
+        return pattern[4:]
+    return pattern
+
+
+def realign_kicker_turns(
+    tracking_df: pd.DataFrame,
+    *,
+    kicker_name: str,
+    logical_turns: int,
+) -> pd.DataFrame:
+    """Realign turns so each logical turn starts immediately after the kicker."""
+    parts: list[pd.DataFrame] = []
+    marker_name = kicker_name.upper()
+
+    for _turn, turn_df in tracking_df.groupby("turn", sort=False):
+        turn_names = turn_df["name"].str.upper().to_numpy()
+        marker_rows = np.flatnonzero(turn_names == marker_name)
+        if marker_rows.size == 0:
+            parts.append(turn_df)
+            continue
+
+        marker_idx = int(marker_rows[0])
+        if marker_idx > 0:
+            before = turn_df.iloc[:marker_idx].copy()
+            before["turn"] = before["turn"] - 1
+            parts.append(before)
+        parts.append(turn_df.iloc[marker_idx:].copy())
+
+    realigned = pd.concat(parts, ignore_index=True)
+    return realigned.loc[(realigned["turn"] >= 1) & (realigned["turn"] <= logical_turns)].copy()
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     import xtrack as xt
 
-    from aba_optimiser.mad.aba_mad_interface import AbaMadInterface
+    from adelmo.machine.mad.aba_mad_interface import AbaMadInterface
+
+
+def _load_mad_twiss_for_tracking(
+    interface_with_beam: AbaMadInterface,
+    dpp_value: float,
+) -> pd.DataFrame:
+    """Load MAD-NG twiss data for off-momentum tracking initial conditions."""
+    return interface_with_beam.run_twiss(observe=0, deltap=dpp_value).copy()
 
 
 def _run_track_with_model(
@@ -61,49 +120,47 @@ def _run_track_with_model(
     use_diagonal_kicks: bool = True,
     combine_particles_into_single_file: bool = False,
     return_dataframes: bool = False,
+    twiss_data: pd.DataFrame | None = None,
 ) -> list[Path] | list[pd.DataFrame]:
     """Run tracking with the given model and initial conditions."""
     input_particles = len(action_list)
     if len(angle_list) != input_particles:
         raise ValueError("action_list and angle_list must have the same length")
+    if twiss_data is None:
+        raise ValueError("twiss_data must be provided; controller tests should use MAD-NG twiss")
 
     line: xt.Line = env[line_name]
+    resolved_start_marker = start_marker
+    if resolved_start_marker is None:
+        monitor_names = get_monitor_names_at_pattern(line, bpm_pattern)
+        if not monitor_names:
+            raise ValueError(f"No BPMs matched pattern {bpm_pattern!r} in line {line_name!r}")
+        # Start tracking at the first observed BPM so action-angle initialisation
+        # uses a physical monitor rather than a synthetic drift element.
+        resolved_start_marker = str(monitor_names[0])
     monitored_line = run_tracking_without_ac_dipole(
         line=line,
-        tws=line.twiss4d(),
+        tws=twiss_data,
         flattop_turns=flattop_turns,
         bpm_pattern=bpm_pattern,
         action_list=action_list,
         angle_list=angle_list,
         use_diagonal_kicks=use_diagonal_kicks,
         deltas=dpp_value,
-        start_marker=start_marker,
+        start_marker=resolved_start_marker,
     )
 
     true_dfs = line_to_dataframes(monitored_line)
     processed_dfs = []
     for true_df in true_dfs:
-        df = prepare_track_dataframe(
-            true_df,
-            0,
-            flattop_turns,
-        )
+        df = true_df
+        df["turn"] = df["turn"].astype(np.int32)
+        df["bunch_number"] = 0
+        df["var_x"] = df["var_y"] = POSITION_STD_DEV**2
+        df["var_px"] = df["var_py"] = MOMENTUM_STD_DEV**2
         df = df.loc[:, TRACK_COLUMNS].copy()
         df["name"] = df["name"].astype(str)
         processed_dfs.append(df)
-
-    # # Debugging, plot the phase space at the first BPM:
-    # import matplotlib.pyplot as plt
-    # first_bpm = processed_dfs[0].iloc[0]["name"]
-    # for df in processed_dfs:
-    #     bpm_df = df[df["name"] == first_bpm]
-    #     plt.plot(bpm_df["x"], bpm_df["px"], "o", label="x-px")
-    #     plt.plot(bpm_df["y"], bpm_df["py"], "o", label="y-py")
-    # plt.xlabel("Position (m)")
-    # plt.ylabel("Momentum (rad)")
-    # plt.title("Phase space at first BPM")
-    # plt.legend()
-    # plt.show()
 
     if return_dataframes:
         return processed_dfs
@@ -116,6 +173,7 @@ def _run_track_with_model(
         for idx, df in enumerate(processed_dfs):
             particle_df = df.copy()
             particle_df["turn"] = particle_df["turn"] + idx * flattop_turns
+            particle_df["bunch_number"] = idx
             offset_dfs.append(particle_df)
         combined_df = pd.concat(offset_dfs, ignore_index=True)
         combined_df.to_parquet(destination, index=False)
@@ -152,10 +210,10 @@ def _generate_nonoise_track(
 ) -> tuple[Path | None, dict[str, float], Path | None]:
     """Generate a parquet file containing noiseless tracking data for the requested BPMs."""
     corrector_file: Path | None = None
-    tune_knobs_file: Path | None = None
+    tune_knobs: Path | None = None
     if apply_orbit_correction:
         corrector_file = destination.parent / f"corrector_{destination.stem}.tfs"
-    tune_knobs_file = destination.parent / f"tune_knobs_{destination.stem}.txt"
+    tune_knobs = destination.parent / f"tune_knobs_{destination.stem}.txt"
 
     env, magnet_strengths, matched_tunes, corrector_table = generate_xsuite_env_with_errors(
         interface_with_beam,
@@ -168,7 +226,7 @@ def _generate_nonoise_track(
         target_qy=target_qy,
     )
     del corrector_table
-    save_knobs(matched_tunes, tune_knobs_file)
+    save_knobs(matched_tunes, tune_knobs)
 
     action = 4e-7 if interface_with_beam.accelerator.seq_name.lower() == "sps" else 4e-8
     angle = 0.0
@@ -183,6 +241,10 @@ def _generate_nonoise_track(
         else:
             angle_list = (np.linspace(0.0, 2 * np.pi, num=num_particles, endpoint=False)).tolist()
         action_list = [action] * num_particles
+
+    # MAD-NG's off-momentum twiss is more robust here than xsuite's periodic
+    # twiss solve, so pass it directly into xtrack_tools.
+    mad_twiss = _load_mad_twiss_for_tracking(interface_with_beam, dpp_value)
 
     # run_madng_tracking(
     #     interface=interface_with_beam,
@@ -205,8 +267,9 @@ def _generate_nonoise_track(
         line_name=interface_with_beam.accelerator.seq_name.lower(),
         bpm_pattern=bpm_pattern,
         use_diagonal_kicks=use_diagonal_kicks,
+        twiss_data=mad_twiss,
     )
-    return corrector_file, magnet_strengths, tune_knobs_file
+    return corrector_file, magnet_strengths, tune_knobs
 
 
 def _generate_kicker_track(
@@ -221,24 +284,38 @@ def _generate_kicker_track(
     apply_orbit_correction: bool = True,
     target_qx: float = 0.28,
     target_qy: float = 0.31,
+    magnet_strengths: dict[str, float] | None = None,
+    bpms: list[str] | None = None,
+    correctors: list[str] | None = None,
 ) -> tuple[Path | None, dict[str, float], Path | None, str]:
-    """Generate a parquet file containing kicker tracking data with x/px/y/py."""
+    """Generate a parquet file containing kicker tracking data with x/px/y/py.
+
+    ``magnet_strengths`` fixes the quadrupole truth instead of drawing a fresh
+    random perturbation: pass ``None`` once to perturb and capture the truth,
+    then pass that same dict back in for every other ``dpp_value`` against the
+    same ``interface_with_beam`` so all measurements describe one machine
+    viewed at different momenta, rather than compounding a new perturbation
+    on top of the previous one on each call.
+    """
     corrector_file: Path | None = None
-    tune_knobs_file: Path | None = None
+    tune_knobs: Path | None = None
     if apply_orbit_correction:
         corrector_file = destination.parent / f"corrector_{destination.stem}.tfs"
-    tune_knobs_file = destination.parent / f"tune_knobs_{destination.stem}.txt"
+    tune_knobs = destination.parent / f"tune_knobs_{destination.stem}.txt"
 
-    env, magnet_strengths, matched_tunes, _ = generate_xsuite_env_with_errors(
+    env, generated_strengths, matched_tunes, _ = generate_xsuite_env_with_errors(
         interface_with_beam,
         dpp_value=dpp_value,
         corrector_file=corrector_file,
-        perturb_quads=True,
+        perturb_quads=magnet_strengths is None,
         apply_orbit_correction=apply_orbit_correction,
         target_qx=target_qx,
         target_qy=target_qy,
+        bpms=bpms,
+        correctors=correctors,
     )
-    save_knobs(matched_tunes, tune_knobs_file)
+    magnet_strengths = magnet_strengths or generated_strengths
+    save_knobs(matched_tunes, tune_knobs)
 
     seq_name = interface_with_beam.accelerator.seq_name.lower()
     line: xt.Line = env[seq_name]
@@ -246,6 +323,7 @@ def _generate_kicker_track(
     if kicker_name is None:
         pytest.skip("No kicker-like element found in sequence for test")
 
+    mad_twiss = _load_mad_twiss_for_tracking(interface_with_beam, dpp_value)
     tws = line.twiss(method="4d")
     frev = float(1.0 / tws.t_rev0)
     s_kicker = float(line.get_s_position(kicker_name))
@@ -266,12 +344,12 @@ def _generate_kicker_track(
     monitor_pattern = rf"(?i:{bpm_pattern_clean})|{re.escape(kicker_name)}"
     monitor_names = get_monitor_names_at_pattern(kicked_line, monitor_pattern)
     start_elem = kicked_line.element_names[0].upper()
-    co_row = tws.rows[start_elem] if start_elem in tws.name else tws.rows[0]
+    co_row = mad_twiss.loc[start_elem] if start_elem in mad_twiss.index else mad_twiss.iloc[0]
     particles: xt.Particles = kicked_line.build_particles(
-        x=float(co_row["x"][0]),
-        px=float(co_row["px"][0]),
-        y=float(co_row["y"][0]),
-        py=float(co_row["py"][0]),
+        x=float(co_row["x"]),
+        px=float(co_row["px"]),
+        y=float(co_row["y"]),
+        py=float(co_row["py"]),
         delta=dpp_value,
     )
 
@@ -289,8 +367,13 @@ def _generate_kicker_track(
         flattop_turns=flattop_turns + 1,
         add_variance_columns=True,
     )
+    tracking_df["bunch_number"] = 0
     tracking_df = tracking_df.loc[:, TRACK_COLUMNS].copy()
     tracking_df["name"] = tracking_df["name"].astype(str)
+    # realign re-groups each turn's rows to begin just after the kicker, giving the
+    # cycled (kicker-relative) BPM order that MAD observes when it tracks the full
+    # sequence cycled to the kicker. The worker compares observables positionally,
+    # so the saved per-turn order must match that cycled order.
     tracking_df = realign_kicker_turns(
         tracking_df,
         kicker_name=kicker_name,
@@ -300,14 +383,13 @@ def _generate_kicker_track(
         raise ValueError(f"Kicker marker {kicker_name} missing from tracking output")
     tracking_df.to_parquet(destination, index=False)
 
-    return corrector_file, magnet_strengths, tune_knobs_file, kicker_name.upper()
+    return corrector_file, magnet_strengths, tune_knobs, kicker_name.upper()
 
 
 DPP_VALUE = 1.25e-4
 FLATTOP_TURNS = 256
 def _make_simulation_config_energy(optimise_momenta: bool = True) -> SimulationConfig:
     return SimulationConfig(
-        tracks_per_worker=2,
         num_workers=3,
         num_batches=2,
         optimise_momenta=optimise_momenta,
@@ -330,10 +412,10 @@ def _build_energy_optimisation_case(
     target_qy: float = 0.31,
     dpp_value: float = DPP_VALUE,
     flattop_turns: int = FLATTOP_TURNS,
-) -> tuple[Controller, dict[str, float]]:
+) -> tuple[TrackingFitter, dict[str, float]]:
     """Build one energy optimisation controller and its true internal knob values."""
     off_dpp_path = tmp_path / "track_off_dpp.parquet"
-    corrector_file, _, tune_knobs_file = _generate_nonoise_track(
+    corrector_file, _, tune_knobs = _generate_nonoise_track(
         loaded_interface,
         flattop_turns,
         off_dpp_path,
@@ -345,16 +427,14 @@ def _build_energy_optimisation_case(
     )
 
     sequence_config = SequenceConfig(magnet_range=magnet_range)
-    measurement_config = MeasurementConfig(
-        measurement_files=off_dpp_path,
-        corrector_files=corrector_file,
-        tune_knobs_files=tune_knobs_file,
-        flattop_turns=flattop_turns,
-        bunches_per_file=1,
-    )
+    measurement_config = create_arc_measurement_config(off_dpp_path, machine_state=merge_machine_states(corrector_file, tune_knobs))
 
     accel = loaded_interface.accelerator.copy_with(optimise_energy=True)
-    ctrl = Controller(
+    output_config = OutputConfig(
+        mad_logfile=tmp_path / mad_log_name,
+        write_tensorboard_logs=False,
+    )
+    ctrl = ArcByArcFitter(
         accel,
         optimiser_config,
         simulation_config,
@@ -362,17 +442,12 @@ def _build_energy_optimisation_case(
         measurement_config,
         bpm_start_points,
         bpm_end_points,
-        output_config=OutputConfig(
-            mad_logfile=tmp_path / mad_log_name,
-            write_tensorboard_logs=False,
+        options=FitterOptions(
+            output_config=output_config,
         ),
     )
     true_knobs = {
-        "pt": dp2pt(
-            dpp_value,
-            mass=loaded_interface.accelerator.energy - loaded_interface.accelerator.kinetic_energy,
-            energy=loaded_interface.accelerator.energy,
-        )
+        "pt": loaded_interface.accelerator.dp2pt(dpp_value)
     }
     return ctrl, true_knobs
 
@@ -417,39 +492,51 @@ def _make_optimiser_config_quad() -> OptimiserConfig:
         max_epochs=300,
         warmup_epochs=200,
         warmup_lr_start=1e-4,
-        max_lr=1e-6,
-        min_lr=1e-6,
+        max_lr=1e-4,
+        min_lr=1e-4,
         gradient_converged_value=5e-14,
     )
 
 
 def _make_simulation_config_quad() -> SimulationConfig:
     return SimulationConfig(
-        tracks_per_worker=10,
         num_workers=8,
         num_batches=2,
         bpm_loss_outlier_sigma=4,
     )
 
 
-def evaluate_controller_worker_loss(ctrl: Controller, knobs: dict[str, float]) -> float:
+def evaluate_controller_worker_loss(
+    ctrl: TrackingFitter,
+    knobs: dict[str, float],
+    *,
+    enable_validation: bool | None = None,
+) -> float:
     """Return the total worker diagnostic loss summed across all workers at one knob setting."""
-    ctrl.worker_manager.start_workers(
-        ctrl.data_manager.track_data,
-        ctrl.data_manager.turn_batches,
-        ctrl.data_manager.file_map,
-        ctrl.config_manager.start_bpms,
-        ctrl.config_manager.end_bpms,
-        ctrl.simulation_config,
-        ctrl.machine_deltaps,
-        ctrl.initial_knobs,
-        enable_validation=ctrl.tracking_plan.enable_validation,
-    )
+    return evaluate_controller_worker_losses(
+        ctrl,
+        [knobs],
+        enable_validation=enable_validation,
+    )[0]
+
+
+def evaluate_controller_worker_losses(
+    ctrl: TrackingFitter,
+    knobs_list: list[dict[str, float]],
+    *,
+    enable_validation: bool | None = None,
+) -> list[float]:
+    """Return worker diagnostic losses for several knob settings using one worker startup."""
+    session = ctrl.start_session(enable_validation=enable_validation)
     try:
-        diags = ctrl.worker_manager._request_worker_diagnostics(knobs)
+        losses = []
+        for knobs in knobs_list:
+            screener = OutlierScreener(session.payload_builder)
+            diags = screener.request_worker_diagnostics(session.training.channels, knobs)
+            losses.append(sum(float(d.loss) for d in diags))
     finally:
-        ctrl.worker_manager.terminate_workers()
-    return sum(float(d["total_loss"]) for d in diags)  # type: ignore[arg-type]
+        session.terminate()
+    return losses
 
 
 def run_madng_tracking(
@@ -463,7 +550,7 @@ def run_madng_tracking(
 ):
     if isinstance(start_marker, str):
         interface.cycle_sequence(start_marker)
-        interface.observe_elements(start_marker)
+        interface.observe_elements([start_marker])
 
     tws = interface.run_twiss(observe=0)
     tws = tws[tws["s"] == 0]
@@ -480,7 +567,6 @@ def run_madng_tracking(
         kick_plane="xy",
         starting_bpm=start_marker,
     )
-    print(f"Initial coordinates for tracking: {coords}")
     coords = {k: float(v) for k, v in coords.items()}
     interface.observe_bpms()
     interface.mad["trk", "flw"] = interface.mad.track(
@@ -492,4 +578,5 @@ def run_madng_tracking(
     df["var_y"] = (1e-4) ** 2
     df["var_px"] = (1e-6) ** 2
     df["var_py"] = (1e-6) ** 2
+    df["bunch_number"] = 0
     df.to_parquet(destination, index=False)

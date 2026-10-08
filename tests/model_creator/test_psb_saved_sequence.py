@@ -1,82 +1,53 @@
 from __future__ import annotations
 
-import re
-import shutil
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+import tfs
 
-from aba_optimiser.accelerators import PSB
-from aba_optimiser.mad.aba_mad_interface import AbaMadInterface
+from adelmo.machine.accelerators import PSB
+from adelmo.machine.mad.aba_mad_interface import AbaMadInterface
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-def _read_tunes_from_twiss_table(table_path: Path) -> tuple[float, float]:
-    q1 = None
-    q2 = None
-    pattern = re.compile(r"^@\s+(Q[12])\s+%\S+\s+([-+0-9.eE]+)\s*$")
-
-    for line in table_path.read_text().splitlines():
-        match = pattern.match(line)
-        if match is None:
-            continue
-
-        name, value = match.groups()
-        if name == "Q1":
-            q1 = float(value)
-        elif name == "Q2":
-            q2 = float(value)
-
-    if q1 is None or q2 is None:
-        raise ValueError(f"Could not read Q1/Q2 headers from {table_path}")
-    return q1, q2
+NATURAL_TUNES = (0.17, 0.225)
+DRIVEN_TUNES = (0.162, 0.232)
 
 
-def _write_psb3_sequence_without_acd(source_path: Path, target_path: Path) -> Path:
-    seq_text = source_path.read_text()
-    filtered_lines = [
-        line
-        for line in seq_text.splitlines()
-        if "hacmap" not in line.lower() and "vacmap" not in line.lower()
-    ]
-    target_path.write_text("\n".join(filtered_lines) + "\n")
-    return target_path
+def test_psb_model_dir_contains_saved_sequence(psb_model_dir: Path) -> None:
+    """The shared omc3 fixture produces a usable PSB model directory."""
+    assert psb_model_dir.is_dir()
 
+    sequence = psb_model_dir / "psb3_saved.seq"
+    assert sequence.is_file()
 
-@pytest.fixture
-def psb3_saved_sequence(data_dir: Path, tmp_path: Path) -> Path:
-    source = data_dir / "model_creator" / "psb3_saved.seq"
-    target = tmp_path / source.name
-    shutil.copy2(source, target)
-    return target
+    sequence_text = sequence.read_text()
+    assert "hacmap" in sequence_text.lower()
+    assert "vacmap" in sequence_text.lower()
 
+    interface = AbaMadInterface(accelerator=PSB(ring=3, sequence_file=sequence))
+    live_twiss = interface.run_twiss(observe=0)
 
-@pytest.fixture
-def psb3_saved_sequence_without_acd(data_dir: Path, tmp_path: Path) -> Path:
-    source = data_dir / "model_creator" / "psb3_saved.seq"
-    return _write_psb3_sequence_without_acd(source, tmp_path / "psb3_saved_no_acd.seq")
+    assert live_twiss.headers["q1"] % 1 == pytest.approx(NATURAL_TUNES[0], abs=2e-4)
+    assert live_twiss.headers["q2"] % 1 == pytest.approx(NATURAL_TUNES[1], abs=2e-4)
+    assert "HACMAP" in live_twiss.index
+    assert "VACMAP" in live_twiss.index
+    assert live_twiss.loc["HACMAP", "kind"] == "marker"
+    assert live_twiss.loc["VACMAP", "kind"] == "marker"
+    assert "hackicker" not in live_twiss.index
+    assert "vackicker" not in live_twiss.index
 
+    interface.install_ac_dipole(NATURAL_TUNES, DRIVEN_TUNES)
+    live_twiss_ac = interface.run_twiss(observe=0)
+    assert live_twiss_ac.headers["q1"] % 1 == pytest.approx(DRIVEN_TUNES[0], abs=2e-4)
+    assert live_twiss_ac.headers["q2"] % 1 == pytest.approx(DRIVEN_TUNES[1], abs=2e-4)
+    assert "hackicker" in live_twiss_ac.index
+    assert "vackicker" in live_twiss_ac.index
 
-@pytest.mark.parametrize(
-    ("sequence_path_fixture", "twiss_table"),
-    [
-        ("psb3_saved_sequence_without_acd", "psb3_twiss.dat"),
-        ("psb3_saved_sequence", "psb3_twiss_ac.dat"),
-    ],
-    ids=["acd_off", "acd_on"],
-)
-def test_psb3_saved_sequence_runs_twiss_and_matches_expected_tunes(
-    request: pytest.FixtureRequest,
-    data_dir: Path,
-    sequence_path_fixture: str,
-    twiss_table: str,
-) -> None:
-    twiss_table_path = data_dir / "model_creator" / twiss_table
-    expected_q1, expected_q2 = _read_tunes_from_twiss_table(twiss_table_path)
-    sequence_path = request.getfixturevalue(sequence_path_fixture)
-
-    interface = AbaMadInterface(accelerator=PSB(ring=3, sequence_file=sequence_path))
-    twiss = interface.run_twiss(observe=0)
-
-    assert len(twiss) > 100
-    assert twiss.headers["q1"] == pytest.approx(expected_q1, rel=1e-8)
-    assert twiss.headers["q2"] == pytest.approx(expected_q2, rel=1e-8)
+    twiss = tfs.read(psb_model_dir / "twiss.dat")
+    twiss_ac = tfs.read(psb_model_dir / "twiss_ac.dat")
+    assert twiss.headers["Q1"] % 1 == pytest.approx(NATURAL_TUNES[0])
+    assert twiss.headers["Q2"] % 1 == pytest.approx(NATURAL_TUNES[1])
+    assert twiss_ac.headers["Q1"] % 1 == pytest.approx(DRIVEN_TUNES[0])
+    assert twiss_ac.headers["Q2"] % 1 == pytest.approx(DRIVEN_TUNES[1])

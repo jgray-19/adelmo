@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 import numpy as np
 
 if TYPE_CHECKING:
-    from aba_optimiser.mad.aba_mad_interface import AbaMadInterface
+    from adelmo.machine.mad.aba_mad_interface import AbaMadInterface
 
 
 def _recv_n(mad: Any, n: int) -> list[Any]:

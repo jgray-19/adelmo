@@ -10,8 +10,13 @@ from typing import TYPE_CHECKING
 import tfs
 from xtrack_tools.env import initialise_env
 
-from aba_optimiser.accelerators import LHC
-from aba_optimiser.mad import AbaMadInterface, GenericMadInterface, GradientDescentMadInterface
+from adelmo.machine.accelerators import LHC
+from adelmo.machine.mad import (
+    AbaMadInterface,
+    GenericMadInterface,
+    GradientDescentMadInterface,
+    merge_machine_states,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -21,6 +26,7 @@ if TYPE_CHECKING:
 
 TRACK_COLUMNS = (
     "turn",
+    "bunch_number",
     "name",
     "x",
     "px",
@@ -33,32 +39,6 @@ TRACK_COLUMNS = (
 )
 
 LOGGER = logging.getLogger(__name__)
-
-
-def _correct_xsuite_integrated_strength_deltas(
-    env: xt.Environment,
-    magnet_strengths: dict[str, float],
-) -> None:
-    """Rewrite dk*l perturbations as k* deltas for xsuite elements.
-
-    ``initialise_env`` currently applies ``dk0l/dk1l/dk2l`` directly onto
-    ``k0/k1/k2``. In MAD-NG the optimiser knobs are integrated strengths, while
-    xsuite element ``k*`` fields are per-metre strengths, so we need to divide
-    by the element length before writing the final xsuite lattice.
-    """
-    dknl_to_base = {"dk0l": "k0", "dk1l": "k1", "dk2l": "k2"}
-    for strength_name, integrated_delta in magnet_strengths.items():
-        magnet_name, attr = strength_name.rsplit(".", 1)
-        base_attr = dknl_to_base.get(attr)
-        if base_attr is None:
-            continue
-
-        element = env[magnet_name.lower()]
-        length = getattr(element, "length", 0.0) or 0.0
-        scale = length if abs(length) > 0.0 else 1.0
-        current = getattr(element, base_attr)
-        corrected = current - integrated_delta + integrated_delta / scale
-        env.set(magnet_name.lower(), **{base_attr: corrected})
 
 
 def convert_rbends_to_true_rbends(mad: AbaMadInterface) -> None:
@@ -81,6 +61,9 @@ def generate_model_with_errors(
     apply_orbit_correction: bool = True,
     target_qx: float = 0.28,
     target_qy: float = 0.31,
+    rel_error: float | None = None,
+    bpms: list[str] | None = None,
+    correctors: list[str] | None = None,
 ) -> tuple[dict[str, float], dict, tfs.TfsDataFrame]:
     """
     Generate a MAD model with errors and return the xsuite environment.
@@ -108,7 +91,7 @@ def generate_model_with_errors(
     if magnet_type:
         LOGGER.info(f"Applying magnetic perturbations to {magnet_type}")
         magnet_strengths, _ = interface.apply_magnet_perturbations(
-            rel_error=None,  # Use default from ERROR_TABLE
+            rel_error=rel_error,  # None -> use default from ERROR_TABLE
             seed=42,
             magnet_type=magnet_type,
         )
@@ -128,6 +111,8 @@ def generate_model_with_errors(
                 target_qx=target_qx,
                 target_qy=target_qy,
                 corrector_file=corrector_file,
+                bpms=bpms,
+                correctors=correctors,
             )
             # interface.set_corrector_strengths(corrector_file)
 
@@ -160,6 +145,9 @@ def generate_xsuite_env_with_errors(
     apply_orbit_correction: bool = True,
     target_qx: float = 0.28,
     target_qy: float = 0.31,
+    rel_error: float | None = None,
+    bpms: list[str] | None = None,
+    correctors: list[str] | None = None,
 ) -> tuple[xt.Environment, dict[str, float], dict, tfs.TfsDataFrame]:
     """
     Generate a MAD model with errors and return the xsuite environment.
@@ -183,6 +171,9 @@ def generate_xsuite_env_with_errors(
         apply_orbit_correction,
         target_qx,
         target_qy,
+        rel_error,
+        bpms,
+        correctors,
     )
 
     # Create xsuite environment with orbit correction applied
@@ -196,7 +187,6 @@ def generate_xsuite_env_with_errors(
         kinetic_energy=accel.kinetic_energy,
         strict_set=False,
     )
-    _correct_xsuite_integrated_strength_deltas(env, magnet_strengths)
     return env, magnet_strengths, matched_tunes, corrector_table
 
 
@@ -205,7 +195,7 @@ def get_twiss_without_errors(
     just_bpms: bool,
     beam: int = 1,
     estimated_magnets: dict[str, float] | None = None,
-    tune_knobs_file: Path | None = None,
+    tune_knobs: Path | None = None,
     corrector_file: Path | None = None,
 ) -> pd.DataFrame:
     """Get twiss data from a clean model without errors."""
@@ -216,15 +206,13 @@ def get_twiss_without_errors(
     )
     mad = GenericMadInterface(
         accelerator,
-        corrector_strengths=corrector_file,
-        tune_knobs_file=tune_knobs_file,
+        machine_state=merge_machine_states(corrector_file, tune_knobs),
     )
     convert_rbends_to_true_rbends(mad)
     if estimated_magnets is not None:
         gradient = GradientDescentMadInterface(
             accelerator,
-            corrector_strengths=corrector_file,
-            tune_knobs_file=tune_knobs_file,
+            machine_state=merge_machine_states(corrector_file, tune_knobs),
         )
         gradient.update_knob_values(estimated_magnets)
         mad = gradient

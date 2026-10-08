@@ -1,50 +1,66 @@
-aba_optimiser documentation
-===========================
+adelmo
+=============
 
-``aba_optimiser`` is a worker-based optimisation toolkit for accelerator magnet
-studies. The current documentation is intentionally narrow: it focuses on the
-API surface that is exercised by the automated tests and used by the main
-controller-driven runtime.
+``adelmo`` estimates accelerator magnet errors (strengths, misalignments and
+tilts) from beam measurements by gradient-based optimisation of MAD-NG models.
+Supported machines are the LHC, PSB, SPS and FCC.
 
-Use this site as a reference for:
+Two families of fit are provided:
 
-* accelerator definitions and runtime configuration dataclasses
-* MAD interface classes used to construct optimisation problems
-* controller, worker, and optimiser APIs
-* tested utility modules that support data preparation and analysis
+.. list-table::
+   :header-rows: 1
+   :widths: 20 40 40
 
-Workflow guides and campaign-specific scripts are intentionally left out of the
-published docs until they have stronger validation coverage.
+   * - Fit
+     - Data
+     - Entry points
+   * - Tracking
+     - Turn-by-turn BPM data tracked through the model
+     - :class:`~adelmo.tracking.ArcByArcFitter`,
+       :class:`~adelmo.tracking.ACDMarkerFitter`,
+       :class:`~adelmo.tracking.KickerFitter`
+   * - Closed twiss
+     - Closed orbit, phase advance, beta and dispersion
+     - :class:`~adelmo.poco.ClosedOrbitFitter`,
+       :class:`~adelmo.poco.ClosedTwissFitter`
 
-GitHub Dependencies
--------------------
+Installation
+------------
 
-Some parts of the repository rely on companion packages installed directly from
-GitHub rather than PyPI-only dependencies:
+Python 3.11 or later is required.
 
-* ``pymadng-utils`` provides shared accelerator abstractions plus MAD/MAD-X
-  helper utilities such as knob file IO and interface glue used throughout the
-  core runtime.
-* ``tmom-recon`` provides transverse and longitudinal momentum reconstruction,
-  AC-dipole measurement helpers, and optics reconstruction routines used by the
-  measurement and optics-oriented code paths.
-* ``xtrack-tools`` provides tracking helpers, environment initialisation, and
-  dataframe conversion utilities used by the higher-fidelity controller and
-  simulation tests.
+.. code-block:: bash
 
-These dependencies are important because the tested end-to-end workflows in
-this repository are built around a larger accelerator-tooling stack rather than
-standalone numerical routines.
+   git clone https://github.com/jgray-19/sgd-magnet-tuner.git
+   cd sgd-magnet-tuner
+   pip install -e ".[test,docs,tracking]"
 
-Companion documentation:
+Companion packages
+------------------
 
-* ``sgd-magnet-tuner``: `jgray-19.github.io/sgd-magnet-tuner <https://jgray-19.github.io/sgd-magnet-tuner/>`_
-* ``pymadng-utils``: `jgray-19.github.io/pymadng-utils <https://jgray-19.github.io/pymadng-utils/>`_
-* ``tmom-recon``: `jgray-19.github.io/tmom-recon <https://jgray-19.github.io/tmom-recon/>`_
-* ``xtrack_tools``: `jgray-19.github.io/xtrack_tools <https://jgray-19.github.io/xtrack_tools/>`_
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Package
+     - Purpose
+   * - `pymadng-utils <https://jgray-19.github.io/pymadng-utils/>`_
+     - Shared accelerator abstractions, dp/p and pt conversion
+       (``pymadng_utils.physics``), knob-file I/O.
+   * - `tmom-recon <https://jgray-19.github.io/tmom-recon/>`_
+     - Transverse momentum, AC-dipole and optics reconstruction.
+   * - `xtrack_tools <https://jgray-19.github.io/xtrack_tools/>`_
+     - Tracking helpers and dataframe conversion, used by the tests.
+
+The measurement and campaign workflows built on this package are maintained in
+separate repositories (``lhc_measurements``, ``psb_md``, ``psb_loco``, ``lhc_loco``
+and ``fcc_loco``) and are not documented here.
 
 .. toctree::
    :maxdepth: 2
-   :caption: API
+   :caption: Contents
 
+   user_guide
+   architecture
+   measurements
    api_reference

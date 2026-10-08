@@ -1,0 +1,55 @@
+name: Setup CI environment
+description: Checkout local dependencies and install the test environment
+
+inputs:
+  python-version:
+    description: Python version
+    required: false
+    default: "3.13"
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout pymadng-utils
+      uses: actions/checkout@v5
+      with:
+        repository: jgray-19/pymadng-utils
+        path: pymadng-utils
+        persist-credentials: false
+
+    - name: Checkout tmom-recon
+      uses: actions/checkout@v5
+      with:
+        repository: jgray-19/tmom-recon
+        path: tmom-recon
+        persist-credentials: false
+
+    - name: Checkout xtrack-tools
+      uses: actions/checkout@v5
+      with:
+        repository: jgray-19/xtrack_tools
+        path: xtrack-tools
+        persist-credentials: false
+
+    - name: Install uv and Python
+      uses: astral-sh/setup-uv@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+        enable-cache: true
+        activate-environment: true
+        cache-dependency-glob: |
+          sgd-magnet-tuner/pyproject.toml
+          pymadng-utils/pyproject.toml
+          tmom-recon/pyproject.toml
+          xtrack-tools/pyproject.toml
+
+    - name: Install package and local dependencies
+      shell: bash
+      working-directory: sgd-magnet-tuner
+      run: |
+        uv pip install --upgrade pip setuptools wheel
+        uv pip install \
+          -e ../pymadng-utils \
+          -e ../tmom-recon \
+          -e ../xtrack-tools \
+          -e '.[test,tracking]'

@@ -1,0 +1,70 @@
+name: Pytest
+
+on:
+  workflow_call:
+    inputs:
+      markers:
+        type: string
+        required: true
+
+      coverage-flag:
+        type: string
+        required: false
+        default: ""
+
+      parallel:
+        type: boolean
+        required: false
+        default: false
+
+      runner:
+        type: string
+        required: false
+        default: ubuntu-latest
+
+jobs:
+  test:
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          path: sgd-magnet-tuner
+          persist-credentials: false
+
+      - name: Setup CI environment
+        uses: ./sgd-magnet-tuner/.github/actions/setup-ci
+
+      - name: Run tests
+        working-directory: sgd-magnet-tuner
+        env:
+          MARKERS: ${{ inputs.markers }}
+          PARALLEL: ${{ inputs.parallel }}
+          COVERAGE: ${{ inputs.coverage-flag }}
+        run: |
+          args=(-ra -m "$MARKERS")
+
+          if [[ "$PARALLEL" == "true" ]]; then
+            args+=(-n auto)
+          fi
+
+          if [[ -n "$COVERAGE" ]]; then
+            args+=(
+              --cov=adelmo
+              --cov-branch
+              --cov-report=xml:coverage.xml
+            )
+          fi
+
+          pytest "${args[@]}"
+
+      - name: Upload coverage
+        if: inputs.coverage-flag != ''
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: sgd-magnet-tuner/coverage.xml
+          disable_search: true
+          flags: ${{ inputs.coverage-flag }}
+          name: ${{ inputs.coverage-flag }}

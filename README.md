@@ -1,138 +1,168 @@
-# sgd-magnet-tuner
+# adelmo
 
 [![Coverage Status](https://github.com/jgray-19/sgd-magnet-tuner/actions/workflows/coverage.yml/badge.svg)](https://github.com/jgray-19/sgd-magnet-tuner/actions/workflows/coverage.yml)
 [![codecov](https://codecov.io/github/jgray-19/sgd-magnet-tuner/graph/badge.svg?token=Y1KZACDFPL)](https://codecov.io/github/jgray-19/sgd-magnet-tuner)
 
-Tools for optimising accelerator magnet knob strengths using gradient-based
-methods with MAD-NG. This README is short and focused — see the docs for
-full details.
+Estimation of accelerator magnet errors (strengths, misalignments and tilts) from
+beam measurements, using gradient-based optimisation of MAD-NG models.
 
-## Package overview
+Two families of fit are provided:
 
-High-level modules (concise):
+| Fit | Data | Entry points |
+|---|---|---|
+| Tracking | Turn-by-turn BPM data, tracked through the model | `ArcByArcFitter`, `ACDMarkerFitter`, `KickerFitter` |
+| Closed twiss | Closed orbit, phase advance, beta and dispersion | `ClosedOrbitFitter`, `ClosedTwissFitter` |
 
-- `config` — configuration dataclasses and defaults
-- `training` — `Controller` runtime and orchestration (energy, quads, bends)
-- `training_optics` — optics-specific matching controller
-- `simulation` / `mad` — model creation and tracking utilities
-- `measurements` / `dataframes` / `filtering` — measurement IO and cleaning
-- `optimisers` — Adam / AMSGrad / L-BFGS implementations
-- `io` / `plotting` / `matching` — helpers and utilities
+Supported machines: LHC, PSB, SPS and FCC.
 
-Use the tests in `tests/training/` as compact examples of real workflows.
+Full documentation: <https://jgray-19.github.io/sgd-magnet-tuner/>
 
-## Dependencies (external projects)
+## Installation
 
-This project uses helper packages maintained in related repositories; install
-them before running the end-to-end workflows:
-
-- xtrack_tools: https://github.com/jgray-19/xtrack_tools
-- tmom-recon:  https://github.com/jgray-19/tmom-recon
-- pymadng-utils: https://github.com/jgray-19/pymadng-utils
-
-Companion documentation for this stack is published under the same GitHub Pages
-account with repository-name paths:
-
-- sgd-magnet-tuner: https://jgray-19.github.io/sgd-magnet-tuner/
-- pymadng-utils: https://jgray-19.github.io/pymadng-utils/
-- tmom-recon: https://jgray-19.github.io/tmom-recon/
-- xtrack_tools: https://jgray-19.github.io/xtrack_tools/
-
-Install via pip from GitHub, for example::
+Requires Python 3.11 or later.
 
 ```bash
-pip install git+https://github.com/jgray-19/xtrack_tools.git
+git clone https://github.com/jgray-19/sgd-magnet-tuner.git
+cd sgd-magnet-tuner
+pip install -e .
+```
+
+Optional dependency groups:
+
+| Extra | Contents |
+|---|---|
+| `tracking` | omc3, cpymad, pyarrow, psutil (required by the tracking workflows) |
+| `measurements` | tmom-recon (momentum reconstruction) |
+| `test` | pytest, pytest-cov, pytest-xdist, xtrack-tools |
+| `docs` | Sphinx and theme |
+| `dev` | ruff, pre-commit |
+
+```bash
+pip install -e ".[test,docs,tracking]"
+```
+
+### Companion packages
+
+Several workflows depend on companion packages installed from GitHub:
+
+| Package | Purpose |
+|---|---|
+| [pymadng-utils](https://github.com/jgray-19/pymadng-utils) | Shared accelerator abstractions, dp/p and pt conversion, knob-file I/O |
+| [tmom-recon](https://github.com/jgray-19/tmom-recon) | Transverse momentum and optics reconstruction |
+| [xtrack_tools](https://github.com/jgray-19/xtrack_tools) | Tracking helpers and dataframe conversion (tests) |
+
+```bash
+pip install git+https://github.com/jgray-19/pymadng-utils.git
 pip install git+https://github.com/jgray-19/tmom-recon.git
+pip install git+https://github.com/jgray-19/xtrack_tools.git
 ```
 
-## Installation
+## Usage
 
-Clone and install in editable mode::
+A tracking fit is configured with an accelerator and four configuration objects,
+then run with `fitter.run()`. It returns a `FitResult`: the fitted knob values,
+their 1-sigma uncertainties under the same knob names, and `diagnostics` saying why
+and after how many epochs the fit stopped. Optional settings (starting knobs, true
+strengths for diagnostics, output and checkpoint settings, callbacks) go in a
+`FitterOptions`.
 
-```bash
-git clone https://github.com/jgray-19/sgd-magnet-tuner.git
-cd sgd-magnet-tuner
-pip install -e .
+```python
+from pathlib import Path
+
+from adelmo.config import OptimiserConfig, SimulationConfig
+from adelmo.fitting.config import OutputConfig, SequenceConfig
+from adelmo.machine.accelerators import LHC
+from adelmo.tracking import (
+    ArcByArcFitter,
+    FitterOptions,
+    MeasurementConfig,
+    MeasurementDetails,
+)
+
+accelerator = LHC(beam=1, sequence_file="lhcb1.seq", errors={"quad": {"k1"}})
+
+fitter = ArcByArcFitter(
+    accelerator=accelerator,
+    optimiser_config=OptimiserConfig(
+        max_epochs=200,
+        warmup_epochs=10,
+        warmup_lr_start=1e-6,
+        max_lr=1e-4,
+        min_lr=1e-6,
+        gradient_converged_value=1e-12,
+    ),
+    simulation_config=SimulationConfig(num_workers=8, num_batches=4),
+    sequence_config=SequenceConfig(magnet_range="$start/$end"),
+    measurement_config=MeasurementConfig({Path("measurement.parquet"): MeasurementDetails()}),
+    bpm_start_points=["BPM.12R1.B1"],
+    bpm_end_points=["BPM.20R1.B1"],
+    options=FitterOptions(output_config=OutputConfig(write_tensorboard_logs=False)),
+)
+result = fitter.run()
+print(result.knobs, result.uncertainties, result.diagnostics.reason)
 ```
 
-For development (tests + docs):
+Further examples are in `tests/training/`, which exercise each fitter end to end.
 
-```bash
-pip install -e .[test,docs,tracking]
-```
+### Tracking modes
 
-## Quick usage
+| Class | Initial conditions | Tracking |
+|---|---|---|
+| `ArcByArcFitter` | BPM at the start of each range | Forward and backward over the configured BPM ranges |
+| `ACDMarkerFitter` | AC-dipole `before`/`after` markers | Bidirectional, whole ring observed |
+| `KickerFitter` | Kicker marker | Single worker, forward only, `turns_after_kicker` turns |
 
-Run the main scripts (examples):
+`KickerFitter` additionally takes a `KickerConfig(kicker_name, turns_after_kicker)`.
+The measurement data must contain `x`, `px`, `y`, `py` at the kicker marker, and the
+sequence must include the kicker element.
 
-```bash
-python scripts/run_optimiser.py
-python scripts/optimise_energy.py
-python scripts/plot_results.py
-```
+### Closed-twiss fits
+
+The closed-twiss and closed-orbit fitters live in `adelmo.poco` (Parametric
+Optimisation of Closed Orbits) and return the same `FitResult` as the tracking fitters.
+
+`ClosedTwissFitter` fits knobs so that the model's periodic optics match measured
+closed orbit, beta, phase and dispersion simultaneously, using a single parametric
+MAD-NG `twiss`. It takes `measurements`, a mapping from the measurement momentum `pt` to a
+measurement file or dataframe, and uses a Levenberg-Marquardt solver configured by
+`LevenbergMarquardtConfig`.
+
+### Closed-orbit fits
+
+`ClosedOrbitFitter` fits knobs to one or more `ClosedOrbitSeries`. Each series
+carries a `machine_state`: the MAD-X globals (quadrupole strengths, corrector kicks,
+tune knobs) at which its orbits were measured. These are fixed inputs and may differ
+between series. Varying the quadrupole strengths between series makes quadrupole
+misalignments observable.
+
+A series is fitted either as an absolute orbit (`absolute_planes`) or as the change
+from the fitter's own `machine_state` to the series' state. `machine_state` accepts a
+dictionary, a knobs file or a TFS corrector table; `adelmo.machine.mad.merge_machine_states`
+combines several. Accepted iterations are recorded in `fitter.history`, and
+`fitter.close()` shuts down the MAD-NG process.
+
+See `tests/training/test_closed_orbit_machine_state.py`.
 
 ## Tests
 
-Run tests with pytest::
-
 ```bash
-pytest tests/
-pytest tests/ --cov=aba_optimiser
+pytest -m "not slow"          # fast suite
+pytest -m slow                # convergence and end-to-end tests
+pytest --cov=adelmo
 ```
 
-## Docs
+Markers are listed in `pyproject.toml` and `tests/README.md`.
 
-Build docs::
+## Documentation
 
 ```bash
-pip install -e .[docs]
+pip install -e ".[docs]"
 cd docs && make html
 ```
 
-View at `docs/_build/html/index.html`.
+The output is written to `docs/_build/html/index.html`.
 
-## Installation
+## Related repositories
 
-Clone and install in editable mode::
-
-```bash
-git clone https://github.com/jgray-19/sgd-magnet-tuner.git
-cd sgd-magnet-tuner
-pip install -e .
-```
-
-For development (tests + docs):
-
-```bash
-pip install -e .[test,docs,tracking]
-```
-
-## Quick usage
-
-Run the main scripts (examples):
-
-```bash
-python scripts/run_optimiser.py
-python scripts/optimise_energy.py
-python scripts/plot_results.py
-```
-
-## Tests
-
-Run tests with pytest::
-
-```bash
-pytest tests/
-pytest tests/ --cov=aba_optimiser
-```
-
-## Docs
-
-Build docs::
-
-```bash
-pip install -e .[docs]
-cd docs && make html
-```
-
-View at `docs/_build/html/index.html`.
+The measurement and campaign workflows built on this package are maintained
+separately: `lhc_measurements`, `psb_md`, `psb_loco`, `lhc_loco` and `fcc_loco`.

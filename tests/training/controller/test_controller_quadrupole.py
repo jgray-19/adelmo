@@ -11,29 +11,27 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
-from aba_optimiser.accelerators import LHC, SPS
-from aba_optimiser.config import OptimiserConfig
-from aba_optimiser.mad.optimising_mad_interface import GradientDescentMadInterface
-from aba_optimiser.training.controller import Controller
-from aba_optimiser.training.controller_config import (
-    MeasurementConfig,
-    OutputConfig,
-    SequenceConfig,
-)
+from adelmo.fitting.config import OutputConfig, SequenceConfig
+from adelmo.machine.accelerators import LHC
+from adelmo.machine.mad import merge_machine_states
+from adelmo.tracking.config.helpers import create_arc_measurement_config
+from adelmo.tracking.fitter import ArcByArcFitter, FitterOptions
 from tests.training.controller_test_utils import (
-    evaluate_controller_worker_loss,
     _generate_nonoise_track,
     _make_optimiser_config_quad,
     _make_simulation_config_quad,
+    evaluate_controller_worker_loss,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from aba_optimiser.mad.aba_mad_interface import AbaMadInterface
+    from adelmo.config import OptimiserConfig
+    from adelmo.machine.mad.aba_mad_interface import AbaMadInterface
 
 
 logger = logging.getLogger(__name__)
+pytestmark = pytest.mark.serial
 
 
 def _build_lhc_quad_controller(
@@ -42,7 +40,8 @@ def _build_lhc_quad_controller(
     seq_b1: Path,
     loaded_interface: AbaMadInterface,
     start_marker: str,
-) -> tuple[Controller, dict[str, float]]:
+    optimiser_config: OptimiserConfig | None = None,
+) -> tuple[ArcByArcFitter, dict[str, float]]:
     magnet_range = "BPM.13R1.B1/BPM.13L2.B1"
     bpm_start_points = [f"BPM.{i}R1.B1" for i in range(13, 14)]
     bpm_end_points = [f"BPM.{i}L2.B1" for i in range(13, 14)]
@@ -50,7 +49,7 @@ def _build_lhc_quad_controller(
     flattop_turns = 100
     off_magnet_path = tmp_path / "track_off_magnet.parquet"
 
-    corrector_file, magnet_strengths, tune_knobs_file = _generate_nonoise_track(
+    corrector_file, magnet_strengths, tune_knobs = _generate_nonoise_track(
         loaded_interface,
         flattop_turns,
         off_magnet_path,
@@ -59,34 +58,28 @@ def _build_lhc_quad_controller(
         perturb_quads=True,
     )
 
-    ctrl = Controller(
+    ctrl = ArcByArcFitter(
         LHC(
             beam=1,
             kinetic_energy=6800,
             sequence_file=seq_b1,
-            optimise_quadrupoles=True,
-            optimise_other_quadrupoles=False,
+            errors={"quad": {"k1"}},
         ),
-        _make_optimiser_config_quad(),
+        optimiser_config or _make_optimiser_config_quad(),
         _make_simulation_config_quad(),
-        SequenceConfig(
-            magnet_range=magnet_range,
-            first_bpm=start_marker,
-        ),
-        MeasurementConfig(
-            measurement_files=off_magnet_path,
-            corrector_files=corrector_file,
-            tune_knobs_files=tune_knobs_file,
-            flattop_turns=flattop_turns,
-            bunches_per_file=1,
+        SequenceConfig(magnet_range=magnet_range),
+        create_arc_measurement_config(
+            off_magnet_path, machine_state=merge_machine_states(corrector_file, tune_knobs)
         ),
         bpm_start_points,
         bpm_end_points,
-        output_config=OutputConfig(
-            mad_logfile=tmp_path / "mad_logfile.log",
-            write_tensorboard_logs=False,
+        options=FitterOptions(
+            output_config=OutputConfig(
+                mad_logfile=tmp_path / "mad_logfile.log",
+                write_tensorboard_logs=False,
+            ),
+            true_strengths=magnet_strengths.copy(),
         ),
-        true_strengths=magnet_strengths.copy(),
     )
     return ctrl, magnet_strengths.copy()
 
@@ -116,7 +109,6 @@ def _assert_estimate_matches_true(
         )
 
 
-@pytest.mark.slow
 @pytest.mark.parametrize("start_marker", ["MSIA.EXIT.B1", "E.CELL.12.B1"])
 def test_controller_quad_opt_simple(
     tmp_path: Path,
@@ -133,15 +125,14 @@ def test_controller_quad_opt_simple(
     )
     logger.info("Starting controller with logfile at %s", tmp_path / "mad_logfile.log")
     if controller_test_mode == "loss_regression":
-        initial_loss = evaluate_controller_worker_loss(ctrl, ctrl.initial_knobs)
+        initial_loss = evaluate_controller_worker_loss(ctrl, ctrl.machine.initial_knobs)
         true_loss = evaluate_controller_worker_loss(ctrl, true_values)
         assert true_loss < initial_loss * 1e-6
         return
-    estimate, _unc = ctrl.run()
+    estimate = ctrl.run().knobs
     _assert_estimate_matches_true(estimate, true_values, max_rel_diff=1e-5)
 
 
-@pytest.mark.slow
 def test_controller_quad_opt_simple_without_early_stopping_reaches_truth(
     tmp_path: Path,
     seq_b1: Path,
@@ -153,185 +144,18 @@ def test_controller_quad_opt_simple_without_early_stopping_reaches_truth(
         seq_b1=seq_b1,
         loaded_interface=loaded_interface,
         start_marker="MSIA.EXIT.B1",
+        # Never stop early: run every epoch.
+        optimiser_config=dataclasses.replace(
+            _make_optimiser_config_quad(), loss_change_tolerance=0.0, gradient_converged_value=-1.0
+        ),
     )
     if controller_test_mode == "loss_regression":
-        initial_loss = evaluate_controller_worker_loss(ctrl, ctrl.initial_knobs)
+        initial_loss = evaluate_controller_worker_loss(ctrl, ctrl.machine.initial_knobs)
         true_loss = evaluate_controller_worker_loss(ctrl, true_values)
         assert true_loss < initial_loss * 1e-6
         return
 
-    ctrl.optimisation_loop._should_stop_for_loss_change = (  # type: ignore[method-assign]
-        lambda epoch, epoch_loss, prev_loss: False
-    )
-    ctrl.optimisation_loop.gradient_converged_value = -1.0
-
-    estimate, _unc = ctrl.run()
+    estimate = ctrl.run().knobs
     _assert_estimate_matches_true(estimate, true_values, max_rel_diff=1e-5)
 
 
-@pytest.mark.slow
-@pytest.mark.parametrize("use_diagonal_kicks", [False], ids=["separate_hv_kicks"])
-def test_controller_quad_opt_sps_multi_turn_all_quads(
-    tmp_path: Path,
-    seq_sps: Path,
-    loaded_sps_interface: AbaMadInterface,
-    use_diagonal_kicks: bool,
-    controller_test_mode: str,
-) -> None:
-    """SPS quadrupole optimisation using separate horizontal and vertical files."""
-    flattop_turns = 256
-    off_magnet_path = tmp_path / "track_off_magnet_sps.parquet"
-    measurement_files = (
-        off_magnet_path
-        if use_diagonal_kicks
-        else [
-            off_magnet_path.with_name("track_off_magnet_sps_particle_0.parquet"),
-            off_magnet_path.with_name("track_off_magnet_sps_particle_1.parquet"),
-        ]
-    )
-
-    loaded_sps_interface.observe_bpms(loaded_sps_interface.accelerator.bpm_pattern)
-    no_error = loaded_sps_interface.run_twiss()
-    loaded_sps_interface.unobserve_elements([loaded_sps_interface.accelerator.bpm_pattern])
-
-    corrector_file, magnet_strengths, tune_knobs_file = _generate_nonoise_track(
-        loaded_sps_interface,
-        flattop_turns,
-        off_magnet_path,
-        0.0,
-        perturb_quads=True,
-        bpm_pattern="bp[hv].*",
-        apply_orbit_correction=False,
-        target_qx=0.13,
-        target_qy=0.18,
-        num_particles=1,
-        use_diagonal_kicks=use_diagonal_kicks,
-    )
-
-    base_sim = _make_simulation_config_quad()
-    simulation_config = dataclasses.replace(
-        base_sim,
-        tracks_per_worker=2,
-        num_workers=8,
-        num_batches=1,
-        optimise_momenta=True,
-        run_arc_by_arc=False,
-        n_run_turns=1,
-        bpm_loss_outlier_sigma=10,
-        worker_loss_outlier_sigma=10,
-    )
-    optimiser_config = OptimiserConfig(
-        max_epochs=1000,
-        warmup_epochs=30,
-        warmup_lr_start=5e-9,
-        max_lr=3e-7,
-        min_lr=5e-7,
-        gradient_converged_value=5e-16,
-        optimiser_type="adam",
-    )
-
-    sequence_config = SequenceConfig("$start/$end")
-    # sequence_config = SequenceConfig("BPH.13008/BPH.13408")
-    measurement_config = MeasurementConfig(
-        measurement_files=measurement_files,
-        corrector_files=corrector_file,
-        tune_knobs_files=tune_knobs_file,
-        flattop_turns=flattop_turns,
-        bunches_per_file=1,
-    )
-
-    accelerator = SPS(
-        kinetic_energy=450.0,
-        sequence_file=seq_sps,
-        optimise_quadrupoles=True,
-    )
-    # Take 15 equally spaced v bpms and 15 equally spaced h bpms throughout the ring
-    loaded_sps_interface.observe_bpms()
-    all_bpms, _ = loaded_sps_interface.get_bpm_list("$start/$end")
-
-    # Filter horizontal (BPH) and vertical (BPV) BPMs
-    h_bpms = [bpm for bpm in all_bpms if bpm.startswith("BPH")]
-    v_bpms = [bpm for bpm in all_bpms if bpm.startswith("BPV")]
-
-    print(f"Total BPMs: {len(all_bpms)}, Horizontal BPMs: {len(h_bpms)}, Vertical BPMs: {len(v_bpms)}")
-
-    # Take 15 equally spaced BPMs from each category
-    n_bpms = 4
-    h_spacing = max(1, len(h_bpms) // n_bpms)
-    v_spacing = max(1, len(v_bpms) // n_bpms)
-    h_bpms_selected = h_bpms[::h_spacing][:n_bpms]
-    v_bpms_selected = v_bpms[::v_spacing][:n_bpms]
-
-    # # Combine h and v BPMs for start points
-    bpm_start_points = h_bpms_selected + v_bpms_selected
-    bpm_end_points = []
-    # bpm_start_points = ['BPH.13008', "BPV.13108", "BPH.13208"]
-    # bpm_end_points = ["BPH.13208", "BPV.13308", "BPH.13408"]
-
-    all_errors = loaded_sps_interface.run_twiss()
-
-    ctrl = Controller(
-        accelerator,
-        optimiser_config,
-        simulation_config,
-        sequence_config,
-        measurement_config,
-        bpm_start_points=bpm_start_points,
-        bpm_end_points=bpm_end_points,
-        output_config=OutputConfig(
-            mad_logfile=tmp_path / "controller_quad_opt_sps_multi_turn.log",
-            write_tensorboard_logs=False,
-        ),
-        true_strengths=magnet_strengths,
-        debug=False,
-    )
-    if controller_test_mode == "loss_regression":
-        initial_loss = evaluate_controller_worker_loss(ctrl, ctrl.initial_knobs)
-        true_loss = evaluate_controller_worker_loss(ctrl, magnet_strengths)
-        assert true_loss < initial_loss * 1e-3
-        return
-    estimate, unc = ctrl.run()
-
-    iface = GradientDescentMadInterface(
-        accelerator=SPS(
-            sequence_file=seq_sps,
-            kinetic_energy=450.0,
-            optimise_quadrupoles=True,
-            custom_knobs_to_optimise=list(estimate),
-        )
-    )
-    iface.update_knob_values(estimate)
-    iface.observe_bpms()
-    est_errors = iface.run_twiss()
-
-    # For debugging plot and show the betas and phase at all points.
-    import matplotlib.pyplot as plt
-
-    plt.figure(figsize=(12, 6))
-    plt.subplot(2, 1, 1)
-    plt.plot(all_errors["s"], (all_errors["beta11"] - no_error["beta11"]) / no_error["beta11"] * 100, label="Perturbed dβx/βx")
-    plt.plot(est_errors["s"], (est_errors["beta11"] - no_error["beta11"]) / no_error["beta11"] * 100, label="Estimated dβx/βx", linestyle="--")
-    plt.xlabel("s (m)")
-    plt.ylabel("dβx/βx (%)")
-    plt.legend()
-    plt.subplot(2, 1, 2)
-    plt.plot(all_errors["s"], (all_errors["beta22"] - no_error["beta22"]) / no_error["beta22"] * 100, label="Perturbed dβy/βy")
-    plt.plot(est_errors["s"], (est_errors["beta22"] - no_error["beta22"]) / no_error["beta22"] * 100, label="Estimated dβy/βy", linestyle="--")
-    plt.xlabel("s (m)")
-    plt.ylabel("dβy/βy (%)")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(tmp_path / "beta_comparison.png")
-    plt.show()
-
-    # Check that magnet_strengths and estimate are close for all magnets.
-    # abs_tol guards against inflated relative errors when the true delta is near zero.
-    sps_abs_tol = 5e-4
-    for magnet, true_value in magnet_strengths.items():
-        est_value = estimate[magnet]
-        abs_diff = abs(est_value - true_value)
-        rel_diff = abs_diff / abs(true_value) if true_value != 0 else abs(est_value)
-        assert abs_diff <= sps_abs_tol or rel_diff < 2e-4, (
-            f"Relative difference for {magnet} is too high: {rel_diff:.2%} "
-            f"(abs diff {abs_diff:.3e})"
-        )

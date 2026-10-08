@@ -1,0 +1,389 @@
+! run_closed_twiss_init.mad
+!
+! Sets up a parametric *closed* twiss: the optimisation knobs become TPSA
+! parameters on the sequence, so twiss returns the periodic solution together
+! with the derivative of every optical function with respect to every knob.
+!
+! There is no seeded starting point. twiss runs cofind for the parametric closed
+! orbit and then normalises the parametric one-turn map, so the closed orbit,
+! beta, alpha, phase and dispersion at every BPM are the periodic solution of the
+! ring as a function of the knobs. Nothing is taken from the measurement except
+! the targets themselves.
+!
+! The optical functions come from twiss's own ``trkopt``: each requested name is
+! added as an mtable column and filled with ``optfun(m, name, ..., mt, nf0)`` as
+! the map is tracked. That is strictly better than reading them back out of
+! a saved map afterwards - twiss shares one memoisation table per element (so the
+! beta/phase TPSA is built once, not once per knob), it references the phase to
+! the normal form at the origin, and the results arrive as plain columns instead
+! of one damap per BPM. Encoding the knob monomial in the requested name is what
+! turns each column into a derivative: ``beta11_`` is the value and
+! ``beta11_0..010..0`` is d(beta11)/d(knob i).
+!
+! The closed orbit is the exception: ``x``/``y`` are not optical functions, so
+! their knob derivatives are recorded by an ``atexit`` hook (``save_orbit_jac``) as twiss
+! tracks, straight from each BPM's TPSA. No per-BPM maps are saved, which avoids copying
+! large damaps (many knobs, many BPMs).
+!
+! When *only* orbit coordinates are observed (``optics_columns`` is empty) none of
+! that machinery is needed, and ``compute_closed_orbit`` replaces ``twiss``: a plain
+! ``cofind`` finds the closed orbit and ONE parametric pass gives its knob derivatives.
+! See ``compute_closed_orbit`` below.
+!
+! Assumes the following globals are already defined (set by the worker):
+!   loaded_sequence   : the sequence to compute the closed twiss of
+!   knob_names        : ordered table of optimisation-knob variable names
+!   optics_columns    : ordered table of trkopt names (values then derivatives);
+!                       empty when only orbit coordinates are observed
+!   orbit_coords      : ordered table of closed-orbit coordinates to report
+!   nbpms             : number of observed BPMs (sizes the orbit buffers)
+!
+! After this script runs the worker drives it with, per iteration:
+!   loaded_sequence['<knob>']:set0(value)   -- update the knob constant part
+!   compute_closed_twiss()                  -- returns success flag (optics observed)
+!   compute_closed_orbit()                  -- same, when only orbits are observed
+!   <read optics_columns via closed_tbl:to_df>
+!   send_orbit_jacobian()                   -- one matrix per orbit coordinate
+
+local matrix, vector in MAD
+local cofind, track in MAD
+
+num_knobs = #knob_names
+
+! Identity parametric map over the 6 phase-space coords + one parameter per knob.
+!
+! With optical functions observed, mo=2 (not 1) is required: they are first order
+! in the phase space variables, so their knob derivatives are order-2 monomials
+! (one coordinate slot times one parameter slot). gphys asserts this directly,
+! e.g. nf_bet: "damap order is too low %d < %d" for maxord < 1 + mon:ord(). po=1
+! keeps the parameters first order, so no knob-knob cross terms are carried - the
+! Gauss-Newton Hessian only ever needs the first derivatives.
+!
+! Orbit-only needs mo=1: d(orbit)/d(knob) is the pure-parameter monomial, which is
+! order 1, and the phase-space linearisation is order 1 as well.
+orbit_only = #optics_columns == 0
+x0map = MAD.damap {
+    nv = 6,
+    np = num_knobs,
+    mo = orbit_only and 1 or 2,
+    po = 1,
+    pn = knob_names,
+}
+
+! Make each knob a TPSA (value + 1*parameter) so its derivative propagates, and
+! remember the monomial that selects d/d(knob_i) from a coordinate TPSA. The
+! monomial is kept in the string form that ``tpsa:get`` parses itself.
+knob_mono = {}
+for i, param in ipairs(knob_names) do
+    loaded_sequence[param] = loaded_sequence[param] + x0map[param]
+    knob_mono[i] = "000000" .. string.rep("0", i - 1) .. "1"
+end
+
+! Orbit buffers, allocated once (first use) and only zeroed per computation.
+! ``orbit_val[coord]`` is a vector, ``orbit_jac[coord]`` an (nbpm x nknob) matrix and ``orbit_R[coord]`` the (nbpm x 4) transverse
+! map rows used by ``compute_closed_orbit``.
+local orbit_n, orbit_names, orbit_val, orbit_jac, orbit_R, orbit_ready = 0, {}, {}, {}, {}, false
+local orbit_row, orbit_row4 = vector(num_knobs), vector(4)
+
+local function reset_orbit()
+    if not orbit_ready then
+        orbit_ready = true
+        for _, coord in ipairs(orbit_coords) do
+            orbit_val[coord] = vector(nbpms)
+            orbit_jac[coord] = matrix(nbpms, num_knobs)
+            orbit_R[coord] = matrix(nbpms, 4)
+        end
+    end
+    orbit_n = 0
+    for _, coord in ipairs(orbit_coords) do
+        orbit_val[coord]:zeros()
+        orbit_jac[coord]:zeros()
+    end
+end
+
+! Orbit values only (compute_orbit_plain). cofind calls the hook on each of its own
+! internal tracking passes, every one visiting all BPMs in order, so the row index
+! wraps and each pass overwrites the last; the final pass is the converged orbit.
+local function save_orbit(elm, mflw, _, slc)
+    if slc ~= -4 or not elm:is_observed() then return end
+    orbit_n = orbit_n % nbpms + 1
+    for _, coord in ipairs(orbit_coords) do orbit_val[coord]:seti(orbit_n, mflw[1][coord]:get0()) end
+end
+
+! Orbit values and, filled straight into the Jacobian rows, d(orbit)/d(knob) (compute_closed_orbit).
+! Also records the BPM names. Coefficient 0 of a coordinate TPSA is the constant, 1-6 the phase space, 7.. the knobs.
+local function save_orbit_jac(elm, mflw, _, slc)
+    if slc ~= -4 or not elm:is_observed() then return end
+    orbit_n = orbit_n % nbpms + 1
+    orbit_names[orbit_n] = elm.name
+    for _, coord in ipairs(orbit_coords) do
+        local tpsa = mflw[1][coord]
+        orbit_val[coord]:seti(orbit_n, tpsa:get0())
+        orbit_jac[coord]:setrow(orbit_n, tpsa:getvec(8, orbit_row))
+    end
+end
+
+! Closed orbit with the knobs as plain numbers (call between knobs_to_plain() and knobs_to_param()): cofind from a plain
+! start builds its own 6-variable map. Returns the one-turn map; its status is 'stable' at a closed orbit.
+-- Warm start of the next cofind: the last converged closed orbit (x, px, y, py) of the SAME machine state. The worker sets the
+-- global ``co_key`` (series index, role, pt) before each solve, so every state keeps its own start and one series' orbit never
+-- seeds another's (different corrector kick, other momentum). Without ``co_key`` every solve shares the key 'default'.
+co_key = 'default'
+local co_by_key = {}
+local cofind_log = os.getenv('COFIND_LOG')
+local function log_failure(stage, detail)
+    if not cofind_log then return end
+    local f = io.open(cofind_log, 'a')
+    if f then f:write(stage, ' ', tostring(detail), '\n') f:close() end
+end
+
+local function run_cofind(atexit, start)
+    local X0 = { pt = x0map.pt:get0() }  -- the fixed momentum pinned by the worker on x0map
+    if start then X0.x, X0.px, X0.y, X0.py = start[1], start[2], start[3], start[4] end
+    local _, mflw = cofind{
+        sequence = loaded_sequence,
+        method   = 6,
+        observe  = 1,
+        X0       = X0,
+        save     = false,
+        atexit   = atexit,
+    }
+    return mflw[1]
+end
+
+-- Predicted start of the next closed-orbit solve. For every state (co_key) keep the last converged orbit X, the knob values K it
+-- belongs to and, once a parametric solve has run, S = dX*/dk (4 x num_knobs). The next solve starts at X + S (k - K), which
+-- is the closed orbit to first order in the knob change, so cofind needs far fewer passes or none at all.
+local co_base = {}
+local knob_now = vector(num_knobs)
+
+local function read_knobs(out)
+    for i, p in ipairs(knob_names) do out:seti(i, loaded_sequence[p]) end
+    return out
+end
+
+local function remember(x, S)
+    local b = co_base[co_key]
+    if not b then b = { K = vector(num_knobs) } co_base[co_key] = b end
+    b.X = x
+    read_knobs(b.K)
+    if S then b.S = S end
+end
+
+local function predicted_start()
+    local b = co_base[co_key]
+    if not (b and b.S) then return nil end
+    read_knobs(knob_now)
+    local x = vector(6)
+    for i = 1, 6 do x:seti(i, b.X[i]) end
+    for r = 1, 4 do
+        local shift, row = 0, (r - 1) * num_knobs
+        for c = 1, num_knobs do shift = shift + b.S[row + c] * (knob_now[c] - b.K[c]) end
+        x:seti(r, x[r] + shift)
+    end
+    return x
+end
+
+! Warm start from the previous solution; a failed or unstable warm start retries from the zero orbit (the stored orbit is
+! only replaced by a converged one, so a lost trial does not poison the next).
+local function plain_cofind(atexit)
+    local last_co = predicted_start() or co_by_key[co_key]
+    if last_co then
+        if atexit then reset_orbit() end
+        local ok, res = pcall(run_cofind, atexit, last_co)
+        if ok and res.status == 'stable' then
+            co_by_key[co_key] = res:get0()
+            remember(co_by_key[co_key])
+            return res
+        end
+        log_failure('warm_cofind_failed', ok and res.status or res)
+        if atexit then reset_orbit() end
+    end
+    local res = run_cofind(atexit, nil)
+    if res.status == 'stable' then co_by_key[co_key] = res:get0() remember(co_by_key[co_key]) else log_failure('cold_cofind_unstable', res.status) end
+    return res
+end
+
+! Compute the parametric closed twiss. cofind can fail (lose the particle) when
+! the knobs are driven into an unstable region; report success so the worker can
+! flag the step as recoverable instead of using a stale/NaN table.
+!
+! coupling=true is required for betx/bety/alfx/alfy: without it those columns
+! are unavailable, and the uncoupled Ripken beta11/beta22/alfa11/alfa22 are
+! blind to skew/roll knobs by construction (a coupling error does not move them
+! at first order), so they carry no leverage on those knobs regardless of any
+! fit weight. There is no equivalent physical-plane column for phase advance --
+! MAD-NG's optical-function names only offer mu/dmu with a mode-index suffix
+! (mu1/mu2/mu3), no mux/muy -- so mu1/mu2 stay mode-indexed and the same
+! blind-to-roll limitation applies to the phase-advance observable.
+function compute_closed_twiss()
+    -- Capture into a local first: when twiss fails it returns nil, and reading
+    -- an undeclared/nil global closed_tbl would trip MAD-NG's strict-mode warning.
+    reset_orbit()
+    orbit_names = {}
+    local tws = twiss{
+        sequence = loaded_sequence,
+        observe  = 1,
+        X0       = x0map,
+        trkopt   = optics_columns,
+        method   = 6,
+        coupling = true,
+        atexit   = #orbit_coords > 0 and save_orbit_jac or nil,
+    }
+    closed_tbl = tws
+    local ok = tws ~= nil and (tws.lost == nil or tws.lost == 0) and (#orbit_coords == 0 or orbit_n == nbpms)
+    python:send(ok and true or false, true)
+end
+
+! Closed orbit and its knob derivatives without ``twiss``, which also normalises the parametric one-turn map and tracks
+! the normal form to fill every optical-function column, none of which an orbit observable reads. One parametric track:
+!
+!   1. ``cofind`` with the knobs as plain numbers finds the closed orbit X0.
+!   2. ``track`` of the parametric map from X0, with a hook recording at each BPM s the value, R_s = dM_s/dz (transverse
+!      4 columns) and P_s = dM_s/dk. After the turn the map itself is the one-turn map (R, P).
+!   3. The closed orbit moves with the knobs: X*(k) = M(X*(k), k) gives dX*/dk = S = (I - R)^-1 P on the transverse block
+!      (pt is pinned, so t/pt do not enter). By the chain rule d(orbit_s)/dk = R_s S + P_s. No ``normal`` and no second track.
+local tcoords = { 'x', 'px', 'y', 'py' }
+
+local function save_orbit_chain(elm, mflw, _, slc)
+    if slc ~= -4 or not elm:is_observed() then return end
+    orbit_n = orbit_n + 1
+    orbit_names[orbit_n] = elm.name
+    for _, coord in ipairs(orbit_coords) do
+        local tpsa = mflw[1][coord]
+        orbit_val[coord]:seti(orbit_n, tpsa:get0())
+        orbit_R[coord]:setrow(orbit_n, tpsa:getvec(2, orbit_row4))
+        orbit_jac[coord]:setrow(orbit_n, tpsa:getvec(8, orbit_row))
+    end
+end
+
+! S = (I - R)^-1 P and the Newton step dx = (I - R)^-1 (M(X0) - X0) from the one-turn map ``turn`` tracked from the start ``x0``;
+! S is a 4 x num_knobs matrix, dx a 4 x 1 matrix.
+local function fixed_point_shift(turn, x0)
+    local IR, P, res = matrix(4, 4), matrix(4, num_knobs), matrix(4, 1)
+    for r, coord in ipairs(tcoords) do
+        local tpsa = turn[coord]
+        tpsa:getvec(2, orbit_row4)
+        for c = 1, 4 do IR:seti((r - 1) * 4 + c, (r == c and 1 or 0) - orbit_row4[c]) end
+        P:setrow(r, tpsa:getvec(8, orbit_row))
+        res:seti(r, tpsa:get0() - x0[r])
+    end
+    return IR:solve(P), IR:solve(res)
+end
+
+-- A solve whose Newton step is below this is accepted as the closed orbit without another cofind (the correction is second order).
+local fast_tol = 1e-7
+
+-- One parametric track of the one-turn map from the start ``x0`` (6 coordinates). Fills the orbit buffers with the values and
+-- Jacobian at the Newton-corrected closed orbit; returns S, the largest Newton step and the corrected start, or nil if the particle is lost.
+local function parametric_pass(x0)
+    reset_orbit()
+    orbit_names = {}
+    -- Fresh copy each call: ``nocopy`` makes the tracked map the one-turn map, which must not leak into x0map.
+    local start = x0map:copy()
+    start.nocopy = true
+    start:set0(x0)
+    local _, mflw = track{
+        sequence = loaded_sequence,
+        observe  = 1,
+        X0       = start,
+        method   = 6,
+        save     = false,
+        atexit   = save_orbit_chain,
+    }
+    if mflw[1].status == 'lost' or orbit_n ~= nbpms then
+        log_failure('final_track', mflw[1].status .. ' n=' .. orbit_n)
+        return nil
+    end
+    local sok, S, dx = pcall(fixed_point_shift, start, x0)
+    if not sok then log_failure('solve_error', S) return nil end
+    local step = 0
+    for r = 1, 4 do step = math.max(step, math.abs(dx[r])) end
+    for _, coord in ipairs(orbit_coords) do
+        local val, R = orbit_val[coord], orbit_R[coord]
+        for i = 1, nbpms do
+            local shift, row = 0, (i - 1) * 4
+            for c = 1, 4 do shift = shift + R[row + c] * dx[c] end
+            val:seti(i, val[i] + shift)
+        end
+        orbit_jac[coord] = R * S + orbit_jac[coord]
+    end
+    local corrected = vector(6)
+    for i = 1, 6 do corrected:seti(i, x0[i] + (i <= 4 and dx[i] or 0)) end
+    return S, step, corrected
+end
+
+function compute_closed_orbit()
+    knobs_to_plain()
+    local x0, found = predicted_start(), false
+    for attempt = 1, 3 do
+        if not x0 then
+            local ok, plain = pcall(plain_cofind)
+            if not ok or plain.status ~= 'stable' then
+                knobs_to_param()
+                log_failure('cofind_error', ok and plain.status or plain)
+                python:send(false, true)
+                return
+            end
+            x0, found = plain:get0(), true
+        end
+        knobs_to_param()  -- whatever happened: the worker's knob updates need the parameters
+        local S, step, corrected = parametric_pass(x0)
+        if S and (found or step <= fast_tol) then
+            knobs_to_plain()
+            remember(corrected, S)
+            co_by_key[co_key] = corrected
+            knobs_to_param()
+            python:send(true, true)
+            return
+        end
+        -- Prediction too far off, or the particle was lost from it: converge with cofind, from the corrected start if any.
+        if found then python:send(false, true) return end
+        knobs_to_plain()
+        co_by_key[co_key] = corrected
+        co_base[co_key] = nil
+        x0 = nil
+    end
+    python:send(false, true)
+end
+
+! Orbit-only results: BPM names, then per coordinate its values and Jacobian.
+function send_orbit_only()
+    python:send(orbit_names, true)
+    for _, coord in ipairs(orbit_coords) do
+        python:send(orbit_val[coord], true)
+        python:send(orbit_jac[coord], true)
+    end
+end
+
+function knobs_to_plain()
+    for _, p in ipairs(knob_names) do loaded_sequence[p] = loaded_sequence[p]:get0() end
+end
+
+function knobs_to_param()
+    for _, p in ipairs(knob_names) do loaded_sequence[p] = loaded_sequence[p] + x0map[p] end
+end
+
+! After knobs_to_plain(): sends success, then each orbit coordinate's values in BPM order.
+function compute_orbit_plain_core()
+    reset_orbit()
+    local start = plain_cofind(save_orbit)
+    -- orbit_n must be exactly nbpms: fewer means one of the passes stopped early
+    if start.status ~= 'stable' or orbit_n ~= nbpms then
+        python:send(false, true)
+        return
+    end
+    python:send(true, true)
+    for _, coord in ipairs(orbit_coords) do python:send(orbit_val[coord], true) end
+end
+
+function compute_orbit_plain()
+    local ok = pcall(compute_orbit_plain_core)
+    if not ok then python:send(false, true) end
+end
+
+! Send d(orbit coordinate)/d(knob) as one (nbpm x nknob) matrix per coordinate, as recorded by ``save_orbit_jac`` during
+! the twiss track (no per-BPM maps are saved). The scalar orbit is already a plain twiss column.
+function send_orbit_jacobian()
+    for _, coord in ipairs(orbit_coords) do python:send(orbit_jac[coord], true) end
+end

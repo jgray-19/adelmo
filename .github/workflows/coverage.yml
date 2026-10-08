@@ -1,61 +1,63 @@
-# Runs all tests and runs a coverage report via python-coverage-comment-action.
-name: Coverage
+name: CI
 
-on:  # Runs on all push events to main branch and any push related to a pull request
+on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
-  workflow_dispatch:  # Allow manual triggering
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
 
-env:
-  UV_COMPILE_BYTECODE: 1
+permissions:
+  contents: read
 
-defaults:
-  run:
-    shell: bash
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
-  coverage:
-    runs-on: ubuntu-latest
-    permissions:
-      # Gives the action the necessary permissions for pushing data to the
-      # python-coverage-comment-action branch, and for editing existing
-      # comments (to avoid publishing multiple comments in the same PR)
-      contents: write
-    env:
-        python-version: "3.13"
+  fast:
+    name: Fast contracts
+    uses: ./.github/workflows/_pytest.yml
+    with:
+      markers: "not slow and not regression and not convergence and not e2e"
+      coverage-flag: fast
+      parallel: true
+    secrets: inherit
 
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: true
+  regression:
+    name: Controller regressions
+    needs: fast
+    uses: ./.github/workflows/_pytest.yml
+    with:
+      markers: regression
+      coverage-flag: regression
+    secrets: inherit
 
-      - name: Install uv and Python
-        uses: astral-sh/setup-uv@v6
-        with:
-          python-version: ${{ env.python-version }}
-          enable-cache: true
-          activate-environment: true
-          cache-dependency-glob: 'pyproject.toml'
+  integration:
+    name: Slow integration
+    needs: fast
+    uses: ./.github/workflows/_pytest.yml
+    with:
+      markers: "slow and not regression and not convergence and not e2e"
+      coverage-flag: integration
+    secrets: inherit
 
-      - name: Ensure pip, setuptools and wheel
-        run: uv pip install --upgrade pip setuptools wheel
+  convergence:
+    name: Convergence
+    needs: regression
+    uses: ./.github/workflows/_convergence.yml
+    secrets: inherit
 
-      # The uv pip should make & use an env from the Python install of the previous step
-      - name: Install package
-        run: uv pip install -e '.[test,tracking]'
-
-      - name: Run non-slow tests first
-        run: pytest -ra -m "not slow" -x
-
-      - name: Run fast controller loss regressions
-        run: pytest -ra tests/training/controller -k loss_regression -x
-
-      - name: Run full test suite
-        run: pytest -ra --cov=aba_optimiser --cov-branch --cov-report=xml
-
-      - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+  e2e:
+    name: E2E
+    needs: [integration, convergence]
+    if: >-
+      (github.event_name == 'workflow_dispatch' ||
+       github.event_name == 'schedule') &&
+      vars.E2E_RUNNER != ''
+    uses: ./.github/workflows/_pytest.yml
+    with:
+      markers: e2e
+      runner: ${{ vars.E2E_RUNNER }}
+    secrets: inherit

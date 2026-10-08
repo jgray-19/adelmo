@@ -1,0 +1,102 @@
+/******************************************************************************************
+*
+* MAD-X File for PS Booster optics calculations
+*
+*
+* PSB Extraction working point:
+* New working point: QX = 4.172 and QY = 4.23.  21 Dec 2006 O.Berrig
+*
+*
+* This file is for protons at 0.348 GeV/c at time c = 301
+*
+*
+* Execute with:  >madx < psb_orbit.madx
+*
+******************************************************************************************/
+
+ title, 'BOOSTER lattice';
+
+ !for the time being not used
+ beam_Ek=0.16; ! kinetic energy in GeV (160 MeV)
+ beam_Etot = beam_Ek + pmass;
+ beam_pc = sqrt(beam_Etot*beam_Etot - pmass*pmass);
+
+
+ option, echo;
+ option, RBARC=FALSE;
+
+/******************************************************************************************
+ * BOOSTER
+ ******************************************************************************************/
+ call, file = '/afs/cern.ch/work/j/jmgray/private/omc3/omc3/model/accelerators/psbooster/psb.ele';
+ call, file = '/afs/cern.ch/work/j/jmgray/private/omc3/omc3/model/accelerators/psbooster/psb.seq';
+ call, file = '/afs/cern.ch/work/j/jmgray/private/omc3/omc3/model/accelerators/psbooster/defseries.seq';
+ call, file = '/afs/cern.ch/work/j/jmgray/private/omc3/omc3/model/accelerators/psbooster/powering.seq';
+ call, file = '/afs/cern.ch/work/j/jmgray/private/omc3/omc3/model/accelerators/psbooster/psb.dbx';
+ call, file = '/afs/cern.ch/work/j/jmgray/private/omc3/omc3/model/accelerators/psbooster/psb_orbit.str';
+
+hacmap = 0;
+vacmap = 0;
+
+/******************************************************************************************
+ * beam, use
+ ******************************************************************************************/
+
+
+
+save_ring(RING): macro = {
+ beam, particle=PROTON, pc=beam_pc;  ! change depending on c-time of orbit measurement; pc=momentum
+ seqedit, sequence=psbRING;
+  flatten;
+endedit;
+  select, flag=SEQEDIT, class=matrix;
+ select, flag=SEQEDIT, class=ecollimator;
+ seqedit, sequence=psbRING;
+  remove, element=SELECTED;
+endedit;
+ use, sequence=psbRING;
+
+/******************************************************************************************
+ * Match for new working point
+ ******************************************************************************************/
+
+ Qx = 4.40;
+ Qy = 4.45;
+
+ MATCH,sequence=psbRING;
+  vary, NAME=kKF, step = 0.0001;
+  vary, NAME=kKD, step = 0.0001;
+  constraint, range=#E, MUX=Qx, MUY=Qy;
+  lmdif, calls = 10000, tolerance = 1.0E-21;
+ ENDMATCH;
+
+ ! linking knobs of given ring to ring independent variables of AllLists_XXX.json
+
+ !normal quad correctors
+
+ k1lBRRINGQNO311L1 := k1lQNO311L1;
+ k1lBRRINGQNO412L3 := k1lQNO412L3;
+ k1lBRRINGQNO816L1 := k1lQNO816L1;
+ k1lBRRINGQNO816L3 := k1lQNO816L3;
+
+ !skew quad knobs
+ k1lBRRINGQSKH0    := k1lQSKH0;
+ k1lBRRINGQSK614L3 := k1lQSK614L3;
+ k1lBRRINGQSK210L3 := k1lQSK210L3;
+
+
+/******************************************************************************************
+ * TWISS
+ ******************************************************************************************/
+
+ PSHIFT=0;
+ set, format=.16e;
+ save, sequence=psbRING, file=psbRING.seq;
+};
+
+
+RING = 1;
+while (RING <= 4) {
+    exec, save_ring($RING);
+    RING = RING + 1;
+};
