@@ -20,9 +20,18 @@ jobs:
     name: Fast contracts
     uses: ./.github/workflows/_pytest.yml
     with:
-      markers: "not slow and not regression and not convergence and not e2e"
+      markers: "not serial and not slow and not regression and not convergence and not e2e"
       coverage-flag: fast
       parallel: true
+    secrets: inherit
+
+  serial:
+    name: Serial contracts
+    needs: fast
+    uses: ./.github/workflows/_pytest.yml
+    with:
+      markers: "serial and not slow and not regression and not convergence and not e2e"
+      coverage-flag: serial
     secrets: inherit
 
   regression:
