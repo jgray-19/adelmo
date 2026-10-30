@@ -29,6 +29,8 @@ class Reduced:
     normal: np.ndarray | None
     n_valid: int
     particle_lost: bool
+    #: Sum of the replies' array ``extra`` (tracking: the BPM-gain sums), else ``None``.
+    extra_sum: np.ndarray | None = None
 
 
 def reduce_replies(replies: Sequence[object], n_knobs: int) -> Reduced:
@@ -46,6 +48,7 @@ def reduce_replies(replies: Sequence[object], n_knobs: int) -> Reduced:
     normal = np.zeros((n_knobs, n_knobs)) if with_curvature else None
     n_valid = 0
     particle_lost = False
+    extra_sum = None
     for reply in replies:
         if not isinstance(reply, GradReply):
             raise RuntimeError(f"Unexpected worker reply: {reply!r}")
@@ -58,6 +61,8 @@ def reduce_replies(replies: Sequence[object], n_knobs: int) -> Reduced:
         if with_curvature:
             hessian += np.asarray(reply.hessian, dtype=float)
             normal += np.asarray(reply.normal, dtype=float)
+        if isinstance(reply.extra, np.ndarray):
+            extra_sum = reply.extra.copy() if extra_sum is None else extra_sum + reply.extra
         loss += float(reply.loss)
         n_valid += 1
-    return Reduced(loss, grad, hessian, normal, n_valid, particle_lost)
+    return Reduced(loss, grad, hessian, normal, n_valid, particle_lost, extra_sum)

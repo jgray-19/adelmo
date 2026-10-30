@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import logging
+from multiprocessing import shared_memory
 from typing import TYPE_CHECKING
 
 import numpy as np
-from multiprocessing import shared_memory
 
+from adelmo.fitting.bpm_gains import PLANES, bpm_gains, bpm_reading
 from adelmo.fitting.protocol import GradReply
 from adelmo.machine.mad.machine_state import assign_state
 from adelmo.poco.calibration import (
-    PLANES,
     CalibrationBlocks,
     add_series,
-    bpm_gain_name,
     corrector_gain_knob_name,
     corrector_gain_name,
 )
@@ -55,7 +54,8 @@ class CalibratedClosedOrbitWorker(ClosedOrbitWorker):
             )
         )
         gain_knobs = [corrector_gain_knob_name(corrector) for corrector in correctors]
-        mad.send("\n".join(f"loaded_sequence['{knob}'] = 0" for knob in gain_knobs))
+        if gain_knobs:
+            mad.send("\n".join(f"loaded_sequence['{knob}'] = 0" for knob in gain_knobs))
         mad["knob_names"] = [name for name in mad["knob_names"] if name != "pt"] + gain_knobs
         super()._setup_da_maps(mad)
         #: Number of magnet knobs; ``n_knobs`` also counts the gain knobs.
@@ -151,8 +151,8 @@ class CalibratedClosedOrbitWorker(ClosedOrbitWorker):
                     return None
                 observables, targets, weights, _raw = series.alignment[index]
                 for o, observable in enumerate(observables):
-                    gains = np.array([knob_updates.get(bpm_gain_name(observable.name, name), 0.0) for name in names])
-                    residual = (1.0 + gains) * model[o] - np.asarray(targets[o], dtype=float)
+                    gains = bpm_gains(knob_updates, observable.name, names)
+                    residual = bpm_reading(model[o], gains) - np.asarray(targets[o], dtype=float)
                     w = np.asarray(weights[o], dtype=float)
                     loss += float(np.sum(w * np.where(w > 0.0, residual, 0.0) ** 2))
         return loss
@@ -174,9 +174,8 @@ class CalibratedClosedOrbitWorker(ClosedOrbitWorker):
                 gains = np.empty((len(observables), len(names)))
                 for o, observable in enumerate(observables):
                     plane = PLANES.index(observable.name)
-                    for k, name in enumerate(names):
-                        cols[o, k] = plane * len(spec.bpms) + bpm_index[name]
-                        gains[o, k] = knob_updates.get(bpm_gain_name(observable.name, name), 0.0)
+                    cols[o] = [plane * len(spec.bpms) + bpm_index[name] for name in names]
+                    gains[o] = bpm_gains(knob_updates, observable.name, names)
                 q_jac, d_gain = jacobian[..., : self.n_q], jacobian[..., self.n_q :]
                 add_series(blocks, values, q_jac, d_gain, targets, weights, gains, cols, corrector_indices)
         return True

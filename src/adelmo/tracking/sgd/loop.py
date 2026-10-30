@@ -21,10 +21,9 @@ from adelmo.tracking.sgd.scheduler import LRScheduler
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from tensorboardX import SummaryWriter
-
     from adelmo.config import OptimiserConfig
     from adelmo.fitting.protocol import WorkerChannels
+    from adelmo.runlog import RunLog
     from adelmo.tracking.config.models import CheckpointConfig
 
 LOGGER = logging.getLogger(__name__)
@@ -76,6 +75,8 @@ class SGDLoop:
         self.true_strengths = true_strengths
         self.config = config
         self.num_batches = num_batches
+        self.gain_names: list[str] = []
+        self.gain_ridge = 0.0
         self.smoothed_grad_norm = 0.0
         self.smoothed_loss_change = 0.0
         #: Best knobs so far and their selection loss; empty until the first epoch.
@@ -98,18 +99,29 @@ class SGDLoop:
         channels: WorkerChannels,
         *,
         total_turns: int,
-        writer: SummaryWriter | None = None,
+        run_log: RunLog | None = None,
         checkpoint_config: CheckpointConfig | None = None,
         validation_loss_fn: Callable[[dict[str, float]], float | None] | None = None,
         loss_callback: Callable[[int, float, float | None, float, float], None] | None = None,
         epoch_end_hook: Callable[[dict[str, float], dict[str, float]], str | None] | None = None,
+        gain_names: list[str] | None = None,
+        gain_ridge: float = 0.0,
     ) -> dict[str, float]:
         """Optimise from ``knobs`` and return the best knobs found.
 
         ``total_turns`` normalises the summed gradients. ``validation_loss_fn``
         scores the knobs after each epoch on held-out data; ``epoch_end_hook``
         runs after best-selection and returns a note for the log line.
+        ``gain_names`` are BPM gains carried in the knobs but not stepped by the
+        optimiser: after every batch each is set to its least-squares value given the
+        current magnets, ``Σ w m (y - m) / (Σ w m² + gain_ridge / num_batches)``, from
+        the sums the workers return; ``gain_ridge`` is the prior's ``1/σ²`` in the
+        same units.
         """
+        self.gain_names = list(gain_names or [])
+        self.gain_ridge = gain_ridge
+        if self.gain_names:
+            knobs = {**knobs, **{k: knobs.get(k, 0.0) for k in self.gain_names}}
         run_start = time.time()
         checkpointer = OptimisationCheckpointer(self, checkpoint_config)
 
@@ -123,11 +135,21 @@ class SGDLoop:
             knobs = checkpoint_state["current_knobs"]
             prev_loss = checkpoint_state["prev_loss"]
             start_epoch = checkpoint_state["next_epoch"]
+            stage_epochs = self.config.stage_epochs
+            if stage_epochs and start_epoch % stage_epochs == 0:
+                # A new stage: its data, and so its loss, differ from the last stage's.
+                prev_loss = None
+                self.best = BestTracker(value={})
+                self.smoothed_grad_norm = 0.0
+                self.smoothed_loss_change = 0.0
             LOGGER.info(
                 "Restored optimisation checkpoint from %s at epoch %d",
                 checkpointer.path,
                 checkpoint_state["saved_epoch"],
             )
+
+        if run_log is not None:
+            run_log.begin(knobs, resume_step=start_epoch if checkpointer.restore else None)
 
         last_completed_epoch = start_epoch - 1
         stop_reason = "max_epochs"
@@ -150,7 +172,7 @@ class SGDLoop:
                 checkpointer.save(epoch, knobs, prev_loss)
                 state.saved_checkpoint = True
 
-            self._log_epoch(writer, state, run_start)
+            self._log_epoch(state, run_start, run_log)
             if loss_callback is not None:
                 loss_callback(
                     epoch, state.loss, state.validation_loss, state.grad_norm, state.true_diff
@@ -174,6 +196,10 @@ class SGDLoop:
             iterations=epochs_run,
             best_loss=self.best.loss,
         )
+        if run_log is not None:
+            run_log.finish(
+                reason=stop_reason, iterations=epochs_run, best_loss=float(self.best.loss)
+            )
         return self.best.value
 
     def _run_epoch(
@@ -189,7 +215,7 @@ class SGDLoop:
         epoch's knobs revert to those it started from.
         """
         started = time.time()
-        lr = self.scheduler(epoch)
+        lr = self.scheduler(epoch % (self.config.stage_epochs or epoch + 1))
         loss = 0.0
         grad = np.zeros(len(self.knob_names))
         start_knobs = knobs
@@ -202,6 +228,8 @@ class SGDLoop:
             particle_lost = particle_lost or reduced.particle_lost
             if not particle_lost:
                 knobs = self._step(knobs, reduced.grad / total_turns, lr)
+                if self.gain_names:
+                    knobs = {**knobs, **self._best_gains(reduced.extra_sum)}
 
         if particle_lost:
             LOGGER.warning(
@@ -221,7 +249,14 @@ class SGDLoop:
     def _step(self, knobs: dict[str, float], grad: np.ndarray, lr: float) -> dict[str, float]:
         """One optimiser step from ``knobs`` along ``grad``."""
         params = np.array([knobs[k] for k in self.knob_names])
-        return dict(zip(self.knob_names, self.optimiser.step(params, grad, lr)))
+        return {**knobs, **dict(zip(self.knob_names, self.optimiser.step(params, grad, lr)))}
+
+    def _best_gains(self, sums: np.ndarray) -> dict[str, float]:
+        """The least-squares gains from one batch's summed ``(Σ w m (y - m), Σ w m²)``."""
+        numerator, curvature = sums
+        curvature = curvature + self.gain_ridge / self.num_batches
+        gains = np.divide(numerator, curvature, out=np.zeros_like(numerator), where=curvature > 0)
+        return dict(zip(self.gain_names, gains.tolist()))
 
     def _select_best(self, state: EpochState) -> bool:
         """Record ``state`` as the best epoch if its loss is the lowest so far."""
@@ -234,18 +269,23 @@ class SGDLoop:
         """The reason to stop after ``state``, or ``None`` to carry on.
 
         Always updates the smoothed relative loss change, so call it once per epoch.
+        Never stops a staged fit (``stage_epochs``) early.
         """
         if prev_loss is not None:
             loss = state.selection_loss
             change = abs(loss - prev_loss) / abs(prev_loss) if prev_loss != 0 else 0
             self.smoothed_loss_change = self._smooth(self.smoothed_loss_change, change)
             if (
-                self.smoothed_loss_change < self.config.loss_change_tolerance
+                not self.config.stage_epochs
+                and self.smoothed_loss_change < self.config.loss_change_tolerance
                 and state.epoch
                 > self.config.loss_change_min_epoch_fraction * self.config.max_epochs
             ):
                 return "loss_converged"
-        if self.smoothed_grad_norm < self.config.gradient_converged_value:
+        if (
+            not self.config.stage_epochs
+            and self.smoothed_grad_norm < self.config.gradient_converged_value
+        ):
             return "gradient_converged"
         return None
 
@@ -260,21 +300,24 @@ class SGDLoop:
         """Sum of absolute differences from the true strengths (the sum of the knobs without them)."""
         if not self.true_strengths:
             return sum(knobs.values())
-        return np.sum([abs(knobs[k] - self.true_strengths[k]) for k in self.knob_names])
+        return np.sum([abs(knobs[k] - v) for k, v in self.true_strengths.items()])
 
-    def _log_epoch(self, writer: SummaryWriter | None, state: EpochState, run_start: float) -> None:
-        """Log the epoch to the console and TensorBoard."""
-        if writer is not None:
-            loss_scalars = {"train": state.loss}
-            if state.validation_loss is not None:
-                loss_scalars["validation"] = state.validation_loss
-            writer.add_scalars("loss", loss_scalars, state.epoch)
-            writer.add_scalar("grad_norm", state.grad_norm, state.epoch)
-            writer.add_scalar("learning_rate", state.lr, state.epoch)
-            writer.add_scalar("sum_true_diff", state.true_diff, state.epoch)
-            writer.flush()
-
+    def _log_epoch(self, state: EpochState, run_start: float, run_log: RunLog | None) -> None:
+        """Log the epoch to the console and the run log."""
         now = time.time()
+        if run_log is not None:
+            run_log.log(
+                state.epoch,
+                loss=state.loss,
+                validation_loss=state.validation_loss,
+                grad_norm=state.grad_norm,
+                learning_rate=state.lr,
+                true_diff=float(state.true_diff),
+                epoch_time=now - state.started,
+                new_best=state.new_best,
+            )
+            run_log.record_knobs(state.epoch, state.knobs)
+
         parts = [f"Ep {state.epoch}: loss={state.loss:.3e}"]
         if state.validation_loss is not None:
             parts.append(f"val={state.validation_loss:.3e}")

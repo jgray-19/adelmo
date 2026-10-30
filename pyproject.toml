@@ -17,12 +17,14 @@ dependencies = [
     "threadpoolctl",
     "pandas",
     "tfs-pandas",
-    "tensorboardX",
     "pymadng>=0.3.0",
     "pymadng-utils",
     "matplotlib",
     "uncertainties",
 ]
+
+[project.scripts]
+adelmo-monitor = "adelmo.monitor.__main__:main"
 
 [project.optional-dependencies]
 measurements = [
@@ -48,6 +50,9 @@ tracking = [
 ]
 cern = [
     "nxcals",
+]
+monitor = [
+    "panel>=1.5",
 ]
 dev = [
     "pre-commit",

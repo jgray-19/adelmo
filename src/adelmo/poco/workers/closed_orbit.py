@@ -182,6 +182,20 @@ class ClosedOrbitWorker(ClosedTwissWorker):
     states are cached within one series evaluation only.
     """
 
+    #: Step of the forward difference giving the orbit's ``pt`` derivative when ``pt`` is fitted.
+    PT_STEP = 1e-6
+
+    def _setup_da_maps(self, mad: MAD) -> None:
+        """As the base class; also notes whether ``pt`` is a fitted knob (always the last one)."""
+        self.fit_pt = "pt" in list(mad["knob_names"])
+        super()._setup_da_maps(mad)
+        #: Length of the knob vector the fitter sees: the MAD knobs, then ``pt`` if fitted.
+        self.n_params = self.n_knobs + int(self.fit_pt)
+
+    def _failure(self):
+        n = self.n_params
+        return self._reply(np.zeros(n), float("nan"), np.zeros((n, n)), np.zeros((n, n)))
+
     def prepare_data(self, data: list[ClosedOrbitSeriesData]) -> None:
         if not data:
             raise ValueError("A closed-orbit worker needs at least one series")
@@ -320,17 +334,20 @@ class ClosedOrbitWorker(ClosedTwissWorker):
         """
         cache = {}
 
-        def evaluate(role: str, pt: float):
+        def evaluate(role: str, pt: float, key_pt: float | None = None):
             key = (role, pt)
             if key not in cache:
                 self._enter_state(mad, role, knob_updates)
                 self._set_pt(mad, pt)
-                self._set_co_key(mad, series, role, pt)
+                self._set_co_key(mad, series, role, pt if key_pt is None else key_pt)
                 cache[key] = solve(mad, series, context=f" ({role}, pt={pt:+.9g})")
             return cache[key]
 
         for index, measurement in enumerate(series.data.measurements):
-            signal = evaluate("signal", float(measurement.pt))
+            if self.fit_pt:
+                signal = self._signal_with_pt(evaluate, measurement, knob_updates["pt"])
+            else:
+                signal = evaluate("signal", float(measurement.pt))
             if signal is None or not np.any(series.subtract):
                 yield index, signal
                 if signal is None:
@@ -342,13 +359,33 @@ class ClosedOrbitWorker(ClosedTwissWorker):
                 return
             yield index, self._compare_to_reference(series, signal, reference)
 
+    def _signal_with_pt(self, evaluate, measurement, pt: float):
+        """Signal ``(orbit, jacobian)`` at the fitted ``pt``, the Jacobian gaining a last column d(orbit)/d(pt).
+
+        The column is a forward difference of two solves; ``measurement.pt`` only keys the warm start.
+        """
+        step = self.PT_STEP
+        key_pt = float(measurement.pt)
+        base = evaluate("signal", pt, key_pt)
+        if base is None:
+            return None
+        shifted = evaluate("signal", pt + step, key_pt + step)
+        if shifted is None:
+            return None
+        column = ((shifted[0] - base[0]) / step)[:, :, None]
+        return base[0], np.concatenate([base[1], column], axis=2)
+
     @staticmethod
     def _compare_to_reference(series: SeriesState, signal, reference):
         """Subtract the reference only in the relative observable planes."""
         if isinstance(signal, np.ndarray):  # values alone (loss-only)
             return signal - reference * series.subtract[:, None]
         model = signal[0] - reference[0] * series.subtract[:, None]
-        jacobian = signal[1] - reference[1] * series.subtract[:, None, None]
+        ref_jacobian = reference[1]
+        if ref_jacobian.shape[-1] < signal[1].shape[-1]:  # fitted pt: the reference does not depend on it
+            pad = np.zeros((*ref_jacobian.shape[:-1], signal[1].shape[-1] - ref_jacobian.shape[-1]))
+            ref_jacobian = np.concatenate([ref_jacobian, pad], axis=2)
+        jacobian = signal[1] - ref_jacobian * series.subtract[:, None, None]
         return model, jacobian
 
     # ------------------------------------------------------------------
@@ -388,7 +425,7 @@ class ClosedOrbitWorker(ClosedTwissWorker):
         series = self.series[0]
         reference_pts = tuple(dict.fromkeys(float(m.reference_pt) for m in series.data.measurements))
         states = []
-        n = self.n_knobs
+        n = self.n_params
         with self._in_series(mad, series):
             for reference_pt in reference_pts:
                 self._enter_state(mad, "reference", knob_updates)
@@ -416,7 +453,7 @@ class ClosedOrbitWorker(ClosedTwissWorker):
         self.send_knobs(mad, message.knobs)
         if self.reference_only:
             return self._publish_reference(mad, message.knobs)
-        n = self.n_knobs
+        n = self.n_params
         gradient = np.zeros(n)
         loss = 0.0
         hessian = np.zeros((n, n))
@@ -434,7 +471,7 @@ class ClosedOrbitWorker(ClosedTwissWorker):
 
     def _evaluate_series(self, mad: MAD, series: SeriesState, knob_updates: dict[str, float]):
         """Loss, gradient and Hessians of one series; ``None`` if a closed orbit is lost."""
-        n = self.n_knobs
+        n = self.n_params
         gradient = np.zeros(n)
         loss = 0.0
         hessian = np.zeros((n, n))

@@ -64,7 +64,6 @@ autodoc_mock_imports = [
     "pandas",
     "pymadng",
     "pymadng_utils",
-    "tensorboardX",
     "tfs",
     "tmom_recon",
     "turn_by_turn",

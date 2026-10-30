@@ -113,6 +113,8 @@ class LMFitter:
     worker_class: type
     log_suffix: str
     fit_label: str
+    #: Whether ``accelerator.optimise_energy`` is supported: ``pt`` is then fitted as the last knob.
+    supports_energy: bool = False
 
     def __init__(
         self,
@@ -127,7 +129,7 @@ class LMFitter:
         prior_strengths: Mapping[str, float] | None = None,
         output_config: OutputConfig | None = None,
     ) -> None:
-        if accelerator.optimise_energy:
+        if accelerator.optimise_energy and not self.supports_energy:
             raise ValueError(
                 f"{type(self).__name__} does not support accelerator.optimise_energy; "
                 "measurement momenta are fixed pt inputs"
@@ -156,7 +158,7 @@ class LMFitter:
 
     def run(self) -> FitResult:
         """Run the Levenberg-Marquardt fit on one worker per payload."""
-        writer = self.machine.make_writer(self.log_suffix)
+        run_log = self.machine.make_run_log(self.log_suffix)
         pool = WorkerPool()
         knob_names = list(self.machine.knob_names)
         initial_knobs = self.machine.initial_knobs
@@ -166,13 +168,13 @@ class LMFitter:
                 pool.spawn(
                     self.worker_class, worker_id, data, config, self.machine.simulation_config
                 ).send(Start(dict(initial_knobs)))
-            return self._solve(pool.channels, writer)
+            return self._solve(pool.channels, run_log)
 
         knobs, normal_matrix = run_with_workers(
             body,
             fallback=lambda: (dict(initial_knobs), None),
             stop_workers=pool.stop,
-            writer=writer,
+            run_log=run_log,
         )
         logger.info("%s optimisation complete.", self.fit_label)
         return FitResult(
@@ -182,13 +184,18 @@ class LMFitter:
             ),
             diagnostics=self.diagnostics,
             extra=self._extra_result(),
+            extra_uncertainties=self._extra_uncertainties(),
         )
 
     def _extra_result(self) -> dict[str, float]:
         """Fitted parameters that are not model knobs."""
         return {}
 
-    def _solve(self, channels, writer) -> tuple[dict[str, float], np.ndarray | None]:
+    def _extra_uncertainties(self) -> dict[str, float]:
+        """1-sigma uncertainties of :meth:`_extra_result`."""
+        return {}
+
+    def _solve(self, channels, run_log) -> tuple[dict[str, float], np.ndarray | None]:
         """Levenberg-Marquardt solve over the shared knobs; returns the best knobs and the physical normal matrix there.
 
         The closed twiss is close to linear in the knob strengths over the range
@@ -224,7 +231,12 @@ class LMFitter:
             )
 
         optimiser, self.diagnostics = run_levenberg_marquardt(
-            initial, evaluate, self.lm_config, on_accept=on_accept, writer=writer
+            initial,
+            evaluate,
+            self.lm_config,
+            on_accept=on_accept,
+            run_log=run_log,
+            param_names=knob_names,
         )
         best_knobs = dict(zip(knob_names, (float(v) for v in optimiser.best.value), strict=False))
         # The optimiser's Hessian is in the worker's normalised weight space, so

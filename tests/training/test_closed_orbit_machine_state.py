@@ -62,6 +62,7 @@ from adelmo.poco import (
     ClosedOrbitSeries,
     LevenbergMarquardtConfig,
 )
+from adelmo.poco.closed_orbit import difference_orbit
 
 from .test_closed_twiss_fitter import _knob_names
 
@@ -98,14 +99,14 @@ def _quad_globals(seq_psb: Path, scales: tuple[float, float]) -> dict[str, float
 
 
 def _orbit(
-    seq_psb: Path, truth: dict[str, float], machine_state: dict[str, float]
+    seq_psb: Path, truth: dict[str, float], machine_state: dict[str, float], pt: float = 0.0
 ) -> pd.DataFrame:
-    """The orbit of the misaligned machine at ``machine_state``, as a measurement."""
+    """The orbit of the misaligned machine at ``machine_state`` and momentum ``pt``, as a measurement."""
     iface = GradientDescentMadInterface(PSB(ring=3, sequence_file=seq_psb, **KWARGS), py_name="py")
     iface.update_knob_values(truth)
     for name, value in machine_state.items():
         iface.mad.send(f"MADX['{name}'] = {value:.15e}")
-    iface.mad.send("motws = twiss{sequence=loaded_sequence, observe=1, coupling=true, method=6}")
+    iface.mad.send(f"motws = twiss{{sequence=loaded_sequence, observe=1, X0={{pt={pt:.15e}}}, coupling=true, method=6}}")
     twiss = iface.mad.motws.to_df(columns=["name", "x", "y"]).set_index("name")
     del iface
     return pd.DataFrame(
@@ -154,11 +155,12 @@ def _absolute_series(seq_psb: Path, truth: dict[str, float], label: str) -> Clos
 def _relative_series(seq_psb: Path, truth: dict[str, float], label: str) -> ClosedOrbitSeries:
     """Orbit change from the reference state to the quadrupole state ``label`` with a corrector trim."""
     machine_state = {**_quad_globals(seq_psb, STATES[label]), CORRECTOR: TRIM}
-    change = _orbit(seq_psb, truth, machine_state)
-    reference = _orbit(seq_psb, truth, REFERENCE)
-    change[["X", "Y"]] = change[["X", "Y"]] - reference[["X", "Y"]]
     return ClosedOrbitSeries(
-        measurements=(ClosedOrbitMeasurement(change),),
+        measurements=(
+            ClosedOrbitMeasurement(
+                _orbit(seq_psb, truth, machine_state), reference=_orbit(seq_psb, truth, REFERENCE)
+            ),
+        ),
         machine_state=machine_state,
         label=label,
     )
@@ -235,10 +237,10 @@ def test_series_state_is_the_change_from_the_fitter_state(seq_psb: Path) -> None
     truth = _truth(seq_psb, seed=5)
     standing = {**_quad_globals(seq_psb, STATES["both"]), CORRECTOR: 1e-4}
     trimmed = {CORRECTOR: 1e-4 + TRIM}
-    change = _orbit(seq_psb, truth, {**standing, **trimmed})
+    signal = _orbit(seq_psb, truth, {**standing, **trimmed})
     reference = _orbit(seq_psb, truth, standing)
-    change[["X", "Y"]] = change[["X", "Y"]] - reference[["X", "Y"]]
-    series = ClosedOrbitSeries((ClosedOrbitMeasurement(change),), machine_state=trimmed)
+    change = signal[["X", "Y"]] - reference[["X", "Y"]]
+    series = ClosedOrbitSeries((ClosedOrbitMeasurement(signal, reference=reference),), machine_state=trimmed)
 
     fitter = ClosedOrbitFitter(
         accelerator=PSB(ring=3, sequence_file=seq_psb, **KWARGS),
@@ -259,8 +261,8 @@ def test_series_state_is_the_change_from_the_fitter_state(seq_psb: Path) -> None
     # Tail check: the reproduced orbit change matches the measured one at the standing kick.
     refit = _orbit(seq_psb, fitted, {**standing, **trimmed})
     base = _orbit(seq_psb, fitted, standing)
-    residual = (refit[["X", "Y"]] - base[["X", "Y"]]) - change[["X", "Y"]]
-    assert float(np.abs(residual).to_numpy().max()) < 0.05 * float(np.abs(change[["X", "Y"]]).to_numpy().max())
+    residual = (refit[["X", "Y"]] - base[["X", "Y"]]) - change
+    assert float(np.abs(residual).to_numpy().max()) < 0.05 * float(np.abs(change).to_numpy().max())
 
 
 def test_shared_reference_matches_per_series_references(seq_psb: Path) -> None:
@@ -271,8 +273,9 @@ def test_shared_reference_matches_per_series_references(seq_psb: Path) -> None:
     series = []
     for corrector in (CORRECTOR, "kbr3dhz8l1"):
         trimmed = _orbit(seq_psb, truth, {**state, corrector: TRIM})
-        trimmed[["X", "Y"]] = trimmed[["X", "Y"]] - reference[["X", "Y"]]
-        series.append(ClosedOrbitSeries((ClosedOrbitMeasurement(trimmed),), machine_state={corrector: TRIM}))
+        series.append(
+            ClosedOrbitSeries((ClosedOrbitMeasurement(trimmed, reference=reference),), machine_state={corrector: TRIM})
+        )
 
     shared = _fit(seq_psb, series, machine_state=state, shared_reference=True)
     own = _fit(seq_psb, series, machine_state=state, shared_reference=False)
@@ -282,7 +285,8 @@ def test_shared_reference_matches_per_series_references(seq_psb: Path) -> None:
 
 def test_series_equal_to_the_reference_state_is_refused(seq_psb: Path) -> None:
     truth = _truth(seq_psb)
-    measurement = (ClosedOrbitMeasurement(_orbit(seq_psb, truth, {})),)
+    orbit = _orbit(seq_psb, truth, {})
+    measurement = (ClosedOrbitMeasurement(orbit, reference=orbit),)
 
     with pytest.raises(ValueError, match="differs from the reference"):
         _fit(seq_psb, [ClosedOrbitSeries(measurement)])
@@ -294,3 +298,24 @@ def test_machine_state_validation(seq_psb: Path) -> None:
 
     with pytest.raises(RuntimeError, match="neither a MAD-X variable nor an element attribute"):
         _fit(seq_psb, [ClosedOrbitSeries(measurement, machine_state={"no_such_global": 1.0}, absolute_planes=("x", "y"))])
+
+
+def test_a_relative_plane_needs_a_reference_orbit(seq_psb: Path) -> None:
+    truth = _truth(seq_psb)
+    measurement = (ClosedOrbitMeasurement(_orbit(seq_psb, truth, {CORRECTOR: TRIM})),)
+
+    with pytest.raises(ValueError, match="no reference orbit"):
+        _fit(seq_psb, [ClosedOrbitSeries(measurement, machine_state={CORRECTOR: TRIM})])
+
+
+def test_difference_orbit_subtracts_values_and_combines_errors_in_quadrature() -> None:
+    index = pd.Index(["a", "b"], name="NAME")
+    orbit = pd.DataFrame({"X": [3.0, 5.0], "ERRX": [3.0, 3.0], "Y": [1.0, 2.0], "ERRY": [1.0, 1.0]}, index=index)
+    reference = pd.DataFrame({"X": [1.0, 2.0], "ERRX": [4.0, 4.0], "Y": [0.5, 0.5], "ERRY": [1.0, 1.0]}, index=index)
+
+    delta = difference_orbit(orbit, reference, ("x",))
+
+    np.testing.assert_allclose(delta["X"], [2.0, 3.0])
+    np.testing.assert_allclose(delta["ERRX"], 5.0)
+    pd.testing.assert_series_equal(delta["Y"], orbit["Y"])
+    assert difference_orbit(orbit, None, ()) is orbit

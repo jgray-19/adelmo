@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from adelmo.fitting.bpm_gains import PLANES, bpm_gain_names, bpm_reading, without_bpm_gains
 from adelmo.fitting.protocol import Ack, CommandKind, GradReply, LossReply
 from adelmo.fitting.worker import AbstractWorker
 from adelmo.machine.mad.scripts import (
@@ -76,6 +77,10 @@ class TrackingData:
     init_reading_ids: np.ndarray  # Shape: (n_particles,)
     init_variances: np.ndarray  # Shape: (n_particles, 2), var of the start x, y
     precomputed_weights: PrecomputedTrackingWeights | None
+    #: BPMs with a fitted gain, in gain-knob order; empty when no gains are fitted.
+    gain_bpms: tuple[str, ...] = ()
+    #: Index of each point's BPM in ``gain_bpms``, -1 for none. Shape: (n_data_points,)
+    point_gain_index: np.ndarray | None = None
 
 
 class ParticleLostError(Exception):
@@ -170,6 +175,7 @@ class TrackingWorker(AbstractWorker[TrackingData]):
             self.comparisons[observable] = np.array_split(values, num_batches)
             self.weights[observable] = np.array_split(weights, num_batches)
         self.weight_scale = data.precomputed_weights.scale
+        self._prepare_gains(data)
 
         # Flat copy kept in sync with MAD by per-epoch start-coordinate updates.
         self._init_coords_np = np.ascontiguousarray(init_coords, dtype=np.float64)
@@ -209,6 +215,86 @@ class TrackingWorker(AbstractWorker[TrackingData]):
                 mad_logfile=self.config.mad_logfile,
                 worker_id=self.worker_id,
             )
+
+    def _prepare_gains(self, data: TrackingData) -> None:
+        """Gain bookkeeping: names in reply order, values, and each point's gain index."""
+        self.fit_gains = bool(data.gain_bpms)
+        self.gain_names = bpm_gain_names(data.gain_bpms)
+        self.n_gain_bpms = len(data.gain_bpms)
+        self.gain_values = np.zeros(len(self.gain_names))
+        if self.fit_gains:
+            self.point_gain_index = np.asarray(data.point_gain_index)
+            self.has_gain = self.point_gain_index >= 0
+
+    def _update_gains(self, knobs: dict[str, float]) -> None:
+        for i, name in enumerate(self.gain_names):
+            if name in knobs:
+                self.gain_values[i] = knobs[name]
+
+    def _gain_factor(self, plane_idx: int) -> np.ndarray:
+        """``1 + g`` of each observation point for one plane."""
+        gains = self.gain_values[plane_idx * self.n_gain_bpms : (plane_idx + 1) * self.n_gain_bpms]
+        return bpm_reading(
+            1.0, np.where(self.has_gain, gains[np.maximum(self.point_gain_index, 0)], 0.0)
+        )
+
+    def _apply_gains(
+        self, results: dict[str, np.ndarray], *, gain_columns: bool = False
+    ) -> dict[str, np.ndarray]:
+        """Turn tracked positions into BPM readings.
+
+        Positions become ``(1 + g) m`` (``m`` is kept as ``<o>_tracked`` for
+        :meth:`_gain_sums`); their knob and start derivatives scale by ``1 + g``.
+        ``gain_columns`` also appends the gain derivatives, ``m`` at each BPM's points,
+        to the Jacobian, for the uncertainty.
+        """
+        if not self.fit_gains:
+            return results
+        for observable in self.observables:
+            plane_idx = PLANES.index(observable) if observable in PLANES else None
+            tracked = results[observable]
+            factor = 1.0 if plane_idx is None else self._gain_factor(plane_idx)
+            results[observable] = tracked * factor
+            results[f"{observable}_tracked"] = tracked
+            key = self._gradient_key(observable)
+            if key not in results:
+                continue
+            if not gain_columns:
+                results[key] = results[key] * factor
+                continue
+            gain_jac = np.zeros((tracked.shape[0], len(self.gain_names), tracked.shape[1]))
+            if plane_idx is not None:
+                points = np.flatnonzero(self.has_gain)
+                rows = plane_idx * self.n_gain_bpms + self.point_gain_index[points]
+                gain_jac[:, rows, points] = tracked[:, points]
+            results[key] = np.concatenate([results[key] * factor, gain_jac], axis=1)
+            start_key = f"d{observable}_dc0"
+            if start_key in results:
+                results[start_key] = results[start_key] * factor
+        return results
+
+    def _gain_sums(self, results: dict[str, np.ndarray], batch: int) -> np.ndarray:
+        """Per-gain ``Σ w m (y - m)`` and ``Σ w m²`` over this batch, with ``m`` the tracked position.
+
+        The loss is quadratic in each gain, ``∂L/∂g = 2 (g Σ w m² - Σ w m (y - m))``,
+        so these sums, added over every worker, give the best gains in closed form.
+        """
+        weights = self._masked_weights(batch)
+        sums = np.zeros((2, len(self.gain_names)))
+        points = np.flatnonzero(self.has_gain)
+        for plane_idx, observable in enumerate(PLANES):
+            if observable not in self.observables:
+                continue
+            tracked = results[f"{observable}_tracked"][:, points]
+            weight = weights[observable][:, points]
+            measured = self.comparisons[observable][batch][:, points]
+            columns = plane_idx * self.n_gain_bpms + self.point_gain_index[points]
+            n = len(self.gain_names)
+            sums[0] += np.bincount(
+                columns, (weight * tracked * (measured - tracked)).sum(axis=0), n
+            )
+            sums[1] += np.bincount(columns, (weight * tracked**2).sum(axis=0), n)
+        return sums
 
     def _prepare_uncertainty_batches(self, data: TrackingData, n_init: int, num_batches: int) -> None:
         """Split reading ids and variances like the comparisons, for the uncertainty part."""
@@ -255,8 +341,10 @@ end
     def on_start(self, knobs: dict[str, float]) -> MAD:
         """Set up MAD, load the particles and check the observation geometry."""
         # Replies carry one gradient entry per start value.
-        self.n_reply_knobs = len(knobs)
-        mad, nbpms = self.setup_mad_interface(knobs)
+        # Gains are not stepped by the optimiser: replies carry the magnet knobs only.
+        self.n_reply_knobs = len(without_bpm_gains(knobs))
+        self._update_gains(knobs)
+        mad, nbpms = self.setup_mad_interface(without_bpm_gains(knobs))
         self.send_initial_conditions(mad)
         mad.send(self.run_track_init_text)
         self.run_preflight_check(mad, nbpms)
@@ -343,6 +431,7 @@ end
     ) -> dict[str, np.ndarray]:
         """Run MAD-NG tracking for a single batch and return all outputs."""
         machine_pt = knob_updates.get("pt", self.fixed_pt)
+        self._update_gains(knob_updates)
         self.send_knobs(mad, knob_updates, plain=self.validation)
         mad.send(f"batch = {batch + 1}")
         self._set_particle_pts(mad, machine_pt, batch + 1, batch + 1)
@@ -360,9 +449,9 @@ end
         n_points)``, the derivatives by the start x and y.
         """
         if self.validation:
-            return {
-                observable: np.asarray(mad.recv()).squeeze(-1) for observable in self.observables
-            }
+            return self._apply_gains(
+                {observable: np.asarray(mad.recv()).squeeze(-1) for observable in self.observables}
+            )
         loss_info: dict = mad.recv()
         n_lost: int = loss_info["n_lost"]
         n_total: int = loss_info["n_total"]
@@ -379,7 +468,7 @@ end
             raise ParticleLostError(
                 f"Worker {self.worker_id}: {n_lost}/{n_total} particles lost ({pct:.1f}%) during tracking"
             )
-        return results
+        return self._apply_gains(results, gain_columns=include_start_derivatives)
 
     @staticmethod
     def _gradient_key(observable: str) -> str:
@@ -461,6 +550,9 @@ end
             self.worker_id,
             loss / (self.normalisation_points * n_particles),
             grad / self.normalisation_points,
+            extra=self._gain_sums(results, batch) / self.normalisation_points
+            if self.fit_gains
+            else None,
         )
 
     def compute_diagnostics(
@@ -514,6 +606,7 @@ end
                 self.worker_disabled = bool(payload["disable_worker"])
             case CommandKind.SET_KNOBS:
                 knobs = payload["knobs"]
+                self._update_gains(knobs)
                 self.send_knobs(mad, knobs, plain=self.validation)
                 self._set_particle_pts(mad, knobs.get("pt", self.fixed_pt), 1, self.num_batches)
             case CommandKind.UPDATE_INIT_COORDS:
@@ -604,11 +697,16 @@ end
         if not self.worker_disabled and self.propagate_uncertainty_on_exit:
             LOGGER.debug(f"Worker {self.worker_id}: Propagating uncertainty")
             try:
-                self.send_reply(self._compute_uncertainty_part(mad, self.n_reply_knobs))
+                self.send_reply(self._compute_uncertainty_part(mad, self.n_uncertainty_params))
             except Exception as exc:  # noqa: BLE001
                 self.send_error_payload(exc, phase="uncertainty")
         else:
-            self.send_reply(UncertaintyPart.empty(self.n_reply_knobs))
+            self.send_reply(UncertaintyPart.empty(self.n_uncertainty_params))
+
+    @property
+    def n_uncertainty_params(self) -> int:
+        """The magnet knobs, then every gain: the uncertainty covers both."""
+        return self.n_reply_knobs + len(self.gain_names)
 
     def _compute_uncertainty_part(self, mad: MAD, n_knobs: int) -> UncertaintyPart:
         """Track every batch at the loaded knobs and return this worker's uncertainty part.

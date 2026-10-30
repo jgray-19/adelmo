@@ -432,7 +432,7 @@ def _build_energy_optimisation_case(
     accel = loaded_interface.accelerator.copy_with(optimise_energy=True)
     output_config = OutputConfig(
         mad_logfile=tmp_path / mad_log_name,
-        write_tensorboard_logs=False,
+        write_run_log=False,
     )
     ctrl = ArcByArcFitter(
         accel,

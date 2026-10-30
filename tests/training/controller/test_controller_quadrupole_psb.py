@@ -87,7 +87,7 @@ def _build_psb_arc_quad_controller(
         options=FitterOptions(
             output_config=OutputConfig(
                 mad_logfile=tmp_path / "controller_quad_opt_psb_val.log",
-                write_tensorboard_logs=False,
+                write_run_log=False,
             ),
             true_strengths=magnet_strengths,
             debug=False,
@@ -204,7 +204,7 @@ def test_controller_quad_opt_psb_ring3(
         options=FitterOptions(
             output_config=OutputConfig(
                 mad_logfile=tmp_path / "controller_quad_opt_psb.log",
-                write_tensorboard_logs=False,
+                write_run_log=False,
             ),
             true_strengths=magnet_strengths,
             debug=False,

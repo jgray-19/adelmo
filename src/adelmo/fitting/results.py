@@ -32,3 +32,5 @@ class FitResult:
     diagnostics: FitDiagnostics | None = None
     #: Extra fitted parameters that are not model knobs (e.g. BPM and corrector gains).
     extra: dict[str, float] = field(default_factory=dict)
+    #: 1-sigma uncertainties of ``extra``, by the same names.
+    extra_uncertainties: dict[str, float] = field(default_factory=dict)

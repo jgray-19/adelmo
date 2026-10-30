@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from adelmo.config import TRAINING_RUNS_ROOT
 
@@ -37,17 +37,20 @@ class OutputConfig:
     """Output and logging behaviour for optimisation runs.
 
     Attributes:
-        write_tensorboard_logs: Whether to write TensorBoard event files.
+        write_run_log: Whether to write a run log (see :mod:`adelmo.runlog`).
         include_uncertainty: Whether to compute uncertainties. Disabling this
             skips worker-side Hessian estimation for faster execution.
-        tensorboard_root: Root directory for TensorBoard event-file runs.
+        run_log_root: Directory under which each fit writes its run log.
+        run_metadata: Free-form, JSON-serialisable description stored with the run
+            log, e.g. what is needed to rebuild the model for replaying it.
         mad_logfile: Optional MAD log file path.
         python_logfile: Optional Python worker log file path.
     """
 
-    write_tensorboard_logs: bool = True
+    write_run_log: bool = True
     include_uncertainty: bool = True
-    tensorboard_root: Path = field(default_factory=lambda: TRAINING_RUNS_ROOT)
+    run_log_root: Path = field(default_factory=lambda: TRAINING_RUNS_ROOT)
+    run_metadata: dict[str, Any] = field(default_factory=dict)
     mad_logfile: Path | None = None
     python_logfile: Path | None = None
 

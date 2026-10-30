@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, TypeVar
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from tensorboardX import SummaryWriter
+    from adelmo.runlog import RunLog
 
 LOGGER = logging.getLogger(__name__)
 
@@ -20,11 +20,11 @@ def run_with_workers(
     *,
     fallback: Callable[[], T],
     stop_workers: Callable[[], None],
-    writer: SummaryWriter | None = None,
+    run_log: RunLog | None = None,
 ) -> T:
     """Run ``body``; on Ctrl-C return ``fallback()`` (the best result so far) instead.
 
-    The workers are stopped and the TensorBoard writer closed however the run ends;
+    The workers are stopped and the run log closed however the run ends;
     any other exception propagates once they are.
     """
     try:
@@ -34,5 +34,5 @@ def run_with_workers(
         return fallback()
     finally:
         stop_workers()
-        if writer is not None:
-            writer.close()
+        if run_log is not None:
+            run_log.close()

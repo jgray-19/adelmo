@@ -236,7 +236,7 @@ def _build_acd_controller(
         options=FitterOptions(
             output_config=OutputConfig(
                 mad_logfile=tmp_path / "mad_logfile_acd.log",
-                write_tensorboard_logs=False,
+                write_run_log=False,
             ),
             true_strengths=magnet_strengths.copy(),
         ),

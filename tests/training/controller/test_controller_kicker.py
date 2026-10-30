@@ -75,7 +75,7 @@ def _build_kicker_controller(
         options=FitterOptions(
             output_config=OutputConfig(
                 mad_logfile=tmp_path / "mad_logfile_kicker.log",
-                write_tensorboard_logs=False,
+                write_run_log=False,
             ),
             true_strengths=magnet_strengths.copy(),
         ),

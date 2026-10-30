@@ -8,11 +8,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pymadng_utils.io.utils import read_knobs
-from tensorboardX import SummaryWriter
 
 from adelmo.fitting.config import OutputConfig
 from adelmo.machine.mad import GradientDescentMadInterface
 from adelmo.machine.mad.optimising_mad_interface import is_magnet_strength_name
+from adelmo.runlog import RunLog
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -122,15 +122,39 @@ class MachineSetup:
         """Every value a worker model starts from: the fixed values, then the initial knobs."""
         return {**self.initial_model_values, **self.initial_knobs}
 
-    def make_writer(self, log_suffix: str) -> SummaryWriter | None:
-        """A TensorBoard writer under ``output_config.tensorboard_root``, or ``None`` when disabled."""
-        if not self.output_config.write_tensorboard_logs:
-            LOGGER.info("TensorBoard logging disabled")
+    def make_run_log(self, name: str, *, resume: bool = False) -> RunLog | None:
+        """A run log under ``output_config.run_log_root``, or ``None`` when disabled.
+
+        With ``resume``, the newest unfinished run of this ``name`` that has recorded
+        some history is continued; a new one is made when there is none.
+        """
+        if not self.output_config.write_run_log:
+            LOGGER.info("Run logging disabled")
             return None
+        if resume:
+            interrupted = self._interrupted_run_log(name)
+            if interrupted is not None:
+                LOGGER.info("Run log: resuming %s", interrupted)
+                return RunLog(
+                    interrupted, name=name, metadata=self.output_config.run_metadata, resume=True
+                )
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_dir = self.output_config.tensorboard_root / f"{timestamp}_{log_suffix}"
-        log_dir.parent.mkdir(parents=True, exist_ok=True)
-        return SummaryWriter(log_dir=str(log_dir))
+        directory = self.output_config.run_log_root / f"{timestamp}_{name}"
+        LOGGER.info("Run log: %s", directory)
+        return RunLog(directory, name=name, metadata=self.output_config.run_metadata)
+
+    def _interrupted_run_log(self, name: str) -> Path | None:
+        """The newest run log of ``name`` that never finished but recorded some history."""
+        for directory in sorted(self.output_config.run_log_root.glob(f"*_{name}"), reverse=True):
+            history = directory / "history.jsonl"
+            if (
+                (directory / "stage.json").exists()
+                and not (directory / "result.json").exists()
+                and history.exists()
+                and history.stat().st_size > 0
+            ):
+                return directory
+        return None
 
     def close(self) -> None:
         """Shut down the fitter-side MAD process."""

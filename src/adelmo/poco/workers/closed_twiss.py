@@ -173,9 +173,10 @@ def read_orbit_only(mad: MAD, n_coords: int, n_knobs: int):
     names = list(mad.recv())
     values = np.empty((n_coords, len(names)))
     jacobian = np.empty((n_coords, len(names), n_knobs))
+    columns = max(n_knobs, 1)  # MAD keeps one all-zero column when there are no knobs
     for i in range(n_coords):
         values[i] = np.asarray(mad.recv(), dtype=float).ravel()
-        jacobian[i] = np.asarray(mad.recv(), dtype=float).reshape(len(names), n_knobs)
+        jacobian[i] = np.asarray(mad.recv(), dtype=float).reshape(len(names), columns)[:, :n_knobs]
     return names, values, jacobian
 
 

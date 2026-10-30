@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, TypeAlias
 
 import numpy as np
 
+from adelmo.fitting.bpm_gains import point_gain_index
 from adelmo.fitting.weights import global_weight_scale, variance_to_weight
 from adelmo.tracking.worker import (
     PrecomputedTrackingWeights,
@@ -47,8 +48,9 @@ def observation_turn_offsets(cols: np.ndarray, sdir: int) -> np.ndarray:
 class WorkerPayloadBuilder:
     """Build tracking payload arrays and shared weights for workers."""
 
-    def __init__(self, accelerator: Accelerator) -> None:
+    def __init__(self, accelerator: Accelerator, gain_bpms: tuple[str, ...] = ()) -> None:
         self.accelerator = accelerator
+        self.gain_bpms = gain_bpms
 
     def compute_pt(self, file_idx: int, machine_deltaps: list[float]) -> float:
         """Return the reference ``pt`` for a measurement file's energy offset."""
@@ -164,6 +166,8 @@ class WorkerPayloadBuilder:
             init_reading_ids=init_reading_ids,
             init_variances=init_variances,
             precomputed_weights=None,
+            gain_bpms=self.gain_bpms,
+            point_gain_index=point_gain_index(bpm_names * n_run_turns, self.gain_bpms),
         )
 
     @staticmethod

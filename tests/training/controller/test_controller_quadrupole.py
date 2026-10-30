@@ -76,7 +76,7 @@ def _build_lhc_quad_controller(
         options=FitterOptions(
             output_config=OutputConfig(
                 mad_logfile=tmp_path / "mad_logfile.log",
-                write_tensorboard_logs=False,
+                write_run_log=False,
             ),
             true_strengths=magnet_strengths.copy(),
         ),

@@ -196,7 +196,7 @@ def test_controller_worker_hessian_matches_finite_difference_on_reduced_knob_sub
         options=FitterOptions(
             output_config=OutputConfig(
                 mad_logfile=tmp_path / "controller_hessian.log",
-                write_tensorboard_logs=False,
+                write_run_log=False,
             ),
             true_strengths=magnet_strengths.copy(),
         ),
@@ -320,7 +320,7 @@ def test_controller_worker_hessian_matches_finite_difference_for_psb_100um_noise
         options=FitterOptions(
             output_config=OutputConfig(
                 mad_logfile=tmp_path / "controller_psb_hessian.log",
-                write_tensorboard_logs=False,
+                write_run_log=False,
             ),
             true_strengths=magnet_strengths.copy(),
         ),

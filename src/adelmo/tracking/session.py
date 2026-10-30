@@ -57,6 +57,7 @@ class TrackingSession:
         start_bpms: list[str],
         end_bpms: list[str],
         machine_deltaps: list[float],
+        gain_bpms: tuple[str, ...] = (),
     ) -> None:
         self.setup_helper = setup_helper
         self.simulation_config = simulation_config
@@ -66,7 +67,7 @@ class TrackingSession:
         self.start_bpms = start_bpms
         self.end_bpms = end_bpms
         self.machine_deltaps = machine_deltaps
-        self.payload_builder = WorkerPayloadBuilder(setup_helper.accelerator)
+        self.payload_builder = WorkerPayloadBuilder(setup_helper.accelerator, gain_bpms)
         self.training: WorkerPool[WorkerRuntimeMetadata] = WorkerPool()
         self.validation: WorkerPool[WorkerRuntimeMetadata] = WorkerPool()
 
@@ -78,6 +79,9 @@ class TrackingSession:
             len(training_payloads),
             len(validation_payloads),
         )
+        # Converts a physical chi-square to the loop's loss units (see SGDLoop.run's prior).
+        n_points = np.mean([data.position_comparisons.shape[1] for data, _, _ in training_payloads])
+        self.chi2_to_loss = 1.0 / (training_payloads[0][0].precomputed_weights.scale * n_points)
         self.training = self._spawn(training_payloads, 0, initial_knobs, validation=False)
         self.validation = self._spawn(
             validation_payloads, len(training_payloads), initial_knobs, validation=True

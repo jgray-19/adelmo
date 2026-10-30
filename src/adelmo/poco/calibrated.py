@@ -11,16 +11,16 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from adelmo.fitting.bpm_gains import PLANES, bpm_gain_names
 from adelmo.fitting.protocol import Evaluate, GradReply, distribute
 from adelmo.machine.mad.machine_state import resolve_machine_state
 from adelmo.poco.calibration import (
-    PLANES,
     CalibrationBlocks,
     CalibrationSpec,
     apply_prior,
     back_substitute,
-    bpm_gain_name,
     corrector_gain_name,
+    gain_covariance,
     reduce_blocks,
 )
 from adelmo.poco.closed_orbit import CLOSED_ORBIT_OBSERVABLES, ClosedOrbitFitter
@@ -42,12 +42,16 @@ LOGGER = logging.getLogger(__name__)
 class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
     """:class:`ClosedOrbitFitter` with ``(1 + b_bpm)(1 + g_corrector)`` calibration parameters.
 
-    Every series' own ``machine_state`` must set exactly one ``<kick_prefix><corrector>`` kick (its change from the fitter's
-    ``machine_state`` is worked out internally); the corrector's gain is named after it. The BPM gains are
+    Every ``<kick_prefix><corrector>`` kick a series' own ``machine_state`` sets (its change from the fitter's
+    ``machine_state`` is worked out internally) gets a gain, named after the corrector; a series may set any number, none included. The BPM gains are
     eliminated by a Schur complement each iteration and recovered by back-substitution, so the Levenberg-Marquardt solve
     is over the magnet knobs and the corrector gains only. ``sigma_bpm`` / ``sigma_corrector`` are Gaussian priors that
     also fix the ``b``/``g`` scale degeneracy. ``knob_sigmas`` (knob name, or terminal attribute such as ``dk1l`` for every knob ending in it, -> absolute width in the
     knob's units) adds a Gaussian prior on those magnet knobs; knobs it does not name stay free. ``prior_strengths`` is not used. After the fit, :attr:`calibration_result` holds every gain.
+
+    With ``fit_corrector_gains=False`` only the BPM gains are fitted: no kick is scaled and ``sigma_corrector`` is unused. This is the
+    mode for absolute orbits, where every corrector's standing kick is part of the orbit and only the correctors some series sets could
+    be given a gain.
     """
 
     worker_class = CalibratedClosedOrbitWorker
@@ -72,8 +76,10 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
         knob_sigmas: Mapping[str, float] | None = None,
         loss_only_trials: bool = True,
         kick_prefix: str = "k_",
+        fit_corrector_gains: bool = True,
     ) -> None:
         self.kick_prefix = kick_prefix
+        self.fit_corrector_gains = bool(fit_corrector_gains)
         self.knob_sigmas = {name.lower(): float(sigma) for name, sigma in (knob_sigmas or {}).items()}
         if any(sigma <= 0 for sigma in self.knob_sigmas.values()):
             raise ValueError("knob_sigmas must be > 0")
@@ -84,6 +90,7 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
         self.sigma_corrector = float(sigma_corrector)
         self._attached: dict[str, shared_memory.SharedMemory] = {}  # workers' shared blocks, mapped once
         self.calibration_result: dict[str, float] = {}
+        self.calibration_uncertainty: dict[str, float] = {}
         self.calibration_spec: CalibrationSpec | None = None
         # The gains are grouped into every worker's batch, so the shared-reference worker never applies.
         super().__init__(
@@ -106,16 +113,18 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
         bpms = tuple(payloads[0][1].bpm_names)
         if any(tuple(data.bpm_names) != bpms for _, data in payloads):
             raise ValueError("Calibration fits need every series to observe the same BPMs")
-        kicks = [
-            [name for name in resolve_machine_state(item.machine_state) if name.startswith(self.kick_prefix)]
-            for item in self.series
-        ]
-        if any(len(names) != 1 for names in kicks):
-            raise ValueError(
-                f"Calibration fits need every series' machine_state to set exactly one "
-                f"'{self.kick_prefix}<corrector>' kick, got {kicks}"
+        # Every kick a series' own state sets gets a gain; a series that sets none (an off-momentum orbit, say) has none to fit.
+        correctors = ()
+        if self.fit_corrector_gains:
+            kicks = (
+                name
+                for item in self.series
+                for name in resolve_machine_state(item.machine_state)
+                if name.startswith(self.kick_prefix)
             )
-        correctors = tuple(dict.fromkeys(names[0][len(self.kick_prefix) :].upper() for names in kicks))
+            correctors = tuple(
+                dict.fromkeys(name[len(self.kick_prefix) :].upper() for name in kicks)
+            )
         self.calibration_spec = CalibrationSpec(bpms, correctors, self.kick_prefix)
         for _, data in payloads:
             data.calibration = self.calibration_spec
@@ -188,12 +197,15 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
     def _extra_result(self) -> dict[str, float]:
         return dict(self.calibration_result)
 
-    def _solve(self, channels, writer):
+    def _extra_uncertainties(self) -> dict[str, float]:
+        return dict(self.calibration_uncertainty)
+
+    def _solve(self, channels, run_log):
         spec = self.calibration_spec
         knob_names = list(self.machine.knob_names)
         n_q, n_g, n_b = len(knob_names), len(spec.correctors), len(PLANES) * len(spec.bpms)
         g_names = [corrector_gain_name(c) for c in spec.correctors]
-        b_names = [bpm_gain_name(plane, bpm) for plane in PLANES for bpm in spec.bpms]
+        b_names = bpm_gain_names(spec.bpms)
 
         attributes = [name.rpartition(".")[2].lower() for name in knob_names]
         unknown = sorted(set(self.knob_sigmas) - {name.lower() for name in knob_names} - set(attributes))
@@ -206,7 +218,7 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
         u = np.zeros(n_q + n_g)
         u[:n_q] = [float(self.machine.initial_knobs[name]) for name in knob_names]
         #: The BPM gains: eliminated from each solve, then back-substituted from the best point's blocks.
-        gains = {"b": np.zeros(n_b), "best_b": np.zeros(n_b), "best_blocks": None}
+        gains = {"b": np.zeros(n_b), "best_b": np.zeros(n_b), "best_blocks": None, "unit": 1.0}
 
         def knobs_at(params: np.ndarray) -> dict[str, float]:
             values = np.concatenate([params, gains["b"]]).tolist()
@@ -226,6 +238,7 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
             if collected is None:
                 return LMPoint(float("nan"), np.zeros(n_q + n_g), np.zeros((n_q + n_g,) * 2), failed=True)
             blocks, unit = collected
+            gains["unit"] = unit
             apply_prior(blocks, params, gains["b"], self.sigma_corrector, self.sigma_bpm, unit, sigma_q)
             grad, hess = reduce_blocks(blocks)
             return LMPoint(blocks.loss, grad, hess, extra=blocks)
@@ -245,10 +258,21 @@ class CalibratedClosedOrbitFitter(ClosedOrbitFitter):
             trial_loss=trial_loss if self.loss_only_trials else None,
             on_accept=on_accept,
             after_step=after_step,
-            writer=writer,
+            run_log=run_log,
+            param_names=knob_names + g_names,
         )
         best_u = optimiser.best.value
         self.calibration_result = dict(zip(g_names, best_u[n_q:].tolist(), strict=True))
-        self.calibration_result.update(zip(b_names, gains["best_b"].tolist(), strict=True))
-        # TODO: report uncertainties. The gains' covariance needs the Schur-reduced normal matrix of the physical weights.
-        return dict(zip(knob_names, best_u[:n_q].tolist(), strict=True)), None
+        # The best point's own BPM-gain step has not been taken yet (it is the one at zero step in u): without it the gains of a
+        # fit that converges at once would be the starting zeros.
+        best_b = gains["best_b"]
+        if gains["best_blocks"] is not None:
+            best_b = best_b + back_substitute(gains["best_blocks"], np.zeros(n_q + n_g))
+        self.calibration_result.update(zip(b_names, best_b.tolist(), strict=True))
+        normal = None
+        if gains["best_blocks"] is not None:
+            normal, sigma_u, sigma_b = gain_covariance(gains["best_blocks"], gains["unit"])
+            self.calibration_uncertainty = dict(
+                zip(g_names + b_names, [*sigma_u[n_q:], *sigma_b], strict=True)
+            )
+        return dict(zip(knob_names, best_u[:n_q].tolist(), strict=True)), normal

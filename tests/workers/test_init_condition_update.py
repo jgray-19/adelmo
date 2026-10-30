@@ -355,3 +355,16 @@ def test_initial_conditions_hook_keeps_empty_best_knobs_empty() -> None:
 
     hook({"kopt": 1.0}, {})
     assert seen == [{}]
+
+
+def test_initial_conditions_hook_passes_best_gains_but_not_current_gains() -> None:
+    from adelmo.tracking.fitter import initial_conditions_hook
+
+    seen = []
+
+    def callback(current, best):
+        seen.append((current, best))
+
+    knobs = {"k": 1.0, "bpmgain.x.BPM1": 0.02}
+    initial_conditions_hook(callback, {}, lambda _: None)(knobs, knobs)
+    assert seen == [({"k": 1.0}, knobs)]

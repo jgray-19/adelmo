@@ -395,7 +395,7 @@ def test_lhc_acd_reconstruction_and_fitter_setup(
             initial_knob_strengths={},
             true_strengths=machine.truth,
             output_config=OutputConfig(
-                write_tensorboard_logs=False,
+                write_run_log=False,
                 include_uncertainty=False,
                 mad_logfile=tmp_path / "acd_mad.log",
             ),

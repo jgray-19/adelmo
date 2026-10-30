@@ -152,7 +152,9 @@ more :class:`~adelmo.poco.ClosedOrbitSeries`.
     ``machine_state`` on the fitter provides a default inherited by every series.
 ``absolute_planes``
     Planes fitted as absolute orbits. The remaining planes are fitted as the change
-    from the fitter's own ``machine_state`` to the series' state.
+    from the fitter's own ``machine_state`` to the series' state: the fitter subtracts
+    each measurement's ``reference`` orbit (errors added in quadrature), which is
+    required for those planes. Measured orbits are always passed in absolute.
 ``observables``
     Fitted quantities: ``x``, ``y``, and the phase advances ``mu1``, ``mu2``
     (``mu1``/``mu2`` are set per series).
@@ -162,8 +164,9 @@ down the MAD-NG process once the fit is complete.
 
 ``CalibratedClosedOrbitFitter`` extends this with BPM gains and corrector kick
 calibrations as additional parameters, with Gaussian priors ``sigma_bpm`` and
-``sigma_corrector``. Each series' ``machine_state`` must set exactly one ``k_<corrector>``
-kick.
+``sigma_corrector``. Every ``k_<corrector>`` kick a series' ``machine_state`` sets gets a gain; a
+series may set several or none (an off-momentum orbit). ``fit_corrector_gains=False`` fits the BPM
+gains alone, which is the mode for absolute orbits.
 
 Degeneracy analysis
 -------------------

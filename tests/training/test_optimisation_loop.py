@@ -373,3 +373,44 @@ def test_final_checkpoint_records_the_epoch_that_triggered_the_loss_stop(tmp_pat
     assert loop.diagnostics.reason == "loss_converged"
     assert loop.diagnostics.iterations == 3
     assert json.loads(checkpoint_path.read_text())["saved_epoch"] == 2
+
+
+def test_run_log_records_every_epoch_and_how_the_fit_ended(tmp_path) -> None:
+    from adelmo.runlog import RunLog, StageLog
+
+    loop = _make_loop(["k0"], max_epochs=3, gradient_converged_value=-1.0)
+    run_log = RunLog(tmp_path, name="tracking_opt")
+
+    loop.run(
+        {"k0": 0.0},
+        _make_channels(1, 3, losses=([3.0, 2.0, 1.0],), grad=1.0),
+        total_turns=1,
+        run_log=run_log,
+    )
+    run_log.close()
+
+    stage = StageLog(tmp_path)
+    assert stage.steps() == [-1, 0, 1, 2]
+    assert stage.history()["loss"].tolist() == [3.0, 2.0, 1.0]
+    assert stage.knobs_at(2) == loop.best.value
+    assert stage.best_step() == 2
+    assert stage.result["reason"] == loop.diagnostics.reason
+
+
+def test_staged_loop_decays_each_stage_and_never_stops_early() -> None:
+    config = OptimiserConfig(
+        max_epochs=30,
+        stage_epochs=10,
+        warmup_epochs=2,
+        warmup_lr_start=1e-9,
+        max_lr=1e-6,
+        min_lr=1e-8,
+        gradient_converged_value=1.0,
+        loss_change_tolerance=1.0,
+        loss_change_min_epoch_fraction=0.0,
+    )
+    loop = SGDLoop(["k"], true_strengths={}, config=config, num_batches=1)
+    assert config.decay_epochs == 8
+    assert loop.scheduler(9) == pytest.approx(1e-8)
+    state = SimpleNamespace(selection_loss=1.0, epoch=5)
+    assert loop._should_stop(state, 1.0) is None

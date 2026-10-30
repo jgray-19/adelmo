@@ -13,11 +13,10 @@ from adelmo.fitting.results import FitDiagnostics
 from adelmo.optimisers.levenberg_marquardt import LevenbergMarquardtOptimiser
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from tensorboardX import SummaryWriter
+    from collections.abc import Callable, Sequence
 
     from adelmo.optimisers.levenberg_marquardt import LevenbergMarquardtConfig
+    from adelmo.runlog import RunLog
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +44,8 @@ def run_levenberg_marquardt(
     trial_loss: Callable[[np.ndarray], float | None] | None = None,
     on_accept: Callable[[np.ndarray, LMPoint], None] | None = None,
     after_step: Callable[[np.ndarray, LevenbergMarquardtOptimiser], None] | None = None,
-    writer: SummaryWriter | None = None,
+    run_log: RunLog | None = None,
+    param_names: Sequence[str] | None = None,
 ) -> tuple[LevenbergMarquardtOptimiser, FitDiagnostics]:
     """Minimise with Levenberg-Marquardt steps ``(H + lam·diag H) delta = -g``.
 
@@ -60,6 +60,9 @@ def run_levenberg_marquardt(
     reasons (no curvature to retry from, or damping driven to the ceiling) end the
     solve early.
 
+    With ``run_log``, every accepted iteration's loss is logged, and its parameters
+    too when ``param_names`` names them.
+
     Returns the optimiser, whose ``best_params`` are the solution, and how the fit ended.
     """
     optimiser = LevenbergMarquardtOptimiser(config, initial_params=params)
@@ -69,6 +72,9 @@ def run_levenberg_marquardt(
     last_update = None
     completed_iterations = 0
     accepted_evaluations = 0
+    record_params = run_log is not None and param_names is not None
+    if record_params:
+        run_log.begin(_named(param_names, params))
 
     for iteration in range(config.max_iterations):
         completed_iterations = iteration + 1
@@ -84,6 +90,7 @@ def run_levenberg_marquardt(
             point = evaluate(params, iteration)
             update = optimiser.update(params, point.loss, point.grad, point.hessian, point.failed)
         last_update = update
+        accepted_params = params
         if update.accepted:
             accepted_evaluations += 1
             if on_accept is not None:
@@ -115,7 +122,11 @@ def run_levenberg_marquardt(
             )
             continue
 
-        _log_iteration(writer, iteration, update.loss, update.grad_norm, update.damping, run_start)
+        _log_iteration(iteration, update.loss, update.grad_norm, update.damping, run_start)
+        if run_log is not None:
+            run_log.log(iteration, loss=update.loss, grad_norm=update.grad_norm, lm_lambda=update.damping)
+            if record_params:
+                run_log.record_knobs(iteration, _named(param_names, accepted_params))
         if update.converged:
             logger.info("Levenberg-Marquardt converged (%s) at iter %d", update.reason, iteration)
             break
@@ -129,13 +140,21 @@ def run_levenberg_marquardt(
         damping=None if last_update is None else float(last_update.damping),
         accepted_evaluations=accepted_evaluations,
     )
+    if run_log is not None:
+        run_log.finish(
+            reason=diagnostics.reason,
+            iterations=diagnostics.iterations,
+            best_loss=diagnostics.best_loss,
+        )
     return optimiser, diagnostics
 
 
-def _log_iteration(
-    writer: SummaryWriter | None, iteration: int, loss: float, grad_norm: float, lam: float, run_start: float
-) -> None:
-    """Log one accepted iteration to the console and TensorBoard."""
+def _named(names: Sequence[str], params: np.ndarray) -> dict[str, float]:
+    return dict(zip(names, (float(v) for v in params), strict=True))
+
+
+def _log_iteration(iteration: int, loss: float, grad_norm: float, lam: float, run_start: float) -> None:
+    """Log one accepted iteration to the console."""
     logger.info(
         "LM iter %d: loss=%.3e, |g|=%.3e, lam=%.1e, tt=%.1fs",
         iteration,
@@ -144,8 +163,3 @@ def _log_iteration(
         lam,
         time.time() - run_start,
     )
-    if writer is not None:
-        writer.add_scalar("loss", loss, iteration)
-        writer.add_scalar("grad_norm", grad_norm, iteration)
-        writer.add_scalar("lm_lambda", lam, iteration)
-        writer.flush()

@@ -73,7 +73,7 @@ def _make_fitter(
         BPM_START_POINTS,
         BPM_END_POINTS,
         options=FitterOptions(
-            output_config=OutputConfig(mad_logfile=log, write_tensorboard_logs=False),
+            output_config=OutputConfig(mad_logfile=log, write_run_log=False),
         ),
     )
 

@@ -96,7 +96,7 @@ fitter = ArcByArcFitter(
     measurement_config=MeasurementConfig({Path("measurement.parquet"): MeasurementDetails()}),
     bpm_start_points=["BPM.12R1.B1"],
     bpm_end_points=["BPM.20R1.B1"],
-    options=FitterOptions(output_config=OutputConfig(write_tensorboard_logs=False)),
+    options=FitterOptions(output_config=OutputConfig(write_run_log=False)),
 )
 result = fitter.run()
 print(result.knobs, result.uncertainties, result.diagnostics.reason)
@@ -135,8 +135,9 @@ tune knobs) at which its orbits were measured. These are fixed inputs and may di
 between series. Varying the quadrupole strengths between series makes quadrupole
 misalignments observable.
 
-A series is fitted either as an absolute orbit (`absolute_planes`) or as the change
-from the fitter's own `machine_state` to the series' state. `machine_state` accepts a
+Measured orbits are always absolute. A plane in `absolute_planes` is fitted as is; every
+other plane is fitted as the change from the fitter's own `machine_state` to the series'
+state, the fitter subtracting each measurement's `reference` orbit. `machine_state` accepts a
 dictionary, a knobs file or a TFS corrector table; `adelmo.machine.mad.merge_machine_states`
 combines several. Accepted iterations are recorded in `fitter.history`, and
 `fitter.close()` shuts down the MAD-NG process.

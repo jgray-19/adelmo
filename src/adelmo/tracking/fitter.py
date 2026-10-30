@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from adelmo.fitting.bpm_gains import bpm_gain_names, only_bpm_gains, without_bpm_gains
 from adelmo.fitting.config import OutputConfig
 from adelmo.fitting.lifecycle import run_with_workers
 from adelmo.fitting.results import FitResult
@@ -162,6 +163,15 @@ class TrackingFitter:
             python_logfile=output_config.python_logfile,
             tracking_plan=self.tracking_plan,
         )
+        # Every BPM the fit reads gets an x and a y gain; markers are not BPMs.
+        self.gain_bpms: tuple[str, ...] = (
+            tuple(b for b in self.machine.all_bpms if b not in self.tracking_plan.extra_markers)
+            if simulation_config.bpm_gain_sigma is not None
+            else ()
+        )
+        self.gain_names = bpm_gain_names(self.gain_bpms)
+        #: Every fitted parameter, in uncertainty order: magnet knobs, then gains.
+        self.knob_names = list(self.machine.knob_names) + self.gain_names
         self.loop = SGDLoop(
             self.machine.knob_names,
             self.machine.true_strengths,
@@ -173,10 +183,14 @@ class TrackingFitter:
 
     def run(self) -> FitResult:
         """Run the optimisation; knobs and uncertainties are in optimisation space."""
-        writer = self.machine.make_writer("tracking_opt")
+        checkpoint_config = self.options.checkpoint_config
+        run_log = self.machine.make_run_log(
+            "tracking_opt",
+            resume=checkpoint_config is not None and checkpoint_config.restore_from_checkpoint,
+        )
         simulation_config = self.machine.simulation_config
         include_uncertainty = self.machine.output_config.include_uncertainty
-        start_knobs = self.machine.worker_start_knobs
+        start_knobs = self._with_gains(self.machine.worker_start_knobs)
 
         def body() -> tuple[dict[str, float], tuple[np.ndarray, np.ndarray] | None]:
             session = self.start_session(start_knobs)
@@ -192,14 +206,16 @@ class TrackingFitter:
             gc.collect()
 
             final_knobs = self.loop.run(
-                self.machine.initial_knobs,
+                self._with_gains(self.machine.initial_knobs),
                 session.training.channels,
                 total_turns=total_turns,
-                writer=writer,
+                run_log=run_log,
                 checkpoint_config=self.options.checkpoint_config,
                 validation_loss_fn=session.validation_loss,
                 loss_callback=self.options.loss_callback,
                 epoch_end_hook=self._epoch_end_hook(session),
+                gain_names=self.gain_names,
+                gain_ridge=self._gain_ridge(session),
             )
 
             # Workers still hold the last batch's knobs; the uncertainty must be
@@ -215,15 +231,33 @@ class TrackingFitter:
             body,
             fallback=lambda: (self.loop.best.value, None),
             stop_workers=self._terminate_session,
-            writer=writer,
+            run_log=run_log,
         )
         uncertainties = self._uncertainties(final_knobs, normal_and_noise)
         logger.info("Optimisation complete.")
         return FitResult(
-            knobs=final_knobs,
-            uncertainties=uncertainties,
+            knobs=without_bpm_gains(final_knobs),
+            uncertainties=without_bpm_gains(uncertainties),
             diagnostics=self.loop.diagnostics,
+            extra=only_bpm_gains(final_knobs),
+            extra_uncertainties=only_bpm_gains(uncertainties),
         )
+
+    def _with_gains(self, knobs: dict[str, float]) -> dict[str, float]:
+        """``knobs`` plus every fitted gain at its starting value, zero."""
+        return {**knobs, **dict.fromkeys(self.gain_names, 0.0)}
+
+    def _gain_ridge(self, session: TrackingSession) -> float:
+        """The gain prior ``1/σ²`` in the units of the workers' gain sums.
+
+        Those sums are ``Σ w ...`` over each worker's points divided by its point count,
+        with ``w`` the normalised weights, so a physical chi-square is
+        ``session.chi2_to_loss`` times them (exact when every worker observes the same
+        number of points; the mean is used otherwise).
+        """
+        if not self.gain_names:
+            return 0.0
+        return session.chi2_to_loss / self.machine.simulation_config.bpm_gain_sigma**2
 
     def start_session(
         self,
@@ -243,6 +277,8 @@ class TrackingFitter:
         if enable_validation is None:
             enable_validation = self.tracking_plan.enable_validation
         data = self.data_manager
+        if start_knobs is None:
+            start_knobs = self._with_gains(self.machine.worker_start_knobs)
         self.session = TrackingSession(
             self.worker_setup,
             self.machine.simulation_config,
@@ -252,10 +288,9 @@ class TrackingFitter:
             start_bpms=self.ranges.start_bpms,
             end_bpms=self.ranges.end_bpms,
             machine_deltaps=self.machine_deltaps,
+            gain_bpms=self.gain_bpms,
         )
-        self.session.start(
-            data.tracks, self.machine.worker_start_knobs if start_knobs is None else start_knobs
-        )
+        self.session.start(data.tracks, start_knobs)
         return self.session
 
     def build_initial_normal_matrix(self) -> tuple[np.ndarray, list[str]]:
@@ -273,12 +308,12 @@ class TrackingFitter:
         try:
             session = self.start_session()
             normal, _ = session.stop_and_collect_uncertainty(
-                len(self.machine.knob_names), propagate_uncertainty=True
+                len(self.knob_names), propagate_uncertainty=True
             )
         except BaseException:
             self._terminate_session()
             raise
-        return normal, list(self.machine.knob_names)
+        return normal, list(self.knob_names)
 
     def check_degeneracy(self, **analyse_kwargs) -> DegeneracyReport:
         """Diagnose unconstrained knob directions before optimising.
@@ -321,7 +356,7 @@ class TrackingFitter:
             uncertainties = sandwich_uncertainties(*normal_and_noise)
         else:
             uncertainties = np.zeros(len(final_knobs), dtype=np.float64)
-        return dict(zip(self.machine.knob_names, uncertainties.tolist(), strict=True))
+        return dict(zip(self.knob_names, uncertainties.tolist(), strict=True))
 
     def _load_data(self) -> DataManager:
         """Load the measurement files, batch their turns and fix ``num_batches`` to fit them."""
@@ -359,7 +394,9 @@ def initial_conditions_hook(
     full model: ``fixed_model_values`` (fixed strengths and ``pt`` from
     ``initial_knob_strengths``) are merged into the knobs the callback sees, or it
     would rebuild initial conditions from the bare model defaults. An empty
-    ``best_knobs`` stays empty so the callback can skip early epochs.
+    ``best_knobs`` stays empty so the callback can skip early epochs. The best
+    knobs keep the fitted ``bpmgain.*`` entries so the callback can correct the
+    readings it reconstructs from; the current knobs carry none.
 
     The hook returns a fragment for the epoch log line: ``dic`` is the mean absolute
     change per component since the previous update and ``dic0`` the mean absolute
@@ -373,6 +410,7 @@ def initial_conditions_hook(
     pushed: dict[str, np.ndarray] = {}
 
     def hook(current_knobs: dict[str, float], best_knobs: dict[str, float]) -> str | None:
+        current_knobs = without_bpm_gains(current_knobs)
         new_coords = callback(
             {**fixed, **current_knobs}, {**fixed, **best_knobs} if best_knobs else best_knobs
         )

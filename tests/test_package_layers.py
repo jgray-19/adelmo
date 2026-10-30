@@ -23,6 +23,10 @@ FORBIDDEN = {
     "fitting": {"tracking", "poco", "momentum_reference"},
     "tracking": {"poco", "momentum_reference"},
     "poco": {"tracking", "momentum_reference"},
+    # Run logs and the monitor know nothing about machines or fitters: the machine
+    # side plugs in through ``adelmo.monitor.OpticsSource``.
+    "runlog": {"machine", "fitting", "tracking", "poco", "monitor", "measurements"},
+    "monitor": {"machine", "fitting", "tracking", "poco", "measurements"},
 }
 
 

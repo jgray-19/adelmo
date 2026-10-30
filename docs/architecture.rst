@@ -41,12 +41,23 @@ instead, and the worker exits without sending anything else; the main process ra
 it. A NaN loss marks a worker that lost its particles or closed orbit: it is left out
 of the sums and of the averaged loss (``fitting.reduction.reduce_replies``).
 
+Run logs and monitoring
+-----------------------
+
+Every fit writes a run log (``adelmo.runlog``) under ``OutputConfig.run_log_root``:
+the scalars of each step (``history.jsonl``) and the knobs after each step
+(``knobs.f64``), plus ``OutputConfig.run_metadata``, which says how to rebuild the
+model. Optics are not stored; ``adelmo.monitor`` recomputes them from the knobs on
+demand, caches them, and serves live plots of a running or finished fit. The machine
+side supplies an ``adelmo.monitor.OpticsSource`` (how to build the model and twiss it)
+and any machine-specific panels.
+
 Run lifecycle
 -------------
 
 ``fitting.lifecycle.run_with_workers`` gives every fitter the same shape: run the
 body; on Ctrl-C return the best result so far; always stop the workers and close the
-TensorBoard writer. For a tracking fit the body is:
+run log. For a tracking fit the body is:
 
 1. Load the data (``DataManager``), split the turns into training and held-out
    validation batches with a seeded shuffle, and clamp ``num_batches`` to the data.

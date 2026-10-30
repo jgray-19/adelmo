@@ -40,6 +40,12 @@ class OptimiserConfig:
     loss_change_tolerance: float = field(default=1e-6)
     loss_change_min_epoch_fraction: float = field(default=0.2)
 
+    # Fit in stages of this many epochs (``max_epochs`` is then their total): the
+    # learning-rate schedule (warmup, then decay over the rest of the stage) restarts at
+    # each stage and the best loss and stopping averages reset. The stopping rules are
+    # off, so a stage always runs its epochs and the next starts at a multiple of this.
+    stage_epochs: int | None = field(default=None)
+
     # L-BFGS-specific parameters (ignored for adam)
     lbfgs_history_size: int = field(default=10)
     lbfgs_max_grad_norm: float | None = field(default=1.0)
@@ -56,7 +62,7 @@ class OptimiserConfig:
     decay_epochs: int = field(init=False)
 
     def __post_init__(self):
-        self.decay_epochs = self.max_epochs - self.warmup_epochs
+        self.decay_epochs = (self.stage_epochs or self.max_epochs) - self.warmup_epochs
 
     def log_state(self) -> None:
         """Log the current optimiser config settings."""
@@ -116,6 +122,10 @@ class SimulationConfig:
     enable_preloop_outlier_screening: bool = field(default=True)
     bpm_loss_outlier_sigma: float = field(default=3.0)
     worker_loss_outlier_sigma: float = field(default=3.0)
+
+    # Tracking fit: fit one gain per BPM and plane on the positions, reading =
+    # (1 + g) * position, with a Gaussian prior of this width. None fits no gains.
+    bpm_gain_sigma: float | None = field(default=None)
 
     def __post_init__(self):
         if self.n_run_turns < 1:

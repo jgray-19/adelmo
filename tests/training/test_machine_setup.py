@@ -27,7 +27,7 @@ def _setup(accelerator, magnet_range=f"{START}/{END}", **kwargs) -> MachineSetup
         accelerator,
         SimulationConfig(num_workers=1, num_batches=1),
         SequenceConfig(magnet_range),
-        output_config=OutputConfig(write_tensorboard_logs=False),
+        output_config=OutputConfig(write_run_log=False),
         **kwargs,
     )
 
@@ -82,7 +82,7 @@ def test_bpm_points_are_filtered_and_the_fixed_window_set(lhc) -> None:
         lhc,
         SimulationConfig(num_workers=1, num_batches=1, use_fixed_bpm=True),
         SequenceConfig(f"{START}/{END}", bad_bpms=["BPM.10R1.B1"]),
-        output_config=OutputConfig(write_tensorboard_logs=False),
+        output_config=OutputConfig(write_run_log=False),
     )
     try:
         ranges = resolve_bpm_ranges(

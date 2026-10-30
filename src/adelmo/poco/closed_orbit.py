@@ -6,9 +6,12 @@ import logging
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from adelmo.fitting.protocol import Evaluate, GradReply, distribute, machine_worker_limit
 from adelmo.machine.mad.machine_state import resolve_machine_state
 from adelmo.poco.fitter import (
+    MEASUREMENT_COLUMNS,
     LevenbergMarquardtConfig,
     LMFitter,
     build_worker_payload,
@@ -40,11 +43,32 @@ ALL_OBSERVABLES = CLOSED_ORBIT_OBSERVABLES + PHASE_OBSERVABLES
 
 @dataclass(frozen=True)
 class ClosedOrbitMeasurement:
-    """One measured orbit at a signal momentum and its reference momentum."""
+    """One measured absolute orbit at a signal momentum, and the measured orbit at its reference momentum.
+
+    ``reference`` is needed for every plane the series does not list in ``absolute_planes``.
+    """
 
     orbit: pd.DataFrame
     pt: float = 0.0
     reference_pt: float = 0.0
+    reference: pd.DataFrame | None = None
+
+
+def difference_orbit(
+    orbit: pd.DataFrame, reference: pd.DataFrame | None, planes: tuple[str, ...], label: str = ""
+) -> pd.DataFrame:
+    """``orbit - reference`` in *planes*, errors added in quadrature; the other columns pass through."""
+    if not planes:
+        return orbit
+    if reference is None:
+        raise ValueError(f"Closed-orbit series {label or '<unnamed>'!r} fits {list(planes)} relative to a reference but has no reference orbit")
+    delta = orbit.copy()
+    for plane in planes:
+        value, error = MEASUREMENT_COLUMNS[plane]
+        delta[value] = orbit[value] - reference.loc[orbit.index, value]
+        if error in orbit:
+            delta[error] = np.hypot(orbit[error], reference.loc[orbit.index, error])
+    return delta
 
 
 @dataclass(frozen=True)
@@ -68,6 +92,7 @@ class ClosedOrbitSeries:
 
     measurements: tuple[ClosedOrbitMeasurement, ...]
     machine_state: Path | Mapping[str, float] = field(default_factory=dict)
+    #: Planes fitted as absolute orbits; every other orbit plane is fitted as ``orbit - reference``.
     absolute_planes: tuple[str, ...] = ()
     label: str = ""
     #: This series' own observables, overriding the fitter-wide default. A
@@ -90,6 +115,7 @@ class ClosedOrbitFitter(LMFitter):
     """
 
     worker_class = ClosedOrbitWorker
+    supports_energy = True
     log_suffix = "closed_orbit_opt"
     fit_label = "Closed-orbit"
 
@@ -108,6 +134,7 @@ class ClosedOrbitFitter(LMFitter):
         output_config: OutputConfig | None = None,
         max_workers: int | None = None,
         shared_reference: bool = True,
+        b2_errors: Path | None = None,
     ) -> None:
         if not series:
             raise ValueError("series must contain at least one closed-orbit series")
@@ -150,6 +177,11 @@ class ClosedOrbitFitter(LMFitter):
         )
 
         self.default_machine_state = resolve_machine_state(machine_state) if machine_state is not None else {}
+        #: Known LHC dipole b2 error table, applied to every worker's sequence.
+        #: The interface insists on the tune knobs that compensate them, so it also gets the default machine state.
+        self.interface_options = (
+            {} if b2_errors is None else {"b2_errors": b2_errors, "machine_state": self.default_machine_state}
+        )
         self.worker_payloads = self._create_series_payloads(sequence_config, accelerator)
 
     @staticmethod
@@ -219,8 +251,16 @@ class ClosedOrbitFitter(LMFitter):
         payloads = []
         for item in self.series:
             item_observables = item.observables or self.observable_names
+            relative = tuple(
+                name
+                for name in item_observables
+                if name in CLOSED_ORBIT_OBSERVABLES and name not in item.absolute_planes
+            )
             frames = [
-                load_measurement(measurement.orbit, item_observables)
+                load_measurement(
+                    difference_orbit(measurement.orbit, measurement.reference, relative, item.label),
+                    item_observables,
+                )
                 for measurement in item.measurements
             ]
             common_bpms = [
@@ -245,7 +285,7 @@ class ClosedOrbitFitter(LMFitter):
                     sequence_config.magnet_range,
                     sequence_config.bad_bpms,
                     accelerator,
-                    {},
+                    self.interface_options,
                     self.use_errors,
                     self.machine.output_config.mad_logfile,
                     self.machine.output_config.python_logfile,

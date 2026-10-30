@@ -49,6 +49,9 @@ local matrix, vector in MAD
 local cofind, track in MAD
 
 num_knobs = #knob_names
+! Jacobian buffers keep one (all zero) column when there are no knobs: the only fitted parameter may be the momentum pt, which
+! the worker handles outside MAD, and MAD vectors and matrices need at least one element.
+jac_cols = math.max(num_knobs, 1)
 
 ! Identity parametric map over the 6 phase-space coords + one parameter per knob.
 !
@@ -83,14 +86,19 @@ end
 ! ``orbit_val[coord]`` is a vector, ``orbit_jac[coord]`` an (nbpm x nknob) matrix and ``orbit_R[coord]`` the (nbpm x 4) transverse
 ! map rows used by ``compute_closed_orbit``.
 local orbit_n, orbit_names, orbit_val, orbit_jac, orbit_R, orbit_ready = 0, {}, {}, {}, {}, false
-local orbit_row, orbit_row4 = vector(num_knobs), vector(4)
+local orbit_row, orbit_row4 = vector(jac_cols), vector(4)
+
+local function knob_row(tpsa)
+    if num_knobs == 0 then return orbit_row end
+    return tpsa:getvec(8, orbit_row)
+end
 
 local function reset_orbit()
     if not orbit_ready then
         orbit_ready = true
         for _, coord in ipairs(orbit_coords) do
             orbit_val[coord] = vector(nbpms)
-            orbit_jac[coord] = matrix(nbpms, num_knobs)
+            orbit_jac[coord] = matrix(nbpms, jac_cols)
             orbit_R[coord] = matrix(nbpms, 4)
         end
     end
@@ -119,7 +127,7 @@ local function save_orbit_jac(elm, mflw, _, slc)
     for _, coord in ipairs(orbit_coords) do
         local tpsa = mflw[1][coord]
         orbit_val[coord]:seti(orbit_n, tpsa:get0())
-        orbit_jac[coord]:setrow(orbit_n, tpsa:getvec(8, orbit_row))
+        orbit_jac[coord]:setrow(orbit_n, knob_row(tpsa))
     end
 end
 
@@ -155,7 +163,7 @@ end
 -- belongs to and, once a parametric solve has run, S = dX*/dk (4 x num_knobs). The next solve starts at X + S (k - K), which
 -- is the closed orbit to first order in the knob change, so cofind needs far fewer passes or none at all.
 local co_base = {}
-local knob_now = vector(num_knobs)
+local knob_now = vector(jac_cols)
 
 local function read_knobs(out)
     for i, p in ipairs(knob_names) do out:seti(i, loaded_sequence[p]) end
@@ -164,7 +172,7 @@ end
 
 local function remember(x, S)
     local b = co_base[co_key]
-    if not b then b = { K = vector(num_knobs) } co_base[co_key] = b end
+    if not b then b = { K = vector(jac_cols) } co_base[co_key] = b end
     b.X = x
     read_knobs(b.K)
     if S then b.S = S end
@@ -177,10 +185,12 @@ local function predicted_start()
     local x = vector(6)
     for i = 1, 6 do x:seti(i, b.X[i]) end
     for r = 1, 4 do
-        local shift, row = 0, (r - 1) * num_knobs
+        local shift, row = 0, (r - 1) * jac_cols
         for c = 1, num_knobs do shift = shift + b.S[row + c] * (knob_now[c] - b.K[c]) end
         x:seti(r, x[r] + shift)
     end
+    -- The stored orbit may be at another momentum (a fitted pt moves between solves): start at the pinned one.
+    x:seti(6, x0map.pt:get0())
     return x
 end
 
@@ -253,19 +263,19 @@ local function save_orbit_chain(elm, mflw, _, slc)
         local tpsa = mflw[1][coord]
         orbit_val[coord]:seti(orbit_n, tpsa:get0())
         orbit_R[coord]:setrow(orbit_n, tpsa:getvec(2, orbit_row4))
-        orbit_jac[coord]:setrow(orbit_n, tpsa:getvec(8, orbit_row))
+        orbit_jac[coord]:setrow(orbit_n, knob_row(tpsa))
     end
 end
 
 ! S = (I - R)^-1 P and the Newton step dx = (I - R)^-1 (M(X0) - X0) from the one-turn map ``turn`` tracked from the start ``x0``;
 ! S is a 4 x num_knobs matrix, dx a 4 x 1 matrix.
 local function fixed_point_shift(turn, x0)
-    local IR, P, res = matrix(4, 4), matrix(4, num_knobs), matrix(4, 1)
+    local IR, P, res = matrix(4, 4), matrix(4, jac_cols), matrix(4, 1)
     for r, coord in ipairs(tcoords) do
         local tpsa = turn[coord]
         tpsa:getvec(2, orbit_row4)
         for c = 1, 4 do IR:seti((r - 1) * 4 + c, (r == c and 1 or 0) - orbit_row4[c]) end
-        P:setrow(r, tpsa:getvec(8, orbit_row))
+        P:setrow(r, knob_row(tpsa))
         res:seti(r, tpsa:get0() - x0[r])
     end
     return IR:solve(P), IR:solve(res)

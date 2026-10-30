@@ -16,14 +16,11 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.linalg.blas import dsyrk
 
-#: Gain parameter names: ``bpmgain.<x|y>.<BPM>`` and ``corrgain.<CORRECTOR>`` (upper-case, as MAD-NG names them).
-PLANES = ("x", "y")
+from adelmo.fitting.uncertainty import covariance
 
 
-def bpm_gain_name(plane: str, bpm: str) -> str:
-    return f"bpmgain.{plane}.{bpm}"
-
-
+#: Corrector gain names: ``corrgain.<CORRECTOR>`` (upper-case, as MAD-NG names them); BPM gains are
+#: named by :mod:`adelmo.fitting.bpm_gains`.
 def corrector_gain_name(corrector: str) -> str:
     return f"corrgain.{corrector}"
 
@@ -201,6 +198,24 @@ def reduce_blocks(blocks: CalibrationBlocks) -> tuple[np.ndarray, np.ndarray]:
     hess = blocks.hess_uu - scaled @ scaled.T
     grad = blocks.grad_u - ub @ (inv * blocks.grad_b)
     return grad, hess
+
+
+def gain_covariance(
+    blocks: CalibrationBlocks, unit: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Physical normal matrix of ``u``, and the 1-sigma of ``u`` and of ``b``, from blocks that include the priors.
+
+    The blocks are in the normalised loss, ``unit`` times the chi-square, so ``hess / (2 unit)`` is the inverse-variance
+    normal matrix and its inverse the posterior covariance (the priors are part of the fit). ``b`` is marginalised over ``u``:
+    with the diagonal ``H_bb``, ``Cov_bb = H_bb⁻¹ + H_bb⁻¹ H_ubᵀ Cov_u H_ub H_bb⁻¹`` and only its diagonal is formed.
+    """
+    scale = 1.0 / (2.0 * unit)
+    normal_u = reduce_blocks(blocks)[1] * scale
+    cov_u = covariance(normal_u)
+    inv_bb = 1.0 / (blocks.hess_bb * scale)
+    coupling = blocks.hess_ub * scale * inv_bb
+    var_b = inv_bb + np.einsum("ij,ij->j", coupling, cov_u @ coupling)
+    return normal_u, np.sqrt(np.clip(np.diag(cov_u), 0.0, None)), np.sqrt(np.clip(var_b, 0.0, None))
 
 
 def back_substitute(blocks: CalibrationBlocks, delta_u: np.ndarray) -> np.ndarray:

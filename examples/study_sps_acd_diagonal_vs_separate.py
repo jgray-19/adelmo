@@ -42,16 +42,12 @@ from xtrack_tools.acd import run_ac_dipole_tracking
 from xtrack_tools.env import initialise_env
 from xtrack_tools.monitors import process_tracking_data
 
-from aba_optimiser.accelerators import SPS
-from aba_optimiser.config import OptimiserConfig, SimulationConfig
-from aba_optimiser.mad.aba_mad_interface import AbaMadInterface
-from aba_optimiser.training.config.models import (
-    MeasurementConfig,
-    MeasurementDetails,
-    OutputConfig,
-    SequenceConfig,
-)
-from aba_optimiser.training.tracking_fitter import ACDMarkerFitter
+from adelmo.config import OptimiserConfig, SimulationConfig
+from adelmo.fitting.config import OutputConfig, SequenceConfig
+from adelmo.machine.accelerators import SPS
+from adelmo.machine.mad.aba_mad_interface import AbaMadInterface
+from adelmo.tracking.config.models import MeasurementConfig, MeasurementDetails
+from adelmo.tracking.fitter import ACDMarkerFitter, FitterOptions
 
 LOGGER = logging.getLogger(__name__)
 
@@ -180,8 +176,10 @@ def build_fitter(data: StudyData, case: str, output_dir: Path, *, max_epochs: in
         SimulationConfig(num_workers=8, num_batches=2, validation_fraction=0.0),
         SequenceConfig(magnet_range="$start/$end"),
         MeasurementConfig(measurements),
-        output_config=OutputConfig(mad_logfile=fit_dir / "mad.log", write_tensorboard_logs=False),
-        true_strengths=data.magnet_strengths.copy(),
+        options=FitterOptions(
+            output_config=OutputConfig(mad_logfile=fit_dir / "mad.log", write_run_log=False),
+            true_strengths=data.magnet_strengths.copy(),
+        ),
     )
 
 
@@ -221,8 +219,8 @@ def run_study(output_dir: Path, *, flattop_turns: int, max_epochs: int, seed: in
     fit_betas: dict[str, pd.DataFrame] = {}
     for case in CASES:
         fitter = build_fitter(data, case, output_dir, max_epochs=max_epochs)
-        initial_error = knob_error(fitter.initial_knobs, truth)
-        estimate, _uncertainties = fitter.run()
+        initial_error = knob_error(fitter.machine.initial_knobs, truth)
+        estimate = fitter.run().knobs
         estimates[case] = estimate
         fit_betas[case] = bpm_betas(data, {name: estimate[name] for name in truth})
         beat_x, beat_y = beta_beating_rms(fit_betas[case], true_betas)

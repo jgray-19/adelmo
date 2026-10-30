@@ -36,6 +36,11 @@ def _floored_inverse(matrix: np.ndarray, min_eigenvalue: float) -> np.ndarray:
     return (eigenvectors / clipped) @ eigenvectors.T
 
 
+def covariance(normal_matrix: np.ndarray, *, min_eigenvalue: float = HESSIAN_MIN_EIGENVALUE) -> np.ndarray:
+    """Parameter covariance ``A⁻¹`` of a physical normal matrix, eigenvalues floored as in :func:`hessian_uncertainties`."""
+    return _floored_inverse(normal_matrix, min_eigenvalue)
+
+
 def warn_if_singular(
     normal_matrix: np.ndarray,
     knob_names: list[str] | None = None,

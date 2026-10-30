@@ -8,7 +8,13 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 from pymadng_utils.physics import beta_from_energy, dp2pt
-from tmom_recon import ACDipoleConfig, ModelDetails, OpticsInput, calculate_pz
+from tmom_recon import (
+    ACDipoleConfig,
+    ModelDetails,
+    OpticsInput,
+    calculate_pz,
+    estimate_closed_orbit_pt,
+)
 from tmom_recon.svd import weighted_svd_clean_measurements
 
 from adelmo.measurements.preprocessing import trim_measurement_to_kick
@@ -89,10 +95,19 @@ def process_single_dataframe(
     # optics through OpticsInput. Phase, beta and alpha come from the omc3
     # analysis directory; dispersion stays on the model because a single kick
     # measures no dispersion, and OpticsInput refuses to substitute silently.
+    # calculate_pz reconstructs at the pt it is given, so a measured pt is estimated
+    # here from the closed orbit about pt=0 unless the machine momentum is known.
     if machine_deltap is not None:
-        call_model_details = replace(
-            call_model_details, pt=_machine_deltap_to_pt(machine_deltap, twiss)
+        pt_est = _machine_deltap_to_pt(machine_deltap, twiss)
+    else:
+        pt_est = float(
+            estimate_closed_orbit_pt(
+                df.copy(deep=True),
+                call_model_details,
+                closed_orbit_at_zero=frame.closed_orbit_at_zero,
+            )
         )
+    call_model_details = replace(call_model_details, pt=pt_est)
     df = calculate_pz(
         df,
         call_model_details,
@@ -109,6 +124,8 @@ def process_single_dataframe(
     if not isinstance(df, pd.DataFrame):
         raise ValueError(f"Reconstruction returned unexpected type {type(df)} for dataframe")
     df = _drop_nan_momenta(df, dataframe_index=index)
+    df.attrs["PT_EST"] = pt_est
+    df.attrs["DPP_EST"] = float(call_model_details.accelerator.pt2dp(pt_est))
     if ac_dipole_config is not None:
         df.attrs["ac_dipole_barrier_s"] = barrier_s
     df["bunch_number"] = bunch_number
