@@ -22,7 +22,7 @@ Output format
 The saved parquet contains the BPM rows and the ``<acd>_before`` / ``<acd>_after``
 marker rows emitted by ``tmom-recon``
 (:func:`adelmo.measurements.reconstruction.append_acd_marker_rows`). The
-:class:`~adelmo.tracking.ACDMarkerFitter` uses the marker rows as initial
+:class:`~adelmo.tracking.fitter.ACDMarkerFitter` uses the marker rows as initial
 conditions for bidirectional tracking.
 
 Machine state

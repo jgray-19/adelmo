@@ -15,7 +15,7 @@ with ``fitter.run()``, which returns the fitted knobs and their uncertainties.
 
    * - Object
      - Role
-   * - :class:`~adelmo.machine.accelerators.Accelerator` subclass
+   * - :class:`~adelmo.machine.accelerators.base.Accelerator` subclass
      - Machine definition: sequence file, kinetic energy, BPM pattern and the knob
        families to fit (``errors``, ``misalignments``).
    * - :class:`~adelmo.config.OptimiserConfig`
@@ -23,10 +23,10 @@ with ``fitter.run()``, which returns the fitted knobs and their uncertainties.
        convergence criterion.
    * - :class:`~adelmo.config.SimulationConfig`
      - Worker and batch counts, data and validation fractions, outlier screening.
-   * - :class:`~adelmo.tracking.SequenceConfig`
+   * - :class:`~adelmo.fitting.config.SequenceConfig`
      - Magnet range exposed to MAD-NG and BPMs to exclude.
-   * - :class:`~adelmo.tracking.MeasurementConfig`
-     - Measurement files, each with a :class:`~adelmo.tracking.MeasurementDetails`
+   * - :class:`~adelmo.tracking.config.models.MeasurementConfig`
+     - Measurement files, each with a :class:`~adelmo.tracking.config.models.MeasurementDetails`
        (MAD interface options, momentum offset, first BPM).
 
 Fitters
@@ -39,18 +39,18 @@ Fitters
    * - Fitter
      - Initial conditions
      - Tracking
-   * - :class:`~adelmo.tracking.ArcByArcFitter`
+   * - :class:`~adelmo.tracking.fitter.ArcByArcFitter`
      - BPM at the start of each range
      - Forward and backward over the ``bpm_start_points`` x ``bpm_end_points`` ranges.
        Set ``acd_excited=True`` for AC-dipole data.
-   * - :class:`~adelmo.tracking.ACDMarkerFitter`
+   * - :class:`~adelmo.tracking.fitter.ACDMarkerFitter`
      - AC-dipole ``before``/``after`` markers
      - Bidirectional; the whole ring is observed.
-   * - :class:`~adelmo.tracking.KickerFitter`
+   * - :class:`~adelmo.tracking.fitter.KickerFitter`
      - Kicker marker
      - One worker, forward only, ``turns_after_kicker`` turns.
 
-``KickerFitter`` requires a :class:`~adelmo.tracking.KickerConfig`. The
+``KickerFitter`` requires a :class:`~adelmo.tracking.config.models.KickerConfig`. The
 measurement data must contain ``x``, ``px``, ``y`` and ``py`` at the kicker marker, and
 the sequence must contain the kicker element.
 
@@ -102,10 +102,10 @@ Optional fitter arguments
 ``optimise_knobs``
     Restrict the fit to a subset of global knob names.
 ``output_config``
-    :class:`~adelmo.tracking.OutputConfig`: TensorBoard logging, uncertainty
+    :class:`~adelmo.fitting.config.OutputConfig`: TensorBoard logging, uncertainty
     estimation and log files.
 ``checkpoint_config``
-    :class:`~adelmo.tracking.CheckpointConfig`: periodic checkpoints and restart.
+    :class:`~adelmo.tracking.config.models.CheckpointConfig`: periodic checkpoints and restart.
 ``initial_conditions_callback``
     Epoch-end hook that refreshes the workers' initial conditions.
 ``loss_callback``
@@ -126,12 +126,12 @@ is applied to the validation workers.
 Closed-twiss fits
 -----------------
 
-:class:`~adelmo.poco.ClosedTwissFitter` fits knobs so that the
+:class:`~adelmo.poco.fitter.ClosedTwissFitter` fits knobs so that the
 periodic model optics match a measured closed twiss. Closed orbit, beta, phase and
 dispersion are all obtained from one parametric MAD-NG ``twiss``, so they are fitted
 simultaneously and no starting point is taken from the measurement. The solver is
 Levenberg-Marquardt, configured by
-:class:`~adelmo.poco.LevenbergMarquardtConfig`.
+:class:`~adelmo.optimisers.levenberg_marquardt.LevenbergMarquardtConfig`.
 
 ``measurements`` maps each measurement's ``pt`` to a file or dataframe. Parameters are
 weighted by the inverse measurement variance; ``use_errors=False`` normalises every
@@ -140,15 +140,15 @@ observable family identically instead. ``prior_strengths`` adds a Gaussian prior
 Closed-orbit fits
 -----------------
 
-:class:`~adelmo.poco.ClosedOrbitFitter` fits knobs to one or
-more :class:`~adelmo.poco.ClosedOrbitSeries`.
+:class:`~adelmo.poco.closed_orbit.ClosedOrbitFitter` fits knobs to one or
+more :class:`~adelmo.poco.closed_orbit.ClosedOrbitSeries`.
 
 ``machine_state``
     MAD-X globals (quadrupole strengths, corrector kicks, tune knobs) at which a
     series was measured. They are fixed inputs and may differ between series.
     Varying the quadrupole strengths between series makes quadrupole misalignments
     observable. Accepted forms are a dictionary, a knobs file or a TFS corrector
-    table; :func:`adelmo.machine.mad.merge_machine_states` combines several. Setting
+    table; :func:`adelmo.machine.mad.machine_state.merge_machine_states` combines several. Setting
     ``machine_state`` on the fitter provides a default inherited by every series.
 ``absolute_planes``
     Planes fitted as absolute orbits. The remaining planes are fitted as the change
@@ -175,7 +175,7 @@ Degeneracy analysis
 Gauss-Newton normal matrix at the initial knobs. Near-zero eigenvalues identify knob
 combinations that the data cannot constrain, so the problem can be regularised or the
 knob set reduced before running the fit. Use
-:meth:`~adelmo.tracking.TrackingFitter.check_degeneracy` on a tracking fitter.
+:meth:`~adelmo.tracking.fitter.TrackingFitter.check_degeneracy` on a tracking fitter.
 
 Testing
 -------

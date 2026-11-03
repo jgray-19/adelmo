@@ -9,20 +9,19 @@ Primary Entry Points
 --------------------
 
 .. autosummary::
-   :toctree: _autosummary
    :nosignatures:
 
-   adelmo.machine.accelerators.Accelerator
-   adelmo.machine.accelerators.LHC
-   adelmo.machine.accelerators.PSB
-   adelmo.machine.accelerators.SPS
+   adelmo.machine.accelerators.base.Accelerator
+   adelmo.machine.accelerators.lhc.LHC
+   adelmo.machine.accelerators.psb.PSB
+   adelmo.machine.accelerators.sps.SPS
    adelmo.config.OptimiserConfig
    adelmo.config.SimulationConfig
-   adelmo.tracking.ArcByArcFitter
-   adelmo.tracking.ACDMarkerFitter
-   adelmo.tracking.KickerFitter
-   adelmo.tracking.FitterOptions
-   adelmo.tracking.MeasurementConfig
+   adelmo.tracking.fitter.ArcByArcFitter
+   adelmo.tracking.fitter.ACDMarkerFitter
+   adelmo.tracking.fitter.KickerFitter
+   adelmo.tracking.fitter.FitterOptions
+   adelmo.tracking.config.models.MeasurementConfig
    adelmo.fitting.config.SequenceConfig
    adelmo.fitting.config.OutputConfig
    adelmo.fitting.results.FitResult
@@ -146,3 +145,13 @@ Measurement Preparation
    adelmo.measurements.reference
    adelmo.measurements.variances
    adelmo.measurements.noise
+
+
+Analysis
+--------
+
+.. autosummary::
+   :toctree: _autosummary
+
+   adelmo.analysis
+   adelmo.analysis.degeneracy_checker

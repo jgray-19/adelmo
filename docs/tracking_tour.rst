@@ -1,8 +1,8 @@
 Tracking Fit Tour
 =================
 
-A tour of :class:`~adelmo.tracking.ArcByArcFitter` and
-:class:`~adelmo.tracking.ACDMarkerFitter`: what each part of the code does, in the
+A tour of :class:`~adelmo.tracking.fitter.ArcByArcFitter` and
+:class:`~adelmo.tracking.fitter.ACDMarkerFitter`: what each part of the code does, in the
 order it runs. Underlined words are defined in the :ref:`tour-glossary` at the bottom
 of the page.
 

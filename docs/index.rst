@@ -16,13 +16,13 @@ Two families of fit are provided:
      - Entry points
    * - Tracking
      - Turn-by-turn BPM data tracked through the model
-     - :class:`~adelmo.tracking.ArcByArcFitter`,
-       :class:`~adelmo.tracking.ACDMarkerFitter`,
-       :class:`~adelmo.tracking.KickerFitter`
+     - :class:`~adelmo.tracking.fitter.ArcByArcFitter`,
+       :class:`~adelmo.tracking.fitter.ACDMarkerFitter`,
+       :class:`~adelmo.tracking.fitter.KickerFitter`
    * - Closed twiss
      - Closed orbit, phase advance, beta and dispersion
-     - :class:`~adelmo.poco.ClosedOrbitFitter`,
-       :class:`~adelmo.poco.ClosedTwissFitter`
+     - :class:`~adelmo.poco.closed_orbit.ClosedOrbitFitter`,
+       :class:`~adelmo.poco.fitter.ClosedTwissFitter`
 
 Installation
 ------------

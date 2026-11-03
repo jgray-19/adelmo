@@ -49,6 +49,9 @@ autodoc_default_options = {
     "members": True,
     "undoc-members": False,
     "show-inheritance": True,
+    # Document each object only in the module that defines it, not again in the
+    # package that re-exports it through ``__all__``.
+    "ignore-module-all": True,
 }
 autodoc_typehints = "description"
 autodoc_preserve_defaults = True
@@ -56,6 +59,9 @@ napoleon_google_docstring = True
 napoleon_numpy_docstring = True
 napoleon_use_param = False
 napoleon_use_rtype = False
+# Render "Attributes:" sections as field lists, so dataclass fields are not
+# documented twice.
+napoleon_use_ivar = True
 autodoc_mock_imports = [
     "matplotlib",
     "nxcals",
@@ -64,6 +70,7 @@ autodoc_mock_imports = [
     "pandas",
     "pymadng",
     "pymadng_utils",
+    "scipy",
     "tfs",
     "tmom_recon",
     "turn_by_turn",
@@ -76,6 +83,12 @@ exclude_patterns: list[str] = [
     "reports",
     "Thumbs.db",
     ".DS_Store",
+]
+
+# Type aliases defined under ``TYPE_CHECKING`` cannot be resolved at build time.
+suppress_warnings = [
+    "sphinx_autodoc_typehints.forward_reference",
+    "sphinx_autodoc_typehints.guarded_import",
 ]
 
 todo_include_todos = True
