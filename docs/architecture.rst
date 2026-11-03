@@ -18,7 +18,7 @@ There are two fitting engines, built the same way:
   ``CalibratedClosedOrbitFitter`` fit closed-orbit and closed-twiss data with
   Levenberg-Marquardt (``poco.lm_loop``).
 
-Both compose a ``MachineSetup`` (``fitting.setup``): the MAD-NG model and its BPMs,
+Both compose a :class:`~adelmo.fitting.setup.MachineSetup`: the MAD-NG model and its BPMs,
 the knobs and their starting values, the output settings and the one
 ``SimulationConfig`` every other part reads. A tracking fit adds its BPM ranges
 (``tracking.ranges``).
@@ -26,8 +26,8 @@ the knobs and their starting values, the output settings and the one
 Worker protocol
 ---------------
 
-Messages are typed dataclasses in ``fitting.protocol``. Every worker runs the same
-loop, ``AbstractWorker.run``:
+Messages are typed dataclasses in :mod:`adelmo.fitting.protocol`. Every worker runs
+the same loop, :meth:`AbstractWorker.run <adelmo.fitting.worker.AbstractWorker.run>`:
 
 1. Receive ``Start(knobs)`` and build the MAD-NG session.
 2. Answer each ``Evaluate(knobs, batch)`` with one ``GradReply`` (loss, gradient and,
@@ -39,44 +39,63 @@ loop, ``AbstractWorker.run``:
 A worker sends exactly one reply per request. A failure sends one ``ErrorReply``
 instead, and the worker exits without sending anything else; the main process raises
 it. A NaN loss marks a worker that lost its particles or closed orbit: it is left out
-of the sums and of the averaged loss (``fitting.reduction.reduce_replies``).
+of the sums and of the averaged loss
+(:func:`~adelmo.fitting.reduction.reduce_replies`).
 
 Run logs and monitoring
 -----------------------
 
-Every fit writes a run log (``adelmo.runlog``) under ``OutputConfig.run_log_root``:
-the scalars of each step (``history.jsonl``) and the knobs after each step
-(``knobs.f64``), plus ``OutputConfig.run_metadata``, which says how to rebuild the
-model. Optics are not stored; ``adelmo.monitor`` recomputes them from the knobs on
-demand, caches them, and serves live plots of a running or finished fit. The machine
-side supplies an ``adelmo.monitor.OpticsSource`` (how to build the model and twiss it)
-and any machine-specific panels.
+Every fit writes a run log (:mod:`adelmo.runlog`) under
+``OutputConfig.run_log_root``, one directory per fit:
+
+``stage.json``
+    Name, start time, knob names and ``OutputConfig.run_metadata`` (how to rebuild
+    the model). Written once.
+``history.jsonl``
+    One JSON object per step: ``step``, ``time`` and the logged scalars.
+``knobs.f64``
+    Raw float64 rows ``[step, knob_0, knob_1, ...]``; step -1 holds the starting knobs.
+``result.json``
+    How the fit ended. Written when it finishes.
+
+Optics are not stored. :mod:`adelmo.monitor` recomputes them from the knobs on demand,
+caches them, and serves live plots of a running or finished fit
+(``python -m adelmo.monitor RUN_LOG_ROOT --spec module:SPEC``). The machine side
+supplies an :class:`~adelmo.monitor.source.OpticsSource` (how to build the model and
+twiss it) and any machine-specific panels, bundled in a
+:class:`~adelmo.monitor.source.MonitorSpec`.
 
 Run lifecycle
 -------------
 
-``fitting.lifecycle.run_with_workers`` gives every fitter the same shape: run the
+:func:`~adelmo.fitting.lifecycle.run_with_workers` gives every fitter the same shape: run the
 body; on Ctrl-C return the best result so far; always stop the workers and close the
 run log. For a tracking fit the body is:
 
-1. Load the data (``DataManager``), split the turns into training and held-out
+1. Load the data (:class:`~adelmo.tracking.data_manager.DataManager`), split the turns into training and held-out
    validation batches with a seeded shuffle, and clamp ``num_batches`` to the data.
-2. Start a ``TrackingSession``: build the worker payloads, start the training and
-   validation ``WorkerPool`` and screen outlier BPMs and workers.
-3. Run ``SGDLoop``: per epoch, evaluate every batch and take an optimiser step after
+2. Start a :class:`~adelmo.tracking.session.TrackingSession`: build the worker
+   payloads, start the training and validation
+   :class:`~adelmo.fitting.pool.WorkerPool` and screen outlier BPMs and workers.
+3. Run :class:`~adelmo.tracking.sgd.loop.SGDLoop`: per epoch, evaluate every batch and take an optimiser step after
    each; score the held-out validation loss; keep the knobs with the lowest loss
    (validation when available); stop on a converged loss or gradient.
 4. Set the workers to the best knobs and stop them; their uncertainty parts give
-   ``Cov = A⁻¹ B A⁻¹`` (``fitting.uncertainty.sandwich_uncertainties``).
+   ``Cov = A⁻¹ B A⁻¹`` (:func:`~adelmo.fitting.uncertainty.sandwich_uncertainties`).
 
-Each fit returns a ``FitResult``: knobs, 1-sigma uncertainties keyed by the same knob
-names, and ``FitDiagnostics`` (why and after how many iterations it stopped).
+Each fit returns a :class:`~adelmo.fitting.results.FitResult`: knobs, 1-sigma
+uncertainties keyed by the same knob names, and
+:class:`~adelmo.fitting.results.FitDiagnostics` (why and after how many iterations it stopped).
 
 Package layout
 --------------
 
 Imports only point down this list; the two engines never import each other
 (``tests/test_package_layers.py`` checks it).
+
+``adelmo.monitor``
+    Live plots served from run logs; optics recomputed from the logged knobs. Imports
+    only ``runlog``; the machine side plugs in through ``OpticsSource``.
 
 ``adelmo.momentum_reference``
     Momentum reference from blank measurements; uses both engines.
@@ -108,6 +127,11 @@ Imports only point down this list; the two engines never import each other
     ACD marker rows, BPM noise and variances.
 ``adelmo.analysis``
     Degeneracy checks.
+``adelmo.runlog``
+    Run-log writer (:class:`~adelmo.runlog.writer.RunLog`) and reader
+    (:class:`~adelmo.runlog.reader.StageLog`, :func:`~adelmo.runlog.reader.find_stages`).
+``adelmo.config``
+    ``OptimiserConfig`` and ``SimulationConfig``. Imports no other ``adelmo`` module.
 
 Knob conventions
 ----------------

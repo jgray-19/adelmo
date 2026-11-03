@@ -1,8 +1,8 @@
 API Reference
 =============
 
-The reference covers the public entry points and the modules with automated test
-coverage. Measurement and campaign workflows are maintained in separate repositories.
+The reference covers every module of the ``adelmo`` package. Measurement and campaign
+workflows are maintained in separate repositories.
 
 
 Primary Entry Points
@@ -15,6 +15,7 @@ Primary Entry Points
    adelmo.machine.accelerators.lhc.LHC
    adelmo.machine.accelerators.psb.PSB
    adelmo.machine.accelerators.sps.SPS
+   adelmo.machine.accelerators.fcc.FCC
    adelmo.config.OptimiserConfig
    adelmo.config.SimulationConfig
    adelmo.tracking.fitter.ArcByArcFitter
@@ -25,6 +26,11 @@ Primary Entry Points
    adelmo.fitting.config.SequenceConfig
    adelmo.fitting.config.OutputConfig
    adelmo.fitting.results.FitResult
+   adelmo.poco.closed_orbit.ClosedOrbitFitter
+   adelmo.poco.closed_orbit.ClosedOrbitSeries
+   adelmo.poco.calibrated.CalibratedClosedOrbitFitter
+   adelmo.poco.fitter.ClosedTwissFitter
+   adelmo.optimisers.levenberg_marquardt.LevenbergMarquardtConfig
 
 
 Accelerators And Configuration
@@ -39,6 +45,9 @@ Accelerators And Configuration
    adelmo.machine.accelerators.lhc
    adelmo.machine.accelerators.psb
    adelmo.machine.accelerators.sps
+   adelmo.machine.accelerators.fcc
+   adelmo.machine.accelerators.magnet_grouping
+   adelmo.machine.accelerators.selection
    adelmo.config
 
 
@@ -52,6 +61,7 @@ MAD Interface Layer
    adelmo.machine.mad.aba_mad_interface
    adelmo.machine.mad.optimising_mad_interface
    adelmo.machine.mad.machine_state
+   adelmo.machine.mad.scripts
 
 
 Closed-Orbit Fitting (POCO)
@@ -71,6 +81,7 @@ Closed-Orbit Fitting (POCO)
    adelmo.poco.workers.closed_orbit
    adelmo.poco.workers.closed_twiss
    adelmo.poco.workers.calibrated
+   adelmo.momentum_reference
 
 
 Tracking Fits
@@ -91,6 +102,7 @@ Tracking Fits
    adelmo.tracking.dispatch.setup
    adelmo.tracking.dispatch.turn_planner
    adelmo.tracking.uncertainty
+   adelmo.tracking.sgd
    adelmo.tracking.sgd.loop
    adelmo.tracking.sgd.scheduler
    adelmo.tracking.sgd.checkpointing
@@ -116,6 +128,7 @@ Shared Fitting Base
    adelmo.fitting.lifecycle
    adelmo.fitting.reduction
    adelmo.fitting.weights
+   adelmo.fitting.bpm_gains
    adelmo.fitting.uncertainty
    adelmo.fitting.results
 
@@ -126,6 +139,7 @@ Optimisers And Numerical Helpers
 .. autosummary::
    :toctree: _autosummary
 
+   adelmo.optimisers
    adelmo.optimisers.base
    adelmo.optimisers.adam
    adelmo.optimisers.lbfgs
@@ -155,3 +169,20 @@ Analysis
 
    adelmo.analysis
    adelmo.analysis.degeneracy_checker
+
+
+Run Logs And Monitor
+--------------------
+
+.. autosummary::
+   :toctree: _autosummary
+
+   adelmo.runlog
+   adelmo.runlog.reader
+   adelmo.runlog.writer
+   adelmo.monitor
+   adelmo.monitor.source
+   adelmo.monitor.view
+   adelmo.monitor.cache
+   adelmo.monitor.panels
+   adelmo.monitor.app

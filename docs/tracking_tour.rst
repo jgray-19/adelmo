@@ -20,6 +20,9 @@ The idea
 Package map
 -----------
 
+``adelmo.config``
+    ``OptimiserConfig`` and ``SimulationConfig``.
+
 ``adelmo.tracking``
     The tracking fitters.
 
@@ -61,6 +64,8 @@ Not used by the tracking fitters: ``poco``, ``analysis``, ``runlog``, ``monitor`
       │
       └─▶ optimisers
 
+.. _tour-preprocessing:
+
 Preprocessing
 -------------
 
@@ -92,7 +97,7 @@ called once per :term:`bunch`.
      - Adds ``var_x``, ``var_y`` columns: one value for every BPM, or a per-BPM noise
        table. Bad BPMs get zero weight.
    * - SVD clean
-     - ``tmom_recon``
+     - ``tmom_recon.svd``
      - Removes noise from x and y with an SVD.
    * - Reconstruct px, py
      - ``tmom_recon.calculate_pz``

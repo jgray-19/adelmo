@@ -19,10 +19,15 @@ Two families of fit are provided:
      - :class:`~adelmo.tracking.fitter.ArcByArcFitter`,
        :class:`~adelmo.tracking.fitter.ACDMarkerFitter`,
        :class:`~adelmo.tracking.fitter.KickerFitter`
+   * - Closed orbit
+     - Closed orbit and phase advance, at one or more machine states
+     - :class:`~adelmo.poco.closed_orbit.ClosedOrbitFitter`,
+       :class:`~adelmo.poco.calibrated.CalibratedClosedOrbitFitter`
    * - Closed twiss
      - Closed orbit, phase advance, beta and dispersion
-     - :class:`~adelmo.poco.closed_orbit.ClosedOrbitFitter`,
-       :class:`~adelmo.poco.fitter.ClosedTwissFitter`
+     - :class:`~adelmo.poco.fitter.ClosedTwissFitter`
+
+All fitters return a :class:`~adelmo.fitting.results.FitResult`.
 
 Installation
 ------------
@@ -34,6 +39,36 @@ Python 3.11 or later is required.
    git clone https://github.com/jgray-19/sgd-magnet-tuner.git
    cd sgd-magnet-tuner
    pip install -e ".[test,docs,tracking]"
+
+Optional dependency groups:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 80
+
+   * - Extra
+     - Contents
+   * - ``tracking``
+     - omc3, cpymad, pyarrow, psutil (required by the tracking workflows)
+   * - ``measurements``
+     - tmom-recon (momentum reconstruction)
+   * - ``monitor``
+     - Panel, for the live fit monitor (``python -m adelmo.monitor``)
+   * - ``cern``
+     - nxcals (CERN logging database access)
+   * - ``test``
+     - pytest, pytest-cov, pytest-xdist, xtrack-tools
+   * - ``docs``
+     - Sphinx and theme
+   * - ``dev``
+     - ruff, pre-commit
+
+Build this documentation with:
+
+.. code-block:: bash
+
+   pip install -e ".[docs]"
+   cd docs && make html
 
 Companion packages
 ------------------
@@ -51,6 +86,14 @@ Companion packages
      - Transverse momentum, AC-dipole and optics reconstruction.
    * - `xtrack_tools <https://jgray-19.github.io/xtrack_tools/>`_
      - Tracking helpers and dataframe conversion, used by the tests.
+
+Install them from GitHub:
+
+.. code-block:: bash
+
+   pip install git+https://github.com/jgray-19/pymadng-utils.git
+   pip install git+https://github.com/jgray-19/tmom-recon.git
+   pip install git+https://github.com/jgray-19/xtrack_tools.git
 
 The measurement and campaign workflows built on this package are maintained in
 separate repositories (``lhc_measurements``, ``psb_md``, ``psb_loco``, ``lhc_loco``

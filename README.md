@@ -11,7 +11,8 @@ Two families of fit are provided:
 | Fit | Data | Entry points |
 |---|---|---|
 | Tracking | Turn-by-turn BPM data, tracked through the model | `ArcByArcFitter`, `ACDMarkerFitter`, `KickerFitter` |
-| Closed twiss | Closed orbit, phase advance, beta and dispersion | `ClosedOrbitFitter`, `ClosedTwissFitter` |
+| Closed orbit | Closed orbit and phase advance, at one or more machine states | `ClosedOrbitFitter`, `CalibratedClosedOrbitFitter` |
+| Closed twiss | Closed orbit, phase advance, beta and dispersion | `ClosedTwissFitter` |
 
 Supported machines: LHC, PSB, SPS and FCC.
 
@@ -33,6 +34,8 @@ Optional dependency groups:
 |---|---|
 | `tracking` | omc3, cpymad, pyarrow, psutil (required by the tracking workflows) |
 | `measurements` | tmom-recon (momentum reconstruction) |
+| `monitor` | Panel, for the live fit monitor (`python -m adelmo.monitor`) |
+| `cern` | nxcals (CERN logging database access) |
 | `test` | pytest, pytest-cov, pytest-xdist, xtrack-tools |
 | `docs` | Sphinx and theme |
 | `dev` | ruff, pre-commit |
@@ -48,7 +51,7 @@ Several workflows depend on companion packages installed from GitHub:
 | Package | Purpose |
 |---|---|
 | [pymadng-utils](https://github.com/jgray-19/pymadng-utils) | Shared accelerator abstractions, dp/p and pt conversion, knob-file I/O |
-| [tmom-recon](https://github.com/jgray-19/tmom-recon) | Transverse momentum and optics reconstruction |
+| [tmom-recon](https://github.com/jgray-19/tmom-recon) | Transverse momentum, AC-dipole and optics reconstruction |
 | [xtrack_tools](https://github.com/jgray-19/xtrack_tools) | Tracking helpers and dataframe conversion (tests) |
 
 ```bash

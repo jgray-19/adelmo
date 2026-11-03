@@ -63,11 +63,14 @@ napoleon_use_rtype = False
 # documented twice.
 napoleon_use_ivar = True
 autodoc_mock_imports = [
+    "bokeh",
     "matplotlib",
     "nxcals",
     "numpy",
     "omc3",
     "pandas",
+    "panel",
+    "psutil",
     "pymadng",
     "pymadng_utils",
     "scipy",

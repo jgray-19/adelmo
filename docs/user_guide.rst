@@ -6,8 +6,11 @@ Tracking fits
 
 A tracking fit recovers knob strengths by tracking measured initial conditions
 through the MAD-NG model and comparing the result with the measured turn-by-turn
-data. A fit is defined by an accelerator and five configuration objects, and is run
-with ``fitter.run()``, which returns the fitted knobs and their uncertainties.
+data. A fit is defined by an accelerator, four configuration objects and an optional
+:class:`~adelmo.tracking.fitter.FitterOptions`. ``fitter.run()`` returns a
+:class:`~adelmo.fitting.results.FitResult`: the fitted knobs, their 1-sigma
+uncertainties under the same knob names, and ``diagnostics`` (why and after how many
+epochs the fit stopped).
 
 .. list-table::
    :header-rows: 1
@@ -28,6 +31,8 @@ with ``fitter.run()``, which returns the fitted knobs and their uncertainties.
    * - :class:`~adelmo.tracking.config.models.MeasurementConfig`
      - Measurement files, each with a :class:`~adelmo.tracking.config.models.MeasurementDetails`
        (MAD interface options, momentum offset, first BPM).
+   * - :class:`~adelmo.tracking.fitter.FitterOptions` (optional)
+     - Starting knobs, true strengths, output and checkpoint settings, callbacks.
 
 Fitters
 ~~~~~~~
@@ -50,9 +55,10 @@ Fitters
      - Kicker marker
      - One worker, forward only, ``turns_after_kicker`` turns.
 
-``KickerFitter`` requires a :class:`~adelmo.tracking.config.models.KickerConfig`. The
-measurement data must contain ``x``, ``px``, ``y`` and ``py`` at the kicker marker, and
-the sequence must contain the kicker element.
+``KickerFitter`` also takes a
+:class:`KickerConfig(kicker_name, turns_after_kicker) <adelmo.tracking.config.models.KickerConfig>`.
+The measurement data must contain ``x``, ``px``, ``y`` and ``py`` at the kicker
+marker, and the sequence must contain the kicker element.
 
 Example
 ~~~~~~~
@@ -61,13 +67,14 @@ Example
 
    from pathlib import Path
 
-   from adelmo.machine.accelerators import LHC
    from adelmo.config import OptimiserConfig, SimulationConfig
+   from adelmo.fitting.config import OutputConfig, SequenceConfig
+   from adelmo.machine.accelerators import LHC
    from adelmo.tracking import (
        ArcByArcFitter,
+       FitterOptions,
        MeasurementConfig,
        MeasurementDetails,
-       SequenceConfig,
    )
 
    accelerator = LHC(beam=1, sequence_file="lhcb1.seq", errors={"quad": {"k1"}})
@@ -89,25 +96,28 @@ Example
        ),
        bpm_start_points=["BPM.12R1.B1"],
        bpm_end_points=["BPM.20R1.B1"],
+       options=FitterOptions(output_config=OutputConfig(write_run_log=False)),
    )
-   knobs, uncertainties = fitter.run()
+   result = fitter.run()
+   print(result.knobs, result.uncertainties, result.diagnostics.reason)
 
-Optional fitter arguments
-~~~~~~~~~~~~~~~~~~~~~~~~~
+FitterOptions
+~~~~~~~~~~~~~
 
 ``initial_knob_strengths``
-    Starting values, in optimisation space.
+    Starting values, in optimisation space. Knobs left out keep the model value.
 ``true_strengths``
     Reference values (file or dictionary) used to report the error of the fit.
-``optimise_knobs``
-    Restrict the fit to a subset of global knob names.
+``debug``
+    Run MAD-NG in debug mode.
 ``output_config``
-    :class:`~adelmo.fitting.config.OutputConfig`: TensorBoard logging, uncertainty
-    estimation and log files.
+    :class:`~adelmo.fitting.config.OutputConfig`: run log, TensorBoard logging,
+    uncertainty estimation and log files.
 ``checkpoint_config``
     :class:`~adelmo.tracking.config.models.CheckpointConfig`: periodic checkpoints and restart.
 ``initial_conditions_callback``
-    Epoch-end hook that refreshes the workers' initial conditions.
+    Epoch-end hook that returns refreshed start coordinates for every worker, or
+    ``None`` to keep them.
 ``loss_callback``
     Called each epoch with the loss values.
 
@@ -125,6 +135,9 @@ is applied to the validation workers.
 
 Closed-twiss fits
 -----------------
+
+The closed-twiss and closed-orbit fitters live in :mod:`adelmo.poco` and return the
+same :class:`~adelmo.fitting.results.FitResult` as the tracking fitters.
 
 :class:`~adelmo.poco.fitter.ClosedTwissFitter` fits knobs so that the
 periodic model optics match a measured closed twiss. Closed orbit, beta, phase and
@@ -162,7 +175,7 @@ more :class:`~adelmo.poco.closed_orbit.ClosedOrbitSeries`.
 Accepted iterations are stored in ``fitter.history``. Call ``fitter.close()`` to shut
 down the MAD-NG process once the fit is complete.
 
-``CalibratedClosedOrbitFitter`` extends this with BPM gains and corrector kick
+:class:`~adelmo.poco.calibrated.CalibratedClosedOrbitFitter` extends this with BPM gains and corrector kick
 calibrations as additional parameters, with Gaussian priors ``sigma_bpm`` and
 ``sigma_corrector``. Every ``k_<corrector>`` kick a series' ``machine_state`` sets gets a gain; a
 series may set several or none (an off-momentum orbit). ``fit_corrector_gains=False`` fits the BPM
@@ -177,6 +190,23 @@ combinations that the data cannot constrain, so the problem can be regularised o
 knob set reduced before running the fit. Use
 :meth:`~adelmo.tracking.fitter.TrackingFitter.check_degeneracy` on a tracking fitter.
 
+Monitoring a fit
+----------------
+
+Every fit writes a run log under ``OutputConfig.run_log_root`` (switch off with
+``OutputConfig(write_run_log=False)``). Serve live plots of running and finished fits
+with:
+
+.. code-block:: bash
+
+   pip install -e ".[monitor]"
+   python -m adelmo.monitor RUN_LOG_ROOT --spec my_package.monitor:SPEC
+
+``adelmo-monitor`` is the same command as ``python -m adelmo.monitor``. Then open
+``http://localhost:5006``. On a remote machine, forward the port with
+``ssh -L 5006:localhost:5006 host``. Without ``--spec`` only the generic panels are
+shown. See :mod:`adelmo.monitor` and :mod:`adelmo.runlog`.
+
 Testing
 -------
 
@@ -186,6 +216,6 @@ Testing
    pytest -m slow           # convergence and end-to-end tests
    pytest --cov=adelmo
 
-The markers are ``slow``, ``regression``, ``integration``, ``convergence``, ``e2e``,
-``lhc``, ``sps``, ``psb`` and ``serial``. Tests marked ``serial`` must not run in
-parallel. The tests under ``tests/training/`` double as worked examples.
+Markers are listed in ``tests/README.md``. Tests marked ``serial`` must not run in
+parallel (do not combine with ``-n``). The tests under ``tests/training/`` double as
+worked examples.
