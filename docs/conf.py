@@ -85,6 +85,7 @@ nitpicky = False
 def setup(app):  # type: ignore[override]
     """Inject custom configuration at Sphinx start-up."""
     app.add_css_file("custom.css")
+    app.add_js_file("glossary_tooltips.js")
 
 
 # -- Options for HTML output -------------------------------------------------

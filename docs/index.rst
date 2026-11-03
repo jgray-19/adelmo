@@ -61,6 +61,7 @@ and ``fcc_loco``) and are not documented here.
    :caption: Contents
 
    user_guide
+   tracking_tour
    architecture
    measurements
    api_reference
