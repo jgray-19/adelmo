@@ -1,0 +1,42 @@
+name: Convergence
+
+on:
+  workflow_call:
+
+jobs:
+  convergence:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: energy
+            tests: tests/training/controller/test_controller_energy*.py
+
+          - target: quadrupole
+            tests: tests/training/controller/test_controller_quadrupole*.py
+
+          - target: kicker
+            tests: tests/training/controller/test_controller_kicker.py
+
+          - target: uncertainty
+            tests: tests/training/controller/test_controller_uncertainty.py
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          path: sgd-magnet-tuner
+          persist-credentials: false
+
+      - name: Setup CI environment
+        uses: ./sgd-magnet-tuner/.github/actions/setup-ci
+
+      - name: Run convergence tests
+        working-directory: sgd-magnet-tuner
+        run: |
+          pytest -ra \
+            ${{ matrix.tests }} \
+            -m convergence

@@ -6,9 +6,9 @@ import logging
 from typing import TYPE_CHECKING
 
 import pytest
-from pymadng_utils.accelerators.base import PROTON_MASS_GEV
+from pymadng_utils.physics import PROTON_MASS_GEV
 
-from aba_optimiser.accelerators import LHC
+from adelmo.machine.accelerators import LHC
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -33,8 +33,8 @@ class TestLHCAccelerator:
         assert lhc.beam == 1
         assert lhc.kinetic_energy == pytest.approx(6800.0)
         assert lhc.energy == pytest.approx(6800.0 + PROTON_MASS_GEV)
-        assert lhc.optimise_bends is False
-        assert lhc.optimise_correctors is False
+        assert lhc.errors == {}
+        assert lhc.misalignments == {}
         assert lhc.normalise_bends is False
         assert lhc.optimise_energy is False
 
@@ -76,49 +76,48 @@ class TestLHCAccelerator:
         )
         assert lhc.optimise_energy is True
 
-    def test_init_with_optimise_bends(self, test_sequence_file: Path) -> None:
+    def test_init_with_bend_errors(self, test_sequence_file: Path) -> None:
         """Test initialization with bend optimization."""
         lhc = LHC(
             beam=1,
             kinetic_energy=6800.0,
             sequence_file=str(test_sequence_file),
-            optimise_bends=True,
+            errors={"bend": {"k0"}},
         )
-        assert lhc.optimise_bends is True
-        assert lhc.normalise_bends is True  # Should default to True when optimise_bends is True
+        assert lhc.optimises("bend", "k0")
+        assert lhc.normalise_bends is True  # Should default to True when fitting bend k0
 
-    def test_init_with_optimise_bends_no_normalise(self, test_sequence_file: Path) -> None:
+    def test_init_with_bend_errors_no_normalise(self, test_sequence_file: Path) -> None:
         """Test initialization with bend optimization but no normalization."""
         lhc = LHC(
             beam=1,
             kinetic_energy=6800.0,
             sequence_file=str(test_sequence_file),
-            optimise_bends=True,
+            errors={"bend": {"k0"}},
             normalise_bends=False,
         )
-        assert lhc.optimise_bends is True
+        assert lhc.optimises("bend", "k0")
         assert lhc.normalise_bends is False
 
     def test_init_normalise_bends_none_without_bends(self, test_sequence_file: Path) -> None:
-        """Test normalise_bends defaults to False when optimise_bends is False."""
+        """Test normalise_bends defaults to False when bend k0 is not fitted."""
         lhc = LHC(
             beam=1,
             kinetic_energy=6800.0,
             sequence_file=str(test_sequence_file),
-            optimise_bends=False,
             normalise_bends=None,
         )
         assert lhc.normalise_bends is False
 
-    def test_init_with_optimise_correctors(self, test_sequence_file: Path) -> None:
+    def test_init_with_corrector_errors(self, test_sequence_file: Path) -> None:
         """Test initialization with corrector optimization."""
         lhc = LHC(
             beam=1,
             kinetic_energy=6800.0,
             sequence_file=str(test_sequence_file),
-            optimise_correctors=True,
+            errors={"corrector": {"kick"}},
         )
-        assert lhc.optimise_correctors is True
+        assert lhc.optimises("corrector", "kick")
 
     def test_init_with_all_optimisations(self, test_sequence_file: Path) -> None:
         """Test initialization with all optimizations enabled."""
@@ -127,16 +126,13 @@ class TestLHCAccelerator:
             kinetic_energy=6800.0,
             sequence_file=str(test_sequence_file),
             optimise_energy=True,
-            optimise_bends=True,
-            optimise_quadrupoles=True,
-            optimise_sextupoles=True,
-            optimise_correctors=True,
+            errors={"bend": {"k0"}, "quad": {"k1"}, "sextupole": {"k2"}, "corrector": {"kick"}},
         )
         assert lhc.optimise_energy is True
-        assert lhc.optimise_bends is True
-        assert lhc.optimise_quadrupoles is True
-        assert lhc.optimise_sextupoles is True
-        assert lhc.optimise_correctors is True
+        assert lhc.optimises("bend", "k0")
+        assert lhc.optimises("quad", "k1")
+        assert lhc.optimises("sextupole", "k2")
+        assert lhc.optimises("corrector", "kick")
 
     def test_get_seq_name_beam_1(self, test_sequence_file: Path) -> None:
         """Test seq_name returns correct sequence name for beam 1."""
@@ -181,7 +177,7 @@ class TestLHCAccelerator:
             beam=1,
             kinetic_energy=6800.0,
             sequence_file=str(test_sequence_file),
-            optimise_bends=True,
+            errors={"bend": {"k0"}},
         )
         assert lhc.has_any_optimisation() is True
 
@@ -191,7 +187,7 @@ class TestLHCAccelerator:
             beam=1,
             kinetic_energy=6800.0,
             sequence_file=str(test_sequence_file),
-            optimise_correctors=True,
+            errors={"corrector": {"kick"}},
         )
         assert lhc.has_any_optimisation() is True
 
@@ -213,17 +209,14 @@ class TestLHCAccelerator:
             kinetic_energy=6800.0,
             sequence_file=str(test_sequence_file),
             optimise_energy=True,
-            optimise_bends=True,
-            optimise_quadrupoles=True,
-            optimise_sextupoles=True,
-            optimise_correctors=True,
+            errors={"bend": {"k0"}, "quad": {"k1"}, "sextupole": {"k2"}, "corrector": {"kick"}},
         )
         with caplog.at_level(logging.INFO):
             lhc.log_optimisation_targets()
-        assert "bends" in caplog.text
-        assert "quadrupoles" in caplog.text
-        assert "sextupoles" in caplog.text
-        assert "correctors" in caplog.text
+        assert "bend k0" in caplog.text
+        assert "quad k1" in caplog.text
+        assert "sextupole k2" in caplog.text
+        assert "corrector kick" in caplog.text
         assert "beam energy" in caplog.text
 
     def test_get_bend_lengths_returns_none_no_bends(self, test_sequence_file: Path) -> None:
@@ -232,7 +225,6 @@ class TestLHCAccelerator:
             beam=1,
             kinetic_energy=6800.0,
             sequence_file=str(test_sequence_file),
-            optimise_bends=False,
         )
         result = lhc.get_bend_lengths()
         assert result is None
@@ -243,7 +235,7 @@ class TestLHCAccelerator:
             beam=1,
             kinetic_energy=6800.0,
             sequence_file=str(test_sequence_file),
-            optimise_bends=True,
+            errors={"bend": {"k0"}},
             normalise_bends=False,
         )
         result = lhc.get_bend_lengths()
@@ -255,7 +247,7 @@ class TestLHCAccelerator:
             beam=1,
             kinetic_energy=6800.0,
             sequence_file=str(test_sequence_file),
-            optimise_bends=True,
+            errors={"bend": {"k0"}},
             normalise_bends=True,
         )
         lhc.bend_lengths = {"MB.A1.dk0l": 2.0, "MB.A2.dk0l": 2.0}
@@ -268,7 +260,7 @@ class TestLHCAccelerator:
             beam=1,
             kinetic_energy=6800.0,
             sequence_file=str(test_sequence_file),
-            optimise_bends=True,
+            errors={"bend": {"k0"}},
             normalise_bends=True,
         )
         result = lhc.get_bend_lengths()
@@ -280,7 +272,6 @@ class TestLHCAccelerator:
             beam=1,
             kinetic_energy=6800.0,
             sequence_file=str(test_sequence_file),
-            optimise_bends=False,
         )
         test_strengths = {"K1": 0.5}
         result = lhc.normalise_true_strengths(test_strengths, None)
@@ -292,7 +283,7 @@ class TestLHCAccelerator:
             beam=1,
             kinetic_energy=6800.0,
             sequence_file=str(test_sequence_file),
-            optimise_bends=True,
+            errors={"bend": {"k0"}},
         )
         test_strengths = {"MB.dk0l": 1.0}
         result = lhc.normalise_true_strengths(test_strengths, None)
@@ -306,7 +297,7 @@ class TestLHCAccelerator:
             beam=1,
             kinetic_energy=6800.0,
             sequence_file=str(test_sequence_file),
-            optimise_bends=True,
+            errors={"bend": {"k0"}},
             normalise_bends=True,
         )
         # These would be the actual bend strengths from the sequence
@@ -323,7 +314,7 @@ class TestLHCAccelerator:
         assert isinstance(result, dict)
 
     def test_format_result_knob_names_with_energy(self, test_sequence_file: Path) -> None:
-        """Test format_result_knob_names converts pt to deltap."""
+        """Test format_result_knob_names preserves controller-space pt."""
         lhc = LHC(
             beam=1,
             kinetic_energy=6800.0,
@@ -332,8 +323,8 @@ class TestLHCAccelerator:
         )
         knob_names = ["K1.b1", "pt"]
         result = lhc.format_result_knob_names(knob_names)
-        assert "deltap" in result
-        assert "pt" not in result
+        assert "pt" in result
+        assert "deltap" not in result
 
     def test_format_result_knob_names_without_energy(self, test_sequence_file: Path) -> None:
         """Test format_result_knob_names leaves knobs unchanged without energy."""

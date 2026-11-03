@@ -70,6 +70,7 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+docs/_autosummary/
 
 # PyBuilder
 .pybuilder/
@@ -161,6 +162,8 @@ cython_debug/
 
 # remove the tensorboard logs
 runs/
+artifacts/measurements/runs/
+artifacts/training/runs/
 
 **/acc-models-lhc/
 *_analysis*/
@@ -173,7 +176,65 @@ docs/api/
 /mad_scripts/
 models/**
 plots/
+artifacts/measurements/plots/
 *.out
 *.png
-!src/aba_optimiser/mad/mad_scripts/
+!src/adelmo/mad/mad_scripts/
 !tests/data
+
+# AFS filesystem temp files
+.__afs*
+
+# Editor / IDE
+.vscode/
+
+# Backup files (e.g. foo.c.~12345)
+*.~*
+
+# CFFI build artifacts (hash-named .c files dropped in the repo root)
+/[0-9a-f]*.c
+
+# Downloaded MAD-NG binaries (not part of the repo)
+mad12
+mad-linux-*
+
+# Accidental pip artifact from a malformed `pip install ... >=24.2`
+=*
+
+# Stray run logs / profiles
+err.txt
+out.txt
+profile.json
+
+# Generated run outputs
+*.tfs
+*.ini
+*.pickle
+*.sdds
+generated_mad_scripts/
+sequences_from_models/
+tests/data/model_creator/*.mad
+tests/data/sequences/*.json
+tests/data/sequences/*.mad
+# model-creator output dirs, e.g. 2026-04-08_p17m5_p23p5/
+20[0-9][0-9]-[0-1][0-9]-[0-3][0-9]_*/
+
+# Generated run artifacts (large, machine-local)
+/artifacts/
+
+# Local assistant tooling state (worktrees, session locks, personal settings)
+/.claude/
+
+# Ad-hoc debug/scratch output dropped at repo root
+/fix_test.txt
+/out.txt2
+/out2.txt
+/fort.18
+/internal_mag_pot.txt
+/optimise_quads_output.txt
+/claude_prompt.txt
+/claude_schedule.sh
+
+# build and run artefacts
+*.o
+/test_run_*.txt

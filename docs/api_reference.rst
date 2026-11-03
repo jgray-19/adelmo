@@ -1,55 +1,36 @@
 API Reference
 =============
 
-This reference is limited to modules with direct automated test coverage and to
-runtime entry points that are exercised in the current suite. Script-heavy,
-campaign-specific, or mostly skipped areas are intentionally not published
-here yet.
-
-Included Scope
---------------
-
-The documented surface currently focuses on:
-
-1. Accelerator definitions and shared runtime configuration.
-2. MAD interface classes used by the optimisation loop.
-3. Controller, worker-management, and worker payload APIs.
-4. Optimiser implementations and core numerical helpers with active tests.
-5. A small set of measurement and utility modules with direct unit tests.
-
-Omitted For Now
----------------
-
-The following areas are intentionally excluded from the published reference
-because coverage is partial, heavily import-gated, or currently centred on
-workflow scripts rather than stable reusable API:
-
-* most of ``aba_optimiser.measurements``
-* ``aba_optimiser.matching``
-* most of ``aba_optimiser.simulation``
-* ``aba_optimiser.training_optics``
-* physics modules whose tests are skipped or rely on optional environments
+The reference covers every module of the ``adelmo`` package. Measurement and campaign
+workflows are maintained in separate repositories.
 
 
 Primary Entry Points
 --------------------
 
 .. autosummary::
-   :toctree: _autosummary
    :nosignatures:
 
-   aba_optimiser.accelerators.Accelerator
-   aba_optimiser.accelerators.LHC
-   aba_optimiser.accelerators.PSB
-   aba_optimiser.accelerators.SPS
-   aba_optimiser.accelerators.instantiate_accelerator_from
-   aba_optimiser.config.OptimiserConfig
-   aba_optimiser.config.SimulationConfig
-   aba_optimiser.training.Controller
-   aba_optimiser.training.BaseController
-   aba_optimiser.training.MeasurementConfig
-   aba_optimiser.training.SequenceConfig
-   aba_optimiser.training.OutputConfig
+   adelmo.machine.accelerators.base.Accelerator
+   adelmo.machine.accelerators.lhc.LHC
+   adelmo.machine.accelerators.psb.PSB
+   adelmo.machine.accelerators.sps.SPS
+   adelmo.machine.accelerators.fcc.FCC
+   adelmo.config.OptimiserConfig
+   adelmo.config.SimulationConfig
+   adelmo.tracking.fitter.ArcByArcFitter
+   adelmo.tracking.fitter.ACDMarkerFitter
+   adelmo.tracking.fitter.KickerFitter
+   adelmo.tracking.fitter.FitterOptions
+   adelmo.tracking.config.models.MeasurementConfig
+   adelmo.fitting.config.SequenceConfig
+   adelmo.fitting.config.OutputConfig
+   adelmo.fitting.results.FitResult
+   adelmo.poco.closed_orbit.ClosedOrbitFitter
+   adelmo.poco.closed_orbit.ClosedOrbitSeries
+   adelmo.poco.calibrated.CalibratedClosedOrbitFitter
+   adelmo.poco.fitter.ClosedTwissFitter
+   adelmo.optimisers.levenberg_marquardt.LevenbergMarquardtConfig
 
 
 Accelerators And Configuration
@@ -58,12 +39,16 @@ Accelerators And Configuration
 .. autosummary::
    :toctree: _autosummary
 
-   aba_optimiser.accelerators
-   aba_optimiser.accelerators.base
-   aba_optimiser.accelerators.lhc
-   aba_optimiser.accelerators.psb
-   aba_optimiser.accelerators.sps
-   aba_optimiser.config
+   adelmo.machine
+   adelmo.machine.accelerators
+   adelmo.machine.accelerators.base
+   adelmo.machine.accelerators.lhc
+   adelmo.machine.accelerators.psb
+   adelmo.machine.accelerators.sps
+   adelmo.machine.accelerators.fcc
+   adelmo.machine.accelerators.magnet_grouping
+   adelmo.machine.accelerators.selection
+   adelmo.config
 
 
 MAD Interface Layer
@@ -72,45 +57,80 @@ MAD Interface Layer
 .. autosummary::
    :toctree: _autosummary
 
-   aba_optimiser.mad
-   aba_optimiser.mad.aba_mad_interface
-   aba_optimiser.mad.optimising_mad_interface
+   adelmo.machine.mad
+   adelmo.machine.mad.aba_mad_interface
+   adelmo.machine.mad.optimising_mad_interface
+   adelmo.machine.mad.machine_state
+   adelmo.machine.mad.scripts
 
 
-Optimisation Runtime
---------------------
-
-.. autosummary::
-   :toctree: _autosummary
-
-   aba_optimiser.training
-   aba_optimiser.training.base_controller
-   aba_optimiser.training.configuration_manager
-   aba_optimiser.training.controller
-   aba_optimiser.training.controller_config
-   aba_optimiser.training.data_manager
-   aba_optimiser.training.optimisation_loop
-   aba_optimiser.training.result_manager
-   aba_optimiser.training.scheduler
-   aba_optimiser.training.validation_selection
-   aba_optimiser.training.worker_lifecycle
-   aba_optimiser.training.worker_manager
-   aba_optimiser.training.worker_payloads
-   aba_optimiser.training.worker_setup
-
-
-Workers
--------
+Closed-Orbit Fitting (POCO)
+---------------------------
 
 .. autosummary::
    :toctree: _autosummary
 
-   aba_optimiser.workers
-   aba_optimiser.workers.abstract_worker
-   aba_optimiser.workers.common
-   aba_optimiser.workers.tracking
-   aba_optimiser.workers.tracking_position_only
-   aba_optimiser.workers.tracking_validation
+   adelmo.poco
+   adelmo.poco.closed_orbit
+   adelmo.poco.calibrated
+   adelmo.poco.fitter
+   adelmo.poco.lm_loop
+   adelmo.poco.prior
+   adelmo.poco.calibration
+   adelmo.poco.workers
+   adelmo.poco.workers.closed_orbit
+   adelmo.poco.workers.closed_twiss
+   adelmo.poco.workers.calibrated
+   adelmo.momentum_reference
+
+
+Tracking Fits
+-------------
+
+.. autosummary::
+   :toctree: _autosummary
+
+   adelmo.tracking
+   adelmo.tracking.fitter
+   adelmo.tracking.session
+   adelmo.tracking.ranges
+   adelmo.tracking.data_manager
+   adelmo.tracking.worker
+   adelmo.tracking.dispatch
+   adelmo.tracking.dispatch.payloads
+   adelmo.tracking.dispatch.screening
+   adelmo.tracking.dispatch.setup
+   adelmo.tracking.dispatch.turn_planner
+   adelmo.tracking.uncertainty
+   adelmo.tracking.sgd
+   adelmo.tracking.sgd.loop
+   adelmo.tracking.sgd.scheduler
+   adelmo.tracking.sgd.checkpointing
+   adelmo.tracking.config
+   adelmo.tracking.config.helpers
+   adelmo.tracking.config.models
+   adelmo.tracking.config.tracking
+
+
+Shared Fitting Base
+-------------------
+
+.. autosummary::
+   :toctree: _autosummary
+
+   adelmo.fitting
+   adelmo.fitting.setup
+   adelmo.fitting.config
+   adelmo.fitting.protocol
+   adelmo.fitting.worker
+   adelmo.fitting.shared_reference
+   adelmo.fitting.pool
+   adelmo.fitting.lifecycle
+   adelmo.fitting.reduction
+   adelmo.fitting.weights
+   adelmo.fitting.bpm_gains
+   adelmo.fitting.uncertainty
+   adelmo.fitting.results
 
 
 Optimisers And Numerical Helpers
@@ -119,21 +139,50 @@ Optimisers And Numerical Helpers
 .. autosummary::
    :toctree: _autosummary
 
-   aba_optimiser.optimisers.adam
-   aba_optimiser.optimisers.amsgrad
-   aba_optimiser.optimisers.lbfgs
-   aba_optimiser.physics.deltap
-   aba_optimiser.dataframes.utils
-   aba_optimiser.io.utils
+   adelmo.optimisers
+   adelmo.optimisers.base
+   adelmo.optimisers.adam
+   adelmo.optimisers.lbfgs
+   adelmo.optimisers.levenberg_marquardt
 
 
-Tested Measurement Utilities
-----------------------------
+Measurement Preparation
+-----------------------
 
 .. autosummary::
    :toctree: _autosummary
 
-   aba_optimiser.measurements.b2_errors
-   aba_optimiser.measurements.create_datafile
-   aba_optimiser.measurements.plot_quad_diffs_and_phases
-   aba_optimiser.measurements.utils
+   adelmo.measurements
+   adelmo.measurements.acd_pipeline
+   adelmo.measurements.preprocessing
+   adelmo.measurements.reconstruction
+   adelmo.measurements.reference
+   adelmo.measurements.variances
+   adelmo.measurements.noise
+
+
+Analysis
+--------
+
+.. autosummary::
+   :toctree: _autosummary
+
+   adelmo.analysis
+   adelmo.analysis.degeneracy_checker
+
+
+Run Logs And Monitor
+--------------------
+
+.. autosummary::
+   :toctree: _autosummary
+
+   adelmo.runlog
+   adelmo.runlog.reader
+   adelmo.runlog.writer
+   adelmo.monitor
+   adelmo.monitor.source
+   adelmo.monitor.view
+   adelmo.monitor.cache
+   adelmo.monitor.panels
+   adelmo.monitor.app

@@ -8,15 +8,17 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import tfs
 
-from aba_optimiser.accelerators import LHC
-from aba_optimiser.mad.aba_mad_interface import AbaMadInterface
-from src.aba_optimiser.physics.deltap import dp2pt as physics_dp2pt
+from adelmo.machine.accelerators import LHC
+from adelmo.machine.mad.aba_mad_interface import AbaMadInterface
 from tests.mad.helpers import (
     check_interface_basic_init,
     cleanup_interface,
-    get_marker_and_element_positions,
 )
+
+ORBIT_CORRECTION_BPMS = [f"BPM.{i}R2.B1" for i in range(9, 13)]
+ORBIT_CORRECTION_CORRECTORS = ["MCBCH.5R2.B1", "MCBCH.6R2.B1"]
 
 
 @pytest.mark.parametrize(
@@ -184,9 +186,7 @@ class TestDp2pt:
         dp = 0.01
         pt = interface.dp2pt(dp)
         # Compare with physics calculation
-        mass = 0.938  # proton mass
-        pc = interface.mad.loaded_sequence.beam.pc
-        expected_pt = physics_dp2pt(dp, mass, pc=pc)
+        expected_pt = interface.accelerator.dp2pt(dp)
         assert np.isclose(pt, expected_pt, rtol=1e-12, atol=1e-13)
 
     def test_negative_dp(self, loaded_interface: AbaMadInterface):
@@ -195,9 +195,7 @@ class TestDp2pt:
         dp = -0.005
         pt = interface.dp2pt(dp)
         # Compare with physics calculation
-        mass = 0.938
-        pc = interface.mad.loaded_sequence.beam.pc
-        expected_pt = physics_dp2pt(dp, mass, pc=pc)
+        expected_pt = interface.accelerator.dp2pt(dp)
         assert np.isclose(pt, expected_pt, rtol=1e-12, atol=1e-13)
 
     def test_high_energy_approximation(self, loaded_interface: AbaMadInterface):
@@ -254,6 +252,52 @@ def test_pt2dp_dp2pt_consistency(loaded_interface: AbaMadInterface):
         assert np.isclose(pt_back, pt, rtol=1e-12, atol=1e-15), (
             f"Inconsistency for pt={pt}: dp={dp}, pt_back={pt_back}"
         )
+
+
+class TestPerformOrbitCorrection:
+    def test_invalid_plane_raises(self, loaded_interface: AbaMadInterface) -> None:
+        with pytest.raises(ValueError, match="Invalid orbit correction plane"):
+            loaded_interface.perform_orbit_correction(machine_deltap=0.0, plane="z")
+
+    def test_correct_tunes_requires_targets(self, loaded_interface: AbaMadInterface) -> None:
+        with pytest.raises(ValueError, match="target tunes"):
+            loaded_interface.perform_orbit_correction(machine_deltap=0.0, correct_tunes=True)
+
+    def test_filters_bpms_and_correctors(
+        self, loaded_interface: AbaMadInterface, tmp_path
+    ) -> None:
+        interface = loaded_interface
+        corrector_file = tmp_path / "correctors.tfs"
+
+        result = interface.perform_orbit_correction(
+            machine_deltap=0.0,
+            corrector_file=corrector_file,
+            twiss_name="nil",
+            correct_tunes=False,
+            bpms=ORBIT_CORRECTION_BPMS,
+            correctors=ORBIT_CORRECTION_CORRECTORS,
+            plane="x",
+        )
+
+        qx_knob, qy_knob = interface.accelerator.tune_variables
+        assert set(result) == {qx_knob, qy_knob}
+
+        corrector_table = tfs.read(corrector_file)
+        corrector_names = corrector_table["name"].astype(str).str.upper().tolist()
+        kickers = corrector_table.loc[
+            corrector_table["kind"].astype(str).str.contains("kicker"), "name"
+        ]
+        assert set(kickers.astype(str).str.upper()) <= {
+            n.upper() for n in ORBIT_CORRECTION_CORRECTORS
+        }
+        assert corrector_names  # the correction actually produced output
+
+        # The BPM/corrector filter must not leak: elements outside the
+        # supplied names should still be selectable/observable afterwards.
+        interface.observe("BPM")
+        twiss_df = interface.run_twiss()
+        assert len(twiss_df) > len(ORBIT_CORRECTION_BPMS)
+        interface.unobserve_elements(["BPM"])
 
 
 @pytest.mark.parametrize("end_num", [10, 11, 12])

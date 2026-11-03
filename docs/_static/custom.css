@@ -1,1 +1,49 @@
-/* Placeholder for project-specific styling overrides. */
+/* Project-specific styling overrides. */
+
+/* Tracking tour diagrams (inline SVG; text follows the theme colour). */
+.tour-svg { display: block; width: 100%; height: auto; margin: 1rem auto; color: inherit; }
+.tour-ring { max-width: 340px; }
+.tour-flow { max-width: 600px; }
+.tour-svg text { fill: currentColor; font-size: 13px; font-family: inherit; }
+.tour-svg text.small { font-size: 11.5px; }
+.tour-svg text.strong { font-weight: 700; }
+.tour-svg .muted { opacity: 0.65; }
+.tour-svg text.warn { fill: #d64541; }
+.tour-svg text.msg { fill: #1a93ad; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 600; }
+.tour-svg text.lane { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; }
+.tour-svg text.lane-main { fill: #3d6fd6; }
+.tour-svg text.lane-worker { fill: #d6821e; }
+.tour-svg .box-main { fill: rgba(61, 111, 214, 0.14); stroke: #3d6fd6; stroke-width: 1.5; }
+.tour-svg .box-worker { fill: rgba(214, 130, 30, 0.16); stroke: #d6821e; stroke-width: 1.5; }
+.tour-svg .box-sub { fill: rgba(26, 147, 173, 0.12); stroke: #1a93ad; stroke-width: 1.5; }
+.tour-svg .sub-edge { stroke: #1a93ad; stroke-width: 1.5; }
+.tour-svg .divider { stroke: currentColor; opacity: 0.25; stroke-width: 1.5; stroke-dasharray: 5 5; }
+.tour-svg .arrow { fill: none; stroke: currentColor; opacity: 0.6; stroke-width: 1.6; }
+.tour-svg .arrow.loop { stroke-dasharray: 4 3; }
+.tour-svg .ah { fill: currentColor; }
+.tour-svg .ring { fill: none; stroke: currentColor; opacity: 0.2; stroke-width: 6; }
+.tour-svg .tick { stroke: currentColor; opacity: 0.5; stroke-width: 1.5; }
+.tour-svg .acd { fill: #d64541; }
+.tour-svg .fwd { fill: none; stroke: #1a93ad; stroke-width: 3; }
+.tour-svg .bwd { fill: none; stroke: #d6821e; stroke-width: 3; }
+.tour-svg .bad { fill: none; stroke: #d64541; stroke-width: 2; stroke-dasharray: 4 4; }
+.tour-svg .reroute { fill: none; stroke: #1a93ad; stroke-width: 2.2; stroke-dasharray: 9 5; }
+.tour-svg .ah-fwd { fill: #1a93ad; }
+.tour-svg .ah-bwd { fill: #d6821e; }
+.tour-rings { display: flex; flex-wrap: wrap; gap: 1rem; justify-content: center; }
+.tour-rings > div { flex: 1 1 260px; min-width: 0; }
+
+/* Glossary terms: dashed underline, definition on hover or focus. */
+a.glossary-term { position: relative; text-decoration: none; border-bottom: 1px dashed currentColor; }
+a.glossary-term span.std-term { font-weight: inherit; }
+a.glossary-term[data-tip]:hover::after,
+a.glossary-term[data-tip]:focus-visible::after {
+  content: attr(data-tip);
+  position: absolute; left: 0; top: 100%; margin-top: 6px; z-index: 50;
+  width: max-content; max-width: 280px;
+  padding: 6px 10px; border-radius: 6px;
+  background: #1f2933; color: #f5f7fa;
+  font-size: 0.85rem; font-weight: 400; line-height: 1.4; white-space: normal;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}

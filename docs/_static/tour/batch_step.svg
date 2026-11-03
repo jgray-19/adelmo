@@ -1,0 +1,22 @@
+<svg class="tour-svg tour-flow" viewBox="-10 0 580 200" role="img" aria-label="Flowchart of one batch step: send knobs, track, compute loss and gradient, update knobs">
+  <defs><marker id="bs-a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+  <text x="150" y="24" text-anchor="middle" class="lane lane-main">MAIN PROCESS</text>
+  <text x="450" y="24" text-anchor="middle" class="lane lane-worker">EACH WORKER</text>
+  <line x1="300" y1="38" x2="300" y2="192" class="divider"/>
+
+  <rect x="50" y="48" width="200" height="44" rx="6" class="box-main"/>
+  <text x="150" y="74" text-anchor="middle">Send current knobs</text>
+  <rect x="350" y="48" width="200" height="44" rx="6" class="box-worker"/>
+  <text x="450" y="74" text-anchor="middle">Track the batch in MAD-NG</text>
+  <path d="M250,70 L346,70" class="arrow" marker-end="url(#bs-a)"/>
+  <text x="298" y="62" text-anchor="middle" class="msg">Evaluate</text>
+
+  <path d="M450,92 L450,134" class="arrow" marker-end="url(#bs-a)"/>
+
+  <rect x="350" y="138" width="200" height="44" rx="6" class="box-worker"/>
+  <text x="450" y="164" text-anchor="middle">Compute loss + gradient</text>
+  <rect x="50" y="138" width="200" height="44" rx="6" class="box-main"/>
+  <text x="150" y="164" text-anchor="middle">Sum gradients, update knobs</text>
+  <path d="M350,160 L254,160" class="arrow" marker-end="url(#bs-a)"/>
+  <text x="302" y="152" text-anchor="middle" class="msg">loss, gradient</text>
+</svg>

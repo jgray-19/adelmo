@@ -7,10 +7,13 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
+from adelmo.machine.accelerators import PSB
+from adelmo.machine.mad import GradientDescentMadInterface
+
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from aba_optimiser.mad.aba_mad_interface import AbaMadInterface
+    from adelmo.machine.mad.aba_mad_interface import AbaMadInterface
 
 
 def _get_element_attr(interface: AbaMadInterface, element_name: str, attr: str) -> float:
@@ -45,6 +48,33 @@ def test_effective_strength_matches_base_when_dknl_not_created(
         _get_effective_strength(loaded_interface, quad_name, "k1"),
         _get_element_attr(loaded_interface, quad_name, "k1"),
     )
+
+
+def test_perturbation_records_integrated_dknl_matching_readback(
+    loaded_psb_interface: AbaMadInterface,
+    seq_psb: Path,
+) -> None:
+    """The dict returned by apply_magnet_perturbations must be self-consistent.
+
+    The ``dk*l`` knob name is an *integrated* strength, so the recorded value has
+    to equal what ``get_magnet_strengths`` reads back for the same knob (which
+    returns the integrated ``dknl`` component directly). A regression here means
+    the returned "true" strengths are off by the element length.
+    """
+    del seq_psb
+    magnet_strengths, _ = loaded_psb_interface.apply_magnet_perturbations(
+        rel_error=None,
+        seed=42,
+        magnet_type="q",
+    )
+    assert magnet_strengths, "expected at least one perturbed quadrupole"
+
+    readback = loaded_psb_interface.get_magnet_strengths(list(magnet_strengths))
+    for name, recorded in magnet_strengths.items():
+        assert np.isclose(recorded, readback[name]), (
+            f"{name}: apply recorded {recorded} but get_magnet_strengths "
+            f"reads back {readback[name]}"
+        )
 
 
 @pytest.mark.parametrize(
@@ -85,89 +115,75 @@ def test_lhc_quadrupole_perturbation_modes(
         assert f"{non_table_quad}.dk1l" in magnet_strengths
 
 
-def test_sps_quadrupole_only_perturbation(
-    loaded_sps_interface: AbaMadInterface,
-    seq_sps: Path,
+def test_zero_strength_selected_magnet_is_not_perturbed(
+    loaded_psb_interface: AbaMadInterface,
+    seq_psb: Path,
 ) -> None:
-    """SPS magnet_type='q' should perturb quadrupoles but leave sextupoles/dipoles unchanged."""
-    quad_name = "QF.13010"
-    sext_name = "LSF.13205"
-    dip_name = "MBA.13030"
+    """Relative perturbations should skip selected magnets that are off."""
+    del seq_psb
+    off_quad = "BR.QFO11"
+    loaded_psb_interface.mad.loaded_sequence[off_quad].k1 = 0.0
 
-    quad_before = _get_effective_strength(loaded_sps_interface, quad_name, "k1")
-    sext_before = _get_element_attr(loaded_sps_interface, sext_name, "k2")
-    dip_before = _get_element_attr(loaded_sps_interface, dip_name, "k0")
-
-    magnet_strengths, _ = loaded_sps_interface.apply_magnet_perturbations(
+    magnet_strengths, true_strengths = loaded_psb_interface.apply_magnet_perturbations(
         rel_error=None,
         seed=42,
         magnet_type="q",
     )
 
-    quad_after = _get_effective_strength(loaded_sps_interface, quad_name, "k1")
-    sext_after = _get_element_attr(loaded_sps_interface, sext_name, "k2")
-    dip_after = _get_element_attr(loaded_sps_interface, dip_name, "k0")
-
-    assert not np.isclose(quad_after, quad_before)
-    assert np.isclose(sext_after, sext_before)
-    assert np.isclose(dip_after, dip_before)
-    assert f"{quad_name}.dk1l" in magnet_strengths
-    assert f"{sext_name}.dk2l" not in magnet_strengths
-    assert f"{dip_name}.dk0l" not in magnet_strengths
+    assert f"{off_quad}.dk1l" not in magnet_strengths
+    assert off_quad not in true_strengths
+    assert np.isclose(_get_element_dknl(loaded_psb_interface, off_quad, 1), 0.0)
 
 
-def test_sps_perturbation_sets_dknl(
-    loaded_sps_interface: AbaMadInterface,
-    seq_sps: Path,
+def test_psb_bend_and_qfo_qde_perturbation_families(
+    loaded_psb_interface: AbaMadInterface,
+    seq_psb: Path,
 ) -> None:
-    """SPS perturbation should set dknl and keep base sextupole strength."""
-    sext_name = "LSF.13205"
+    """PSB perturbations should cover ring bends and QFO/QDE quadrupoles."""
+    del seq_psb
 
-    k2_before = _get_element_attr(loaded_sps_interface, sext_name, "k2")
-    dknl_before = _get_element_dknl(loaded_sps_interface, sext_name, 2)
-
-    magnet_strengths, true_strengths = loaded_sps_interface.apply_magnet_perturbations(
-        rel_error=None,
-        seed=77,
-        magnet_type="s",
-    )
-
-    k2_after = _get_element_attr(loaded_sps_interface, sext_name, "k2")
-    dknl_after = _get_element_dknl(loaded_sps_interface, sext_name, 2)
-
-    assert np.isclose(k2_after, k2_before)
-    assert dknl_before is None or np.isclose(dknl_before, 0.0)
-    assert dknl_after is not None and not np.isclose(dknl_after, 0.0)
-    assert f"{sext_name}.dk2l" in magnet_strengths
-    assert sext_name in true_strengths
-
-
-def test_sps_perturbations_preserve_previous_dknl_components(
-    loaded_sps_interface: AbaMadInterface,
-    seq_sps: Path,
-) -> None:
-    """SPS perturbations should preserve previously written dknl components."""
-    quad_name = "QF.13010"
-    sext_name = "LSF.13205"
-
-    quad_dknl1_before = _get_element_dknl(loaded_sps_interface, quad_name, 1)
-
-    loaded_sps_interface.apply_magnet_perturbations(
+    bend_strengths, _ = loaded_psb_interface.apply_magnet_perturbations(
         rel_error=None,
         seed=42,
+        magnet_type="d",
+    )
+    quad_strengths, _ = loaded_psb_interface.apply_magnet_perturbations(
+        rel_error=None,
+        seed=24,
         magnet_type="q",
     )
-    quad_dknl1_after_q = _get_element_dknl(loaded_sps_interface, quad_name, 1)
-    assert not np.isclose(quad_dknl1_after_q, quad_dknl1_before)
 
-    loaded_sps_interface.apply_magnet_perturbations(
-        rel_error=None,
-        seed=77,
-        magnet_type="s",
+    assert "BR.BHZ11.dk0l" in bend_strengths
+    assert "BR.QFO11.dk1l" in quad_strengths
+    assert "BR.QDE1.dk1l" in quad_strengths
+    assert all(not name.startswith("BI3.BSW") for name in bend_strengths)
+
+
+def test_perturbation_preserves_deferred_optimisation_knob_link(seq_psb: Path) -> None:
+    """Perturbing a GradientDescentMadInterface must not break its dk*l knobs."""
+    iface = GradientDescentMadInterface(
+        accelerator=PSB(
+            ring=3,
+            sequence_file=seq_psb,
+            errors={"bend": {"k0"}, "quad": {"k1"}},
+        ),
+        discard_mad_output=True,
     )
+    try:
+        knob = "BR.BHZ11.dk0l"
+        magnet_strengths, _ = iface.apply_magnet_perturbations(
+            rel_error=None,
+            seed=20260811,
+            magnet_type="d",
+        )
+        knob_values = dict(zip(iface.knob_names, iface.receive_knob_values(), strict=True))
+        assert knob_values[knob] == pytest.approx(magnet_strengths[knob])
+        assert iface.get_magnet_strengths([knob])[knob] == pytest.approx(magnet_strengths[knob])
 
-    quad_dknl1_after_q_then_s = _get_element_dknl(loaded_sps_interface, quad_name, 1)
-    sext_dknl2_after_q_then_s = _get_element_dknl(loaded_sps_interface, sext_name, 2)
+        changed = 123e-6
+        iface.update_knob_values({knob: changed})
+        assert iface.get_magnet_strengths([knob])[knob] == pytest.approx(changed)
+    finally:
+        iface.close()
 
-    assert np.isclose(quad_dknl1_after_q_then_s, quad_dknl1_after_q)
-    assert not np.isclose(sext_dknl2_after_q_then_s, 0.0)
+

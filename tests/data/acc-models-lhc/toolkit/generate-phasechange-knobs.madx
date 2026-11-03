@@ -1,0 +1,41 @@
+! --------------------------------------------------------------------------------------------------
+! ---- BEAM 1 --------------------------------------------------------------------------------------
+! --------------------------------------------------------------------------------------------------
+
+ADD2EXPR, var=kqtf.a12b1, expr=-0.0022477200000*phase_change.b1;
+ADD2EXPR, var=kqtf.a23b1, expr=-0.0006109026670*phase_change.b1;
+ADD2EXPR, var=kqtf.a34b1, expr=-0.0006740726670*phase_change.b1;
+ADD2EXPR, var=kqtf.a45b1, expr=+0.0015222900000*phase_change.b1;
+ADD2EXPR, var=kqtf.a56b1, expr=+0.0011189300000*phase_change.b1;
+ADD2EXPR, var=kqtf.a67b1, expr=+0.0020387763940*phase_change.b1;
+ADD2EXPR, var=kqtf.a78b1, expr=-0.0011010306070*phase_change.b1;
+ADD2EXPR, var=kqtf.a81b1, expr=-0.0001300250000*phase_change.b1;
+ADD2EXPR, var=kqtd.a12b1, expr=-0.0001437190000*phase_change.b1;
+ADD2EXPR, var=kqtd.a23b1, expr=+0.0010619748420*phase_change.b1;
+ADD2EXPR, var=kqtd.a34b1, expr=+0.0001529048423*phase_change.b1;
+ADD2EXPR, var=kqtd.a45b1, expr=-0.0004891330000*phase_change.b1;
+ADD2EXPR, var=kqtd.a56b1, expr=+0.0008419600000*phase_change.b1;
+ADD2EXPR, var=kqtd.a67b1, expr=+0.0016072722540*phase_change.b1;
+ADD2EXPR, var=kqtd.a78b1, expr=-0.0013696167460*phase_change.b1;
+ADD2EXPR, var=kqtd.a81b1, expr=-0.0016425400000*phase_change.b1;
+
+
+! --------------------------------------------------------------------------------------------------
+! ---- BEAM 2 --------------------------------------------------------------------------------------
+! --------------------------------------------------------------------------------------------------
+ADD2EXPR, var=kqtf.a12b2, expr=-0.0015000300000*phase_change.b2;
+ADD2EXPR, var=kqtf.a23b2, expr=-0.0026080999780*phase_change.b2;
+ADD2EXPR, var=kqtf.a34b2, expr=+0.0002292920220*phase_change.b2;
+ADD2EXPR, var=kqtf.a45b2, expr=+0.0018962000000*phase_change.b2;
+ADD2EXPR, var=kqtf.a56b2, expr=+0.0027266500000*phase_change.b2;
+ADD2EXPR, var=kqtf.a67b2, expr=-0.0005254090387*phase_change.b2;
+ADD2EXPR, var=kqtf.a78b2, expr=-0.0006960890387*phase_change.b2;
+ADD2EXPR, var=kqtf.a81b2, expr= 0.0004939700000*phase_change.b2;
+ADD2EXPR, var=kqtd.a12b2, expr=-0.0006047010000*phase_change.b2;
+ADD2EXPR, var=kqtd.a23b2, expr=+0.0007281687569*phase_change.b2;
+ADD2EXPR, var=kqtd.a34b2, expr=+0.0015548136570*phase_change.b2;
+ADD2EXPR, var=kqtd.a45b2, expr=-0.0003441180000*phase_change.b2;
+ADD2EXPR, var=kqtd.a56b2, expr=+0.0002527790000*phase_change.b2;
+ADD2EXPR, var=kqtd.a67b2, expr=-0.0024345517550*phase_change.b2;
+ADD2EXPR, var=kqtd.a78b2, expr=-0.0006010707552*phase_change.b2;
+ADD2EXPR, var=kqtd.a81b2, expr=+0.0014239700000*phase_change.b2;

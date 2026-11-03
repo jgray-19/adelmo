@@ -38,4 +38,4 @@ exec, match_tunes(0.28, 0.31, 2);
 exec, coupling_knob(2);
 set, format="-.16e";
 save, sequence = LHCB2, file = 'lhcb2.seq';
-system, 'mv lhcb2.seq /afs/cern.ch/work/j/jmgray/private/sgd-magnet-tuner/src/aba_optimiser/mad/sequences';
+system, 'mv lhcb2.seq /afs/cern.ch/work/j/jmgray/private/sgd-magnet-tuner/src/adelmo/mad/sequences';
